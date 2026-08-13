@@ -32,7 +32,7 @@ function defaultDataDir() {
 
 /** Ghi `worker-identity.json` — schema PHẢI khớp CHÍNH XÁC với `WorkerIdentity.ts` (repo
  *  `aivin-service`) đọc, không thêm/bớt field tuỳ tiện ở 1 phía mà không sửa phía kia. */
-function writeWorkerIdentity(dataDir, { beEndpoint, orgId, storeId, nodeId, nodeLabel, workerToken }) {
+function writeWorkerIdentity(dataDir, { beEndpoint, orgId, storeId, storeName, nodeId, nodeLabel, workerToken, sdkGrpcEndpoint }) {
   fs.mkdirSync(dataDir, { recursive: true });
   const filePath = path.join(dataDir, 'worker-identity.json');
   const payload = {
@@ -40,9 +40,15 @@ function writeWorkerIdentity(dataDir, { beEndpoint, orgId, storeId, nodeId, node
     be_endpoint: beEndpoint,
     org_id: orgId,
     store_id: storeId,
+    store_name: storeName || '',
     node_id: nodeId,
     node_label: nodeLabel || '',
     worker_token: workerToken,
+    // Tuỳ chọn — chỉ có nếu BE cấu hình SDK_GRPC_EXTERNAL_PUBLIC_ENDPOINT (xem
+    // PluginStoreRegistryService.ts's resolveSdkGrpcPublicEndpoint). Cho phép node self-host gọi
+    // AI-call RPC (ScanAwesomeMcpList/ScanSingleMcpRepo) qua worker_token thay vì cần
+    // SDK_ENDPOINT/SDK_SECRET riêng — xem WorkerConnectClient.configureSdkTransport() phía service.
+    ...(sdkGrpcEndpoint ? { sdk_grpc_endpoint: sdkGrpcEndpoint } : {}),
     paired_at: new Date().toISOString(),
   };
   fs.writeFileSync(filePath, JSON.stringify(payload, null, 2) + '\n', { mode: 0o600 });
@@ -50,14 +56,16 @@ function writeWorkerIdentity(dataDir, { beEndpoint, orgId, storeId, nodeId, node
 }
 
 function printAttachResult(res, dataDir) {
-  const { store, node, worker_token, worker_hub_endpoint } = res.data;
+  const { store, node, worker_token, worker_hub_endpoint, sdk_grpc_endpoint } = res.data;
   const filePath = writeWorkerIdentity(dataDir, {
     beEndpoint: worker_hub_endpoint,
     orgId: store.owner_org_id,
     storeId: store.store_id,
+    storeName: store.label,
     nodeId: node.node_id,
     nodeLabel: node.label,
     workerToken: worker_token,
+    sdkGrpcEndpoint: sdk_grpc_endpoint,
   });
   console.log(chalk.green(`\n✅ Node "${node.node_id}" attached to store "${store.store_id}"`));
   console.log(chalk.gray(`   Credential written to ${filePath}`));
@@ -70,19 +78,25 @@ function printAttachResult(res, dataDir) {
 }
 
 export async function createStore(storeId, options) {
+  const interactive = process.stdout.isTTY && process.stdin.isTTY;
+
   if (!storeId) {
+    if (!interactive) throw new Error('Store id is required - pass it as an argument (non-interactive session).');
     const { answer } = await inquirer.prompt([{ type: 'input', name: 'answer', message: 'Store id (slug, e.g. phong-ban-a):' }]);
     storeId = answer;
   }
+
   let label = options.label;
-  if (!label && process.stdout.isTTY && process.stdin.isTTY) {
-    const { answer } = await inquirer.prompt([{ type: 'input', name: 'answer', message: 'Display label:', default: storeId }]);
+  if (!label && interactive) {
+    const { answer } = await inquirer.prompt([{ type: 'input', name: 'answer', message: 'Store name:', default: storeId }]);
     label = answer;
   }
 
+  const nodeLabel = options.nodeLabel || os.hostname();
+
   try {
     const res = await withSpinner(`📦 Creating store "${storeId}"`, () =>
-      axios.post(`${storeBaseUrl()}/stores`, { store_id: storeId, label, node_label: options.nodeLabel }, storeAuthHeaders()),
+      axios.post(`${storeBaseUrl()}/stores`, { store_id: storeId, label, node_label: nodeLabel }, storeAuthHeaders()),
     );
     printAttachResult(res, options.dataDir || defaultDataDir());
   } catch (error) {

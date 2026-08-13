@@ -1,6 +1,6 @@
 {
   "name": "@aivin-labs/cli",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "aivin CLI - scaffold, run, and deploy Aivin plugins built on @aivin-labs/sdk",
   "type": "module",
   "bin": {
