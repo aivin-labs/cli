@@ -373,6 +373,7 @@ export async function searchPlugins(query, options) {
   if (query) params.query = query;
   if (options.workspace) params.workspace_id = options.workspace;
   if (options.mcp) params.mcp_server_id = options.mcp;
+  if (options.store) params.store_id = options.store;
   if (options.limit) params.limit = options.limit;
 
   let response;
@@ -388,7 +389,8 @@ export async function searchPlugins(query, options) {
   const data = response.data;
   const results = Array.isArray(data) ? data : data?.items || [];
   // --mcp is an exact-id lookup (no free-text query) - describe results by server id instead.
-  const describedAs = options.mcp ? `MCP server "${options.mcp}"` : `"${query}"`;
+  const describedAs = (options.mcp ? `MCP server "${options.mcp}"` : `"${query}"`)
+    + (options.store ? ` in store "${options.store}"` : '');
 
   if (results.length === 0) {
     console.log(chalk.yellow(`No plugins found matching ${describedAs}.`));
@@ -414,6 +416,109 @@ export async function searchPlugins(query, options) {
       `Call one from your own plugin with: import { call } from '@aivin-labs/sdk'; await call('<plugin_id>', params).`,
     ),
   );
+}
+
+/**
+ * `aivin plugin info <id>` - detail view for one already-known plugin id, without going through
+ * `plugin search`'s free-text ranking first. Useful when debugging a specific plugin (e.g. one
+ * seen in `plugin search --mcp <server>`'s listing, or copied from the platform) and you just want
+ * its input/output schema and setup requirements again.
+ *
+ * There's no dedicated GET /plugins/:id on the backend, so this reuses /plugins/search with the id
+ * itself as the query and picks the exact `id` match out of the ranked results - the same lookup
+ * `plugin search` already does, just narrowed down for you. Falls back to showing the closest
+ * matches (with a clear "no exact match" note) if the id typo'd or the plugin isn't visible to you.
+ */
+export async function showPluginInfo(id, options) {
+  const serverUrl = process.env.AIVIN_BASE_URL || 'https://api.aivin.cloud';
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+    console.log(chalk.yellow('⚠️  API_KEY not set - run `aivin login` first'));
+  }
+  const authHeaders = { headers: { Authorization: `Bearer ${apiKey || 'dev-token'}` } };
+
+  const params = { query: id, limit: options.limit || 10 };
+  if (options.workspace) params.workspace_id = options.workspace;
+
+  let response;
+  try {
+    response = await axios.get(`${serverUrl}/plugins/search`, { ...authHeaders, params });
+  } catch (error) {
+    const message = error.response?.data?.message || error.message || error.code || 'Unknown error';
+    throw new Error(`Lookup failed: ${message}`, { cause: error });
+  }
+
+  const data = response.data;
+  const results = Array.isArray(data) ? data : data?.items || [];
+  const exact = results.find((p) => p.id === id);
+
+  if (exact) {
+    console.log(formatPluginDetail(exact));
+    return;
+  }
+
+  if (results.length === 0) {
+    console.log(chalk.yellow(`No plugin found for id "${id}".`));
+    return;
+  }
+
+  console.log(chalk.yellow(`No exact match for "${id}" - closest result(s):\n`));
+  if (process.stdout.isTTY && process.stdin.isTTY && !options.plain) {
+    await browseResults(results, `Closest to "${id}":\n`, formatPluginListLine, formatPluginDetail);
+    return;
+  }
+  for (const plugin of results) {
+    console.log(chalk.bold(plugin.name || plugin.id) + chalk.gray(`  (${plugin.id})`));
+  }
+}
+
+/**
+ * `aivin plugin ask "<mission>"` - the one-shot "just simulate the agent" mode: given a
+ * plain-language mission, it searches the plugin ecosystem the same relevance-ranked way the
+ * platform's own agent does to auto-select a plugin, picks the top match, and immediately triggers
+ * it with that same mission auto-mapped onto the input schema (`plugin trigger -a` under the hood).
+ * Where `plugin search` + `plugin trigger --id <id> -a "..."` is the two-step "pick, then run" flow,
+ * `ask` collapses both into what an agent actually does at execution time - no manual id copy/paste.
+ *
+ * `--top <n>` (default 5) controls how many candidates are fetched so the runner-up(s) can be
+ * printed for context/debugging when the auto-pick looks wrong; only the #1 match is ever run.
+ */
+export async function askPlugin(mission, options) {
+  mission = await requireArg(mission, { prompt: 'What do you want done?', usage: 'Usage: aivin plugin ask "<mission>"' });
+
+  const serverUrl = process.env.AIVIN_BASE_URL || 'https://api.aivin.cloud';
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+    console.log(chalk.yellow('⚠️  API_KEY not set - run `aivin login` first'));
+  }
+  const authHeaders = { headers: { Authorization: `Bearer ${apiKey || 'dev-token'}` } };
+
+  const params = { query: mission, limit: options.top || 5 };
+  if (options.workspace) params.workspace_id = options.workspace;
+
+  let response;
+  try {
+    response = await axios.get(`${serverUrl}/plugins/search`, { ...authHeaders, params });
+  } catch (error) {
+    const message = error.response?.data?.message || error.message || error.code || 'Unknown error';
+    throw new Error(`Search failed: ${message}`, { cause: error });
+  }
+
+  const data = response.data;
+  const results = Array.isArray(data) ? data : data?.items || [];
+  if (results.length === 0) {
+    throw new Error(`No plugin matches "${mission}". Try \`aivin plugin search\` with different wording, or \`aivin plugin make\` to write one.`);
+  }
+
+  const chosen = results[0];
+  const matchLabel = typeof chosen._similarity === 'number' ? ` (${(chosen._similarity * 100).toFixed(0)}% match)` : '';
+  console.log(chalk.blue(`🤖 Auto-selected: ${chalk.bold(chosen.name || chosen.id)}${matchLabel}`) + chalk.gray(`  (${chosen.id})`));
+  if (results.length > 1) {
+    console.log(chalk.gray(`   runner-up(s): ${results.slice(1).map((p) => p.name || p.id).join(', ')}`));
+  }
+  console.log();
+
+  await triggerPlugin(mission, options.input, { ...options, auto: mission, id: chosen.id });
 }
 
 export function formatPluginListLine(plugin, isSelected) {
@@ -466,8 +571,8 @@ export function formatPluginDetail(plugin) {
   return lines.join('\n');
 }
 
-// Simple raw-keypress list/detail browser: ↑/↓ to move, space/enter to open an item's detail
-// view, esc/backspace to go back to the listing, q/ctrl+c to exit. No extra deps - built on
+// Simple raw-keypress list/detail browser: ↑/↓ to move, space/enter/→ to open an item's detail
+// view, esc/backspace/← to go back to the listing, q/ctrl+c to exit. No extra deps - built on
 // node's own readline keypress events since inquirer's prompts don't support this drill-down.
 // Generic over what's being browsed (plugins, connectors, ...) via the format callbacks.
 export function browseResults(results, headerText, formatLine, formatDetail) {
@@ -486,10 +591,10 @@ export function browseResults(results, headerText, formatLine, formatDetail) {
         for (let i = 0; i < results.length; i++) {
           console.log(formatLine(results[i], i === index));
         }
-        console.log(chalk.gray('\n↑/↓ move   space/enter view details   q quit'));
+        console.log(chalk.gray('\n↑/↓ move   →/space/enter view details   q quit'));
       } else {
         console.log(formatDetail(results[index]));
-        console.log(chalk.gray('\nesc/backspace back   q quit'));
+        console.log(chalk.gray('\n←/esc/backspace back   q quit'));
       }
     };
 
@@ -506,7 +611,7 @@ export function browseResults(results, headerText, formatLine, formatDetail) {
         } else if (key.name === 'down') {
           index = (index + 1) % results.length;
           render();
-        } else if (key.name === 'return' || key.name === 'space' || str === ' ') {
+        } else if (key.name === 'return' || key.name === 'space' || key.name === 'right' || str === ' ') {
           mode = 'detail';
           render();
         } else if (key.name === 'q' || key.name === 'escape') {
@@ -514,7 +619,7 @@ export function browseResults(results, headerText, formatLine, formatDetail) {
           resolve();
         }
       } else {
-        if (key.name === 'escape' || key.name === 'backspace') {
+        if (key.name === 'escape' || key.name === 'backspace' || key.name === 'left') {
           mode = 'list';
           render();
         } else if (key.name === 'q') {

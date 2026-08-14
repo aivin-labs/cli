@@ -241,22 +241,33 @@ input from `manifest.json`'s `input` schema (`POST /code/generate-sample-data`),
 for real (`POST /plugins/execute`) against a workspace, and writes a pass/fail report to
 `.test/<timestamp>.json` in the project directory (also excluded from future deploy uploads).
 
-**MCP proxy entries are skipped** - there's no generic "sample input" that makes sense for a tool
-schema an external MCP server defines itself, so `aivin test` deploys them but runs no automated
-invoke/report. Use `aivin plugin trigger --id <pluginId> -a "<prompt>"` (or the interactive "Test
-now?" step `aivin mcp <url>` offers right after deploy) to test one by hand instead.
+**MCP proxy entries are skipped by default** - there's no generic "sample input" that makes sense
+for a tool schema an external MCP server defines itself, so `aivin test` deploys them but runs no
+automated invoke/report unless you opt in with `--verify-proxy`. Use
+`aivin plugin trigger --id <pluginId> -a "<prompt>"` (or the interactive "Test now?" step
+`aivin mcp <url>` offers right after deploy) to test one by hand instead.
 
 ```
 Options:
   --workspace <id>  Workspace id to run the smoke test against (default: auto-picks your first one)
   --no-smoke-test   Only deploy - skip the generated-input invoke test and report
+  --verify-proxy    Also invoke MCP proxy entries for real (empty input) instead of skipping
+                    them - only use if you know the underlying tool(s) have no meaningful side
+                    effects
 ```
 
 ```bash
 aivin test                        # deploy + smoke-test + report
 aivin test --workspace <id>        # smoke-test against a specific workspace
 aivin test --no-smoke-test         # deploy only, same as before this flag existed
+aivin test --verify-proxy          # also invoke proxy entries with empty input, for real
 ```
+
+`--verify-proxy` sends `arguments: {}` (not AI-generated - proxy's `input` schema is the generic
+`{ data: object }` passthrough, so there's nothing meaningful to infer a "realistic" sample from)
+straight to `/plugins/execute`. This really calls the external MCP server - only use it if the
+tool(s) involved are safe to invoke automatically (idempotent/read-only), since a repeated `aivin
+test` run means a repeated real call every time.
 
 ## `aivin plugin make <description>`
 
@@ -418,18 +429,87 @@ Options:
 
 ```
 Options:
-  --workspace <id>  Restrict to plugins visible in this workspace (default: your whole org)
-  --limit <n>       Max results to show
-  --plain           Print a flat list instead of the interactive browser (for scripts/CI)
+  --workspace <id>   Restrict to plugins visible in this workspace (default: your whole org)
+  --mcp <server_id>  List every tool/resource/prompt plugin generated from one MCP server, instead of a text search
+  --store <store_id> Restrict to plugins hosted on one self-hosted plugin store (id from `aivin pluginstore ls`) - combines with the text query/--mcp
+  --limit <n>        Max results to show
+  --plain            Print a flat list instead of the interactive browser (for scripts/CI)
 ```
 
 In a real terminal, results open in an interactive browser: `↑`/`↓` to move between matches,
-`space`/`enter` to open a plugin's detail view (full description, version, input/output schema),
-`esc`/`backspace` to go back to the list, `q` to quit. Non-TTY contexts (scripts, CI, piped
-output) or `--plain` fall back to a flat printed list.
+`→`/`space`/`enter` to open a plugin's detail view (full description, version, input/output
+schema), `←`/`esc`/`backspace` to go back to the list, `q` to quit. Non-TTY contexts (scripts, CI,
+piped output) or `--plain` fall back to a flat printed list.
 
 Call one from your own plugin with `import { call } from '@aivin-labs/sdk'` then
 `await call('<plugin_id>', params)`.
+
+## `aivin plugin info <id>`
+
+Detail view for **one already-known plugin id**, without going through `plugin search`'s free-text
+ranking first - useful when debugging a specific plugin you already have the id for (copied from
+`plugin search --mcp <server_id>`'s listing, from the platform, etc.).
+
+```bash
+aivin plugin info modelcontextprotocol-servers-src-everything-read_file
+```
+
+Options:
+
+```
+Options:
+  --workspace <id>  Restrict to plugins visible in this workspace (default: your whole org)
+  --plain           Print flat instead of the interactive browser, if falling back to
+                     closest-match results
+```
+
+There's no dedicated `GET /plugins/:id` on the backend, so this reuses `/plugins/search` with the
+id itself as the query and picks the exact `id` match out of the ranked results. If nothing matches
+exactly (typo'd id, or a plugin not visible to you), it prints "no exact match" and falls back to
+the same interactive browser over the closest results instead of failing outright.
+
+## `aivin plugin ask [mission]`
+
+One-shot "just simulate the agent" mode: give it a plain-language mission and it does what a
+running agent actually does at execution time - searches the plugin ecosystem the same
+relevance-ranked way (`plugin search`'s lookup), picks the **top match**, and immediately triggers
+it with that same mission auto-mapped onto the input schema (`plugin trigger -a` under the hood).
+Where `plugin search` + `plugin trigger --id <id> -a "..."` is a manual two-step "pick, then run"
+flow, `ask` collapses both into a single command - no copying an id between them.
+
+```bash
+aivin plugin ask "send a slack message to #eng saying the deploy is done"
+```
+
+```
+🤖 Auto-selected: Slack Notify (87% match)  (slack-notify-abc123)
+   runner-up(s): Slack Post Message, Discord Notify
+
+🚀 Triggering Slack Notify...
+...
+```
+
+Options:
+
+```
+Options:
+  --top <n>          How many candidates to consider/print as runner-up context
+                      (default 5) - only the top match is ever run
+  -i, --input <json> Force specific fields (as JSON) alongside the auto-mapped
+                      ones - explicit fields win
+  --workspace <id>    Workspace id to search/run against (default: auto-picks
+                      your first one)
+  --agent <id>        Agent id to run as, if the plugin needs one for
+                      HIL/confirm behavior to be accurate
+  --watch-logs        Also stream the chosen plugin's own live console output inline
+  --save              Write this run's result to .test/trigger/<ts>.json
+  --compare <file>    Diff this run against a previously --save'd file
+```
+
+If the auto-pick looks wrong, check the printed runner-up(s) and fall back to the manual flow -
+`aivin plugin search "<mission>"` to browse candidates yourself, then
+`aivin plugin trigger --id <chosen-id> -a "<mission>"` to run that specific one instead. `ask`
+throws (no plugin executed) if the search comes back empty, rather than guessing.
 
 ## `aivin plugin trigger [mission] [input]`
 
@@ -653,22 +733,51 @@ finds, interactively:
 
 1. **Scan** (`POST /plugins/scan-mcp`) - `<url>` can be a GitHub/GitLab repo, an npm/Smithery
    package, or a live MCP server URL. Reads the repo/README or handshakes the live server directly.
+   Only scan URLs you actually trust - this step connects to (and, for a live handshake, effectively
+   runs) whatever's at that address to introspect it, same trust model as installing a dependency
+   from source. Bounded to 60s (scanning a live server can legitimately take longer than the other
+   steps, which is why this one gets more headroom) so an unresponsive server fails with a clear
+   error instead of hanging the CLI indefinitely. Right after a successful scan, this also runs the
+   URL itself as a free-text `plugin search` and prints anything that comes back as an FYI ("might
+   already be from this server, double-check before converting again") - a soft heuristic, not a
+   real duplicate check (there's no reliable way to match "same MCP server" client-side), so it
+   never blocks the flow either way.
 2. **Select** - checkbox prompt lists every tool/resource/prompt found (all checked by default);
    space to toggle, enter to continue with only what you actually want as plugins.
-3. **Build manifests** (`POST /plugins/build-mcp-manifests`) - one `PluginManifest` per selected
-   item, generated server-side (not typed by hand like `aivin mcp create` requires).
+3. **Build manifests** (`POST /plugins/build-mcp-manifests`, 30s timeout) - one `PluginManifest` per
+   selected item, generated server-side (not typed by hand like `aivin mcp create` requires).
 4. **Edit** (optional) - confirm prompt offers to rename/redescribe any of the generated plugins
-   before anything is deployed.
-5. **Deploy** (`POST /plugins/deploy`) - always org-scoped first, regardless of the visibility flag
-   below (there's no narrower per-workspace scope for plugins today).
-6. **Publish** (only with `--publish`) - submits each deployed plugin for community review
-   (`POST /plugins/store/submit`) - the backend re-verifies each one LIVE against the real MCP
-   server before it reaches the review queue, not just whatever got deployed (see the backend's own
-   `marketplace-catalog.md` docs, §"Tự submit plugin MCP lên store", for the full gate).
-7. Prints ready-to-run `aivin plugin trigger --id <id> -a "..."` / `aivin plugin logs <id>` for
+   before anything is deployed. A second, separate optional prompt offers to attach one connector
+   (existing or newly registered) as every generated manifest's `connection_id` in one go - see
+   [`aivin mcp create`](#aivin-mcp-create-name)'s connector section above for what that buys you.
+5. **Confirm** - since the checkbox in step 2 defaults to everything checked, and there's no
+   `plugin delete`/`undeploy` command anywhere in this CLI to walk a deploy back, this step asks for
+   an explicit yes ("Deploy N plugin(s) to your org? This can't be undone from the CLI.", default
+   **No**) before anything actually goes out. In a non-TTY context (scripts/CI) this step is skipped
+   entirely - the same as everywhere else in the CLI, only a real terminal gets a confirmation prompt.
+6. **Deploy** (`POST /plugins/deploy`, 60s timeout) - always org-scoped first, regardless of the
+   visibility flag below (there's no narrower per-workspace scope for plugins today). This is the
+   point of no return: deployed plugins are visible to your whole org from here on.
+7. **Publish** (only with `--publish`, 30s timeout per submission) - submits each deployed plugin for
+   community review (`POST /plugins/store/submit`) - the backend re-verifies each one LIVE against
+   the real MCP server before it reaches the review queue, not just whatever got deployed (see the
+   backend's own `marketplace-catalog.md` docs, §"Tự submit plugin MCP lên store", for the full
+   gate). A submission can't be withdrawn from this CLI either once sent.
+
+   **Blocked, not just warned**: a manifest whose `proxy_config.auth_secret_key` is set is skipped
+   entirely at this step (never submitted) instead of being sent as-is. `auth_secret_key` is an
+   admin-level credential meant to be shared by everyone *within the org that deployed it* -
+   publishing means other orgs can call this same plugin, and there is no confirmed backend step
+   that strips or reissues that credential per installing org, so submitting it unchanged would let
+   another org's calls silently resolve to (and spend/exhaust/expose) your org's credential. Rebuild
+   the plugin with a connector-bound environment variable instead (`aivin mcp create`'s interactive
+   auth setup, "one or more environment variables" → bind to a connector) - that path resolves
+   credentials per the *calling* org/user, not off the shared manifest, and is safe to publish.
+8. Prints ready-to-run `aivin plugin trigger --id <id> -a "..."` / `aivin plugin logs <id>` for
    every plugin deployed, and offers to run one right now, interactively - see
    [`aivin test`](#aivin-test) above for why this exists (its automated smoke test skips proxy
-   plugins entirely).
+   plugins entirely, so this interactive step is currently the *only* built-in way to verify a
+   freshly-converted MCP plugin actually works before walking away from the terminal).
 
 ```
 Options:
@@ -701,15 +810,29 @@ Options:
   --resource-mime-type <mime>  MIME type of the resource (kind=resource)
   --prompt-name <name>         MCP prompt name (kind=prompt)
   --description <description>  Plugin description
-  --auth-secret-key <key>      Name of the workspace secret to use as the Bearer
-                               token, if the MCP server needs auth
+  --auth-secret-key <key>      Name of the workspace secret to use as the
+                               token/credential, if the MCP server needs auth
+  --auth-type <type>           auth_type value to send (default: "bearer" when
+                               --auth-secret-key is set) - check your backend
+                               for which values it supports
+  --connector <id>             Existing connector id for this plugin's connection_id
+                               (readiness/"needs login" display only - see below)
 ```
 
-- No `--command`/`--url` → interactive prompts for everything.
-- `--command`/`--url` given → fully non-interactive/scriptable. `--transport` and `--kind` are
+- Fully interactive → run with no flags at all: prompts for everything, in order.
+- Fully flagged → fully non-interactive/scriptable, no prompts. `--transport` and `--kind` are
   inferred from whichever flags you pass (`--command` implies stdio, `--url` implies sse;
   `--tool-name`/`--resource-uri`/`--prompt-name` each imply their own `--kind`) - spell them out
   explicitly only if you're scripting this without any of those (unusual).
+- **Partially flagged, real terminal** → prompts for exactly what's still missing, not everything -
+  e.g. `aivin mcp create foo --transport stdio` alone still prompts for `--command` instead of
+  failing with a generic validation error.
+- Passing more than one kind-identifying flag at once (e.g. both `--tool-name` and
+  `--resource-uri`) without an explicit `--kind` prints a warning and picks one by priority
+  (tool → resource → prompt) rather than silently dropping the other with no explanation.
+- Whatever's still missing once prompting is done (or immediately, outside a real terminal) fails
+  fast with the exact flag(s) needed, e.g. `Missing required field(s): --command <command>,
+  --tool-name <name>`.
 
 ```bash
 # stdio (local command)
@@ -723,6 +846,46 @@ aivin mcp create doc-search --url https://example.com/mcp \
 
 See [MANIFEST.md#mcp-proxy-plugins](https://github.com/aivin-labs/AIVIN-SDK/blob/main/docs/MANIFEST.md#mcp-proxy-plugins) for the full `proxy_config`
 field reference.
+
+**Auth for a `mcp create` plugin, interactively**: leave `--auth-secret-key` off in a real terminal
+and you're asked "Does this MCP server need auth?" with three choices:
+
+- **No auth needed.**
+- **One shared token for everyone** (typical for a remote/sse server) - the classic bearer-token
+  case, sent as `proxy_config.auth_secret_key`/`auth_type`. One value, shared by the whole org.
+- **One or more environment variables** (typical for a local/stdio server) - drops into a loop
+  ("Variable 1 name:", Enter on blank to stop) where each declared name is either left for **every
+  workspace to configure on its own** later (no OAuth - the platform's own "configure this plugin"
+  screen collects the value per workspace) or bound to a **connector** (search-as-you-type over
+  `aivin connector search`'s same endpoint, list your org's if the query is left blank, or register
+  a brand new one right there - same flow as `aivin connector register`, no separate command
+  needed) for automatic per-user/per-workspace OAuth resolution.
+
+This maps onto `manifest.initable`/`manifest.initial[varName].connection_id` - the fields the
+backend's plugin execution path (`PluginProxyService.resolveMcpEnv`) actually reads to merge
+credentials at call time, in increasing priority: the shared `auth_secret_key` first, then each
+workspace's own configured value, then OAuth auto-fill for any field bound to a connector. This is
+genuinely three tiers merged per call, not three alternatives to choose between - declaring some
+fields as connector-bound and others as "workspace configures it" on the very same plugin is normal
+if the MCP server needs more than one kind of credential.
+
+Only declarable interactively - like `aivin connector register`, there's no non-interactive/scripted
+form for the env-var loop (declaring several named fields isn't something to automate blindly).
+
+**What `--connector <id>` actually does (and doesn't)**: it sets the manifest's top-level
+`connection_id` directly, without going through the loop above. That field only drives the
+"requires logging in to a connector" readiness badge (see `plugin info`/`plugin search`'s detail
+view) - it is **not** read by the MCP execution path at all, so it injects nothing into the running
+MCP server by itself. If you use the interactive env-var loop and bind a field to a connector, the
+top-level `connection_id` gets set *for* you automatically (derived from whichever connector the
+declared field(s) actually use), for consistency with that badge - you shouldn't normally need
+`--connector` directly unless you're deliberately setting the readiness badge independently of any
+declared env var.
+
+`aivin mcp <url>` (below) offers a simpler, single-connector version of this same idea - one prompt
+to attach a connector to every generated manifest at once, right before the final deploy
+confirmation, for when a whole MCP server shares one auth scheme rather than needing individual
+per-tool env-var declarations.
 
 ## `aivin login`
 

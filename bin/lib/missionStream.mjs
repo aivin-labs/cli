@@ -434,7 +434,7 @@ export function streamBrowserMissionLog(serverUrl, apiKey, threadId, tenantClien
       }
     });
 
-    console.log(chalk.gray(`📡 Watching live progress for ${threadId}... (Ctrl+C to stop watching - the run keeps going either way)\n`));
+    console.log(chalk.gray(`📡 Watching live progress for ${threadId}... (Ctrl+C to stop and request cancellation)\n`));
     bumpIdleTimer();
   });
 }

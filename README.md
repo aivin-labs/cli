@@ -141,6 +141,8 @@ examples, and behavior notes for each one.
 | `aivin deploy` | Deploy the current plugin to your org |
 | `aivin test` | Deploy to a non-production instance, then smoke-test it and save a report |
 | `aivin plugin search <query>` | Search the platform's plugin ecosystem for something to reuse |
+| `aivin plugin info <id>` | Show one plugin's detail directly by id, no search query needed |
+| `aivin plugin ask [mission]` | One-shot: auto-pick the best-matching plugin for a mission and trigger it, like an agent would |
 | `aivin plugin make <description>` | AI-generate `src/main.ts` from a natural-language description |
 | `aivin plugin convert [hint]` | Turn an existing project in the current directory into a plugin |
 | `aivin plugin trigger [mission] [input]` | Invoke a deployed plugin for real and print the result |

@@ -6,6 +6,7 @@ import {
   validateMcpProxyConfig,
   buildDeploymentPayload,
   buildMcpManifest,
+  parseMcpArgs,
 } from '../bin/cli.mjs';
 
 test('validatePluginConfig accepts a well-formed config', () => {
@@ -121,4 +122,93 @@ test('buildMcpManifest produces a valid stdio+tool proxy config with undefined f
   assert.deepEqual(manifest.proxy_config.mcp_args, ['-y', 'some-mcp-server']);
   assert.equal(manifest.proxy_config.mcp_url, undefined);
   assert.equal(validatePluginConfig(manifest).valid, true);
+});
+
+test('buildMcpManifest strips an empty resourceMimeType instead of writing ""', () => {
+  const manifest = buildMcpManifest('my-plugin', 'desc', {
+    transport: 'sse',
+    url: 'https://example.com/mcp',
+    kind: 'resource',
+    resourceUri: 'file:///a.txt',
+    resourceMimeType: '',
+  });
+  // The key stays present with an `undefined` value (that's how the other stripped fields here
+  // work too) - what actually matters is JSON.stringify drops it, since that's what ends up on
+  // disk/over the wire.
+  assert.equal(manifest.proxy_config.mcp_resource_mime_type, undefined);
+  assert.ok(!('mcp_resource_mime_type' in JSON.parse(JSON.stringify(manifest.proxy_config))));
+});
+
+test('buildMcpManifest defaults auth_type to bearer, or forwards an explicit --auth-type', () => {
+  const defaulted = buildMcpManifest('my-plugin', 'desc', {
+    transport: 'stdio', command: 'npx', kind: 'tool', toolName: 'search', authSecretKey: 'my-secret',
+  });
+  assert.equal(defaulted.proxy_config.auth_type, 'bearer');
+
+  const overridden = buildMcpManifest('my-plugin', 'desc', {
+    transport: 'stdio', command: 'npx', kind: 'tool', toolName: 'search', authSecretKey: 'my-secret', authType: 'api_key',
+  });
+  assert.equal(overridden.proxy_config.auth_type, 'api_key');
+});
+
+test('buildMcpManifest sets connection_id at the top level, not inside proxy_config', () => {
+  const manifest = buildMcpManifest('my-plugin', 'desc', {
+    transport: 'stdio', command: 'npx', kind: 'tool', toolName: 'search', connectorId: 'slack-conn',
+  });
+  assert.equal(manifest.connection_id, 'slack-conn');
+  assert.ok(!('connection_id' in manifest.proxy_config));
+});
+
+test('buildMcpManifest omits connection_id entirely when no connector was chosen', () => {
+  const manifest = buildMcpManifest('my-plugin', 'desc', {
+    transport: 'stdio', command: 'npx', kind: 'tool', toolName: 'search',
+  });
+  assert.ok(!('connection_id' in manifest));
+});
+
+test('buildMcpManifest turns envFields into initable + per-field initial.connection_id (the fields PluginProxyService actually reads)', () => {
+  const manifest = buildMcpManifest('my-plugin', 'desc', {
+    transport: 'stdio', command: 'npx', kind: 'tool', toolName: 'search',
+    envFields: [
+      { name: 'GITHUB_TOKEN', connectorId: 'github-oauth' },
+      { name: 'GITHUB_ORG' }, // no connector - workspace fills this in later
+    ],
+  });
+  assert.deepEqual(manifest.initable, ['GITHUB_TOKEN', 'GITHUB_ORG']);
+  assert.deepEqual(manifest.initial.GITHUB_TOKEN, { source: 'static', connection_id: 'github-oauth' });
+  assert.deepEqual(manifest.initial.GITHUB_ORG, { source: 'static' });
+  // Derived from the (single) connector actually used by a field - not something set independently.
+  assert.equal(manifest.connection_id, 'github-oauth');
+});
+
+test('buildMcpManifest picks the first connector (sorted) as top-level connection_id when envFields use more than one', () => {
+  const manifest = buildMcpManifest('my-plugin', 'desc', {
+    transport: 'stdio', command: 'npx', kind: 'tool', toolName: 'search',
+    envFields: [
+      { name: 'SLACK_TOKEN', connectorId: 'slack-oauth' },
+      { name: 'GITHUB_TOKEN', connectorId: 'github-oauth' },
+    ],
+  });
+  assert.equal(manifest.connection_id, 'github-oauth'); // 'github-oauth' < 'slack-oauth'
+});
+
+test('buildMcpManifest omits initable/initial entirely when there are no envFields', () => {
+  const manifest = buildMcpManifest('my-plugin', 'desc', {
+    transport: 'stdio', command: 'npx', kind: 'tool', toolName: 'search',
+  });
+  assert.ok(!('initable' in manifest));
+  assert.ok(!('initial' in manifest));
+});
+
+test('parseMcpArgs splits on whitespace and respects quoted values with spaces', () => {
+  assert.deepEqual(parseMcpArgs('-y some-mcp-server'), ['-y', 'some-mcp-server']);
+  assert.deepEqual(parseMcpArgs('--path "C:\\Program Files\\mcp"'), ['--path', 'C:\\Program Files\\mcp']);
+});
+
+test('parseMcpArgs unescapes \\" and \\\\ inside a quoted value', () => {
+  assert.deepEqual(parseMcpArgs('"say \\"hi\\""'), ['say "hi"']);
+});
+
+test('parseMcpArgs throws on an unterminated quote', () => {
+  assert.throws(() => parseMcpArgs('--path "unterminated'), /Unterminated/);
 });

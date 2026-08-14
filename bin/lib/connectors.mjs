@@ -210,6 +210,7 @@ export async function registerConnector() {
     );
     console.log(chalk.green(`\n✅ Registered connector "${res.data.connector.id}"`));
     console.log(chalk.gray(`   Reference it from a plugin manifest's connection_id: "${res.data.connector.id}"`));
+    return res.data.connector;
   } catch (error) {
     const message = error.response?.data?.message?.message || error.response?.data?.message || error.message;
     throw new Error(`Register failed: ${message}`, { cause: error });

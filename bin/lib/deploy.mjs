@@ -147,12 +147,50 @@ export async function smokeTestEntry(serverUrl, authHeaders, entry, workspaceId)
 }
 
 /**
+ * Invokes a proxy entry with empty input - `--verify-proxy` opt-in only counterpart to
+ * `smokeTestEntry`. Unlike code plugins, there's no AI-generated sample input to fall back on (a
+ * proxy's `input` schema is the generic `{ data: object }` passthrough - `generate-sample-data`
+ * has nothing meaningful to infer from that), so this sends an empty `arguments: {}` instead:
+ * enough to prove the MCP server is reachable and the tool/resource/prompt name resolves, without
+ * pretending to know what a "realistic" call looks like for an arbitrary external server.
+ */
+export async function smokeTestProxyEntry(serverUrl, authHeaders, entry, workspaceId) {
+  const result = { plugin_id: entry.id, name: entry.name, func: entry.func || undefined };
+
+  const start = Date.now();
+  try {
+    const execRes = await axios.post(
+      `${serverUrl}/plugins/execute`,
+      { plugin_id: entry.id, arguments: {}, workspace_id: workspaceId, purpose: 'aivin test --verify-proxy - automated smoke test' },
+      authHeaders,
+    );
+    result.duration_ms = Date.now() - start;
+    result.response = execRes.data;
+    const status = String(execRes.data?.status || '').toLowerCase();
+    result.passed = ['success', 'waiting', 'needs_auth', 'hil_timeout'].includes(status) || execRes.data?.status === undefined;
+  } catch (error) {
+    result.duration_ms = Date.now() - start;
+    result.passed = false;
+    result.error = error.response?.data?.message || error.message;
+  }
+  return result;
+}
+
+/**
  * Runs `smokeTestEntry` for every non-proxy entry and writes a JSON report to `.test/` in the
  * current project - one file per `aivin test` run, so you can diff/compare across runs.
+ *
+ * Proxy entries are skipped by default - calling an arbitrary external MCP server automatically,
+ * with no way to know whether that call is safe to repeat (an email-sending tool isn't idempotent
+ * the way a read-only one is), isn't something to do without the developer explicitly asking for
+ * it. `verifyProxy: true` (`aivin test --verify-proxy`) opts into `smokeTestProxyEntry` for those
+ * entries instead of skipping them - only pass it if you know what the underlying tool(s) do.
  */
-export async function runSmokeTest({ currentDir, serverUrl, apiKey, entries, isProxyPlugin, workspaceOverride }) {
-  if (isProxyPlugin) {
-    console.log(chalk.gray('   Proxy plugin - no generic smoke test to run (calls an external system, not your code).'));
+export async function runSmokeTest({ currentDir, serverUrl, apiKey, entries, isProxyPlugin, workspaceOverride, verifyProxy }) {
+  const hasProxyEntries = entries.some((e) => e.proxy_config);
+
+  if (isProxyPlugin && !verifyProxy) {
+    console.log(chalk.gray('   Proxy plugin - no generic smoke test to run (calls an external system, not your code). Pass --verify-proxy to invoke it for real instead.'));
     return;
   }
 
@@ -175,6 +213,9 @@ export async function runSmokeTest({ currentDir, serverUrl, apiKey, entries, isP
   }
 
   console.log(chalk.blue('🧪 Running smoke test (generated input, real invoke)...'));
+  if (hasProxyEntries && verifyProxy) {
+    console.log(chalk.yellow('⚠️  --verify-proxy: invoking the real external MCP server(s) below with empty input - only use this if you know calling them has no meaningful side effects.'));
+  }
   // Give the container a moment to finish binding its gRPC server after the build/up completed.
   await new Promise((resolve) => setTimeout(resolve, 3000));
 
@@ -182,10 +223,17 @@ export async function runSmokeTest({ currentDir, serverUrl, apiKey, entries, isP
   for (const entry of entries) {
     // A mixed multi-function batch can have some proxy entries and some real-code entries (see
     // buildDeploymentPayload's doc comment) - the batch-level `isProxyPlugin` check above only
-    // catches the all-proxy case, so skip proxy entries individually here too: they call an
-    // external system, not your code, same reasoning as the early-return above.
+    // catches the all-proxy case, so every proxy entry is handled here individually too: they call
+    // an external system, not your code, same reasoning as the early-return above.
     if (entry.proxy_config) {
-      console.log(chalk.gray(`   ${entry.name} - proxy plugin, no generic smoke test to run`));
+      if (!verifyProxy) {
+        console.log(chalk.gray(`   ${entry.name} - proxy plugin, no generic smoke test to run`));
+        continue;
+      }
+      const proxyResult = await smokeTestProxyEntry(serverUrl, authHeaders, entry, workspaceId);
+      results.push(proxyResult);
+      const proxyIcon = proxyResult.passed ? chalk.green('✅') : chalk.red('❌');
+      console.log(`   ${proxyIcon} ${entry.name} (proxy) - ${proxyResult.passed ? `passed (${proxyResult.duration_ms}ms)` : `failed: ${proxyResult.error || 'unexpected status'}`}`);
       continue;
     }
     const result = await smokeTestEntry(serverUrl, authHeaders, entry, workspaceId);
@@ -211,7 +259,7 @@ export async function runSmokeTest({ currentDir, serverUrl, apiKey, entries, isP
   }
 }
 
-export async function deployPlugin({ endpointPath, label, smokeTest, workspaceOverride }) {
+export async function deployPlugin({ endpointPath, label, smokeTest, workspaceOverride, verifyProxy }) {
   console.log(chalk.blue(`🚀 ${label}...`));
 
   const currentDir = process.cwd();
@@ -325,7 +373,7 @@ export async function deployPlugin({ endpointPath, label, smokeTest, workspaceOv
     }
 
     if (smokeTest) {
-      await runSmokeTest({ currentDir, serverUrl, apiKey, entries, isProxyPlugin, workspaceOverride });
+      await runSmokeTest({ currentDir, serverUrl, apiKey, entries, isProxyPlugin, workspaceOverride, verifyProxy });
     }
   } catch (error) {
     clearInterval(loadingInterval);

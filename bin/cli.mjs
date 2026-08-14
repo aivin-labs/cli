@@ -22,10 +22,10 @@ import { requireArg } from './lib/util.mjs';
 import { readStdin, createFromJSON, createInteractive, validatePluginConfig, validateMcpProxyConfig } from './lib/scaffold.mjs';
 import { buildDeploymentPayload, deployPlugin, incrementVersion } from './lib/deploy.mjs';
 import { initInteractive, makePluginFromDescription, convertExistingProject } from './lib/codegen.mjs';
-import { searchPlugins, streamPluginLogs, triggerPlugin } from './lib/pluginTrigger.mjs';
+import { searchPlugins, showPluginInfo, askPlugin, streamPluginLogs, triggerPlugin } from './lib/pluginTrigger.mjs';
 import { connectorAuthHeaders, connectorBaseUrl, listConnectors, registerConnector, searchConnectors } from './lib/connectors.mjs';
 import { attachStore, createStore, deleteStore, detachStore, listStores, setStoreEnabled } from './lib/store.mjs';
-import { buildMcpManifest, createMcpProxyPlugin, scanAndPublishMcp } from './lib/mcpProxy.mjs';
+import { buildMcpManifest, parseMcpArgs, createMcpProxyPlugin, scanAndPublishMcp } from './lib/mcpProxy.mjs';
 import {
   saveGlobalApiKey,
   browserLogin,
@@ -336,6 +336,7 @@ program
   )
   .option('--workspace <id>', 'Workspace id to run the smoke test against (default: auto-picks your first one)')
   .option('--no-smoke-test', 'Only deploy - skip the generated-input invoke test and report')
+  .option('--verify-proxy', 'Also invoke MCP proxy entries for real (empty input) instead of skipping them - only use if you know the underlying tool(s) have no meaningful side effects')
   .action(async (options) => {
     try {
       await deployPlugin({
@@ -343,6 +344,7 @@ program
         label: 'Deploying to test instance',
         smokeTest: options.smokeTest !== false,
         workspaceOverride: options.workspace,
+        verifyProxy: options.verifyProxy,
       });
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
@@ -357,6 +359,7 @@ pluginCommand
   .description("Search the platform's plugin ecosystem for something to reuse instead of writing it yourself")
   .option('--workspace <id>', 'Restrict to plugins visible in this workspace (default: your whole org)')
   .option('--mcp <server_id>', 'List every tool/resource/prompt plugin generated from one MCP server (the id printed by `aivin mcp`/`aivin plugin search`, e.g. "modelcontextprotocol-servers-src-everything") instead of doing a text search')
+  .option('--store <store_id>', 'Restrict to plugins hosted on one self-hosted plugin store (the id printed by `aivin pluginstore ls`) - combines with the text query/--mcp, not a replacement for them')
   .option('--limit <n>', 'Max results to show')
   .option('--plain', 'Print a flat list instead of the interactive browser (for scripts/CI)')
   .action(async (query, options) => {
@@ -366,6 +369,39 @@ pluginCommand
         query = await requireArg(query, { prompt: 'What are you looking for?', usage: 'Usage: aivin plugin search "<query>"' });
       }
       await searchPlugins(query, options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+pluginCommand
+  .command('info <id>')
+  .description("Show one plugin's detail (input/output schema, setup needs) directly by id, no search query needed")
+  .option('--workspace <id>', 'Restrict to plugins visible in this workspace (default: your whole org)')
+  .option('--plain', 'Print flat instead of the interactive browser, if falling back to closest-match results')
+  .action(async (id, options) => {
+    try {
+      await showPluginInfo(id, options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+pluginCommand
+  .command('ask [mission]')
+  .description('One-shot: search for the best-matching plugin for a plain-language mission and trigger it right away, like an agent would')
+  .option('--top <n>', 'How many candidates to consider/print as runner-up context (default 5) - only the top match is ever run')
+  .option('-i, --input <json>', 'Force specific fields (as JSON) alongside the auto-mapped ones - explicit fields win')
+  .option('--workspace <id>', 'Workspace id to search/run against (default: auto-picks your first one)')
+  .option('--agent <id>', 'Agent id to run as, if the plugin needs one for HIL/confirm behavior to be accurate')
+  .option('--watch-logs', "Also stream the chosen plugin's own live console output inline")
+  .option('--save', 'Write this run\'s result to .test/trigger/<timestamp>.json for later --compare')
+  .option('--compare <file>', 'Diff this run\'s result against a previously --save\'d .test/trigger/*.json file')
+  .action(async (mission, options) => {
+    try {
+      await askPlugin(mission, options);
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);
@@ -645,8 +681,10 @@ mcpCommand
   .option('--description <description>', 'Plugin description')
   .option(
     '--auth-secret-key <key>',
-    'Name of the workspace secret to use as the Bearer token, if the MCP server needs auth',
+    'Name of the workspace secret to use as the token/credential, if the MCP server needs auth',
   )
+  .option('--auth-type <type>', 'auth_type value to send (default: "bearer" when --auth-secret-key is set) - check your backend for which values it supports')
+  .option('--connector <id>', "Existing connector id for this plugin's connection_id (readiness/\"needs login\" display only - does NOT inject anything into the running MCP server; run with no flags for the interactive per-variable auth setup that actually does)")
   .action(async (name, options) => {
     try {
       name = await requireArg(name, { prompt: 'Plugin name (lowercase letters, numbers, hyphens):', usage: 'Usage: aivin mcp create <name>' });
@@ -1235,7 +1273,7 @@ projectCommand
     }
   });
 
-export { validatePluginConfig, incrementVersion, validateMcpProxyConfig, buildDeploymentPayload, buildMcpManifest };
+export { validatePluginConfig, incrementVersion, validateMcpProxyConfig, buildDeploymentPayload, buildMcpManifest, parseMcpArgs };
 
 // Only parse argv when run directly (`aivin ...` / `node bin/cli.mjs ...`),
 // not when this module is imported (e.g. by tests) - otherwise Commander

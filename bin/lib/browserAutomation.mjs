@@ -474,7 +474,9 @@ export async function runBrowserMissionLocal(mission, options) {
     if (interrupted) return;
     interrupted = true;
     console.log(chalk.yellow('\n\n⏹  Stopping... (requesting cancellation - may take a moment, one agentic step at a time)'));
-    requestBrowserCancel(serverUrl, authHeaders).catch(() => {});
+    requestBrowserCancel(serverUrl, authHeaders).catch((e) =>
+      console.log(chalk.red(`   ⚠️  Cancellation request failed to send (${e.message}) - the mission may keep running.`)),
+    );
     tunnel.close();
     console.log(chalk.gray('   The tab this mission was using is still open in your browser - close it yourself if you don\'t need it.'));
   };
@@ -569,7 +571,26 @@ export async function runBrowserMissionRemote(mission, options) {
   const threadId = result.data?.thread_id;
   console.log(chalk.gray(`   Thread: ${threadId || 'unknown'}`));
 
-  if (options.watch !== false && threadId) {
-    await streamBrowserMissionLog(serverUrl, apiKey, threadId, tenantClient);
+  // Same cooperative-cancel wiring as the local-mode path above (requestBrowserCancel is
+  // tenant-scoped, not session/thread-scoped, so it applies here unchanged) - without this, Ctrl+C
+  // only stopped streamBrowserMissionLog's own SIGINT handler, which just disconnects the log
+  // socket and returns; the mission itself kept running server-side with nothing telling it to stop.
+  let interrupted = false;
+  const onSigint = () => {
+    if (interrupted) return;
+    interrupted = true;
+    console.log(chalk.yellow('\n\n⏹  Stopping... (requesting cancellation - may take a moment, one agentic step at a time)'));
+    requestBrowserCancel(serverUrl, authHeaders).catch((e) =>
+      console.log(chalk.red(`   ⚠️  Cancellation request failed to send (${e.message}) - the mission may keep running.`)),
+    );
+  };
+  process.on('SIGINT', onSigint);
+
+  try {
+    if (options.watch !== false && threadId) {
+      await streamBrowserMissionLog(serverUrl, apiKey, threadId, tenantClient);
+    }
+  } finally {
+    process.off('SIGINT', onSigint);
   }
 }
