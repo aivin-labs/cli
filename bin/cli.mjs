@@ -356,11 +356,15 @@ pluginCommand
   .command('search [query]')
   .description("Search the platform's plugin ecosystem for something to reuse instead of writing it yourself")
   .option('--workspace <id>', 'Restrict to plugins visible in this workspace (default: your whole org)')
+  .option('--mcp <server_id>', 'List every tool/resource/prompt plugin generated from one MCP server (the id printed by `aivin mcp`/`aivin plugin search`, e.g. "modelcontextprotocol-servers-src-everything") instead of doing a text search')
   .option('--limit <n>', 'Max results to show')
   .option('--plain', 'Print a flat list instead of the interactive browser (for scripts/CI)')
   .action(async (query, options) => {
     try {
-      query = await requireArg(query, { prompt: 'What are you looking for?', usage: 'Usage: aivin plugin search "<query>"' });
+      // --mcp is an exact-id lookup, not a text search - the query string is optional in that mode.
+      if (!options.mcp) {
+        query = await requireArg(query, { prompt: 'What are you looking for?', usage: 'Usage: aivin plugin search "<query>"' });
+      }
       await searchPlugins(query, options);
     } catch (error) {
       console.error(chalk.red('❌'), error.message);

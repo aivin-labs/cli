@@ -369,8 +369,10 @@ export async function searchPlugins(query, options) {
   }
   const authHeaders = { headers: { Authorization: `Bearer ${apiKey || 'dev-token'}` } };
 
-  const params = { query };
+  const params = {};
+  if (query) params.query = query;
   if (options.workspace) params.workspace_id = options.workspace;
+  if (options.mcp) params.mcp_server_id = options.mcp;
   if (options.limit) params.limit = options.limit;
 
   let response;
@@ -385,20 +387,22 @@ export async function searchPlugins(query, options) {
   // relevance-ranked lookup the platform's own agent uses to auto-select a plugin for a mission).
   const data = response.data;
   const results = Array.isArray(data) ? data : data?.items || [];
+  // --mcp is an exact-id lookup (no free-text query) - describe results by server id instead.
+  const describedAs = options.mcp ? `MCP server "${options.mcp}"` : `"${query}"`;
 
   if (results.length === 0) {
-    console.log(chalk.yellow(`No plugins found matching "${query}".`));
+    console.log(chalk.yellow(`No plugins found matching ${describedAs}.`));
     return;
   }
 
   // Interactive browser needs a real terminal to read raw keypresses - fall back to a flat
   // print for scripts/CI or when the user explicitly asks for it with --plain.
   if (process.stdout.isTTY && process.stdin.isTTY && !options.plain) {
-    await browseResults(results, `Found ${results.length} plugin(s) matching "${query}":\n`, formatPluginListLine, formatPluginDetail);
+    await browseResults(results, `Found ${results.length} plugin(s) matching ${describedAs}:\n`, formatPluginListLine, formatPluginDetail);
     return;
   }
 
-  console.log(chalk.blue(`Found ${results.length} plugin(s) matching "${query}":\n`));
+  console.log(chalk.blue(`Found ${results.length} plugin(s) matching ${describedAs}:\n`));
   for (const plugin of results) {
     console.log(chalk.bold(plugin.name || plugin.id) + chalk.gray(`  (${plugin.id})`));
     if (plugin.description) console.log(`  ${plugin.description}`);
