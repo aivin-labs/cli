@@ -230,6 +230,16 @@ export async function runSmokeTest({ currentDir, serverUrl, apiKey, entries, isP
         console.log(chalk.gray(`   ${entry.name} - proxy plugin, no generic smoke test to run`));
         continue;
       }
+      // `request_hil` is set when the MCP server itself declared this tool destructive/non-readonly
+      // (see the backend's McpAdapter.annotationsSuggestHil, sourced from the MCP spec's own
+      // readOnlyHint/destructiveHint annotations) - a real signal from the tool's own author, not a
+      // guess. `--verify-proxy` already only exists for tools the caller has vetted as safe to call
+      // automatically; skip the ones the server itself flagged as NOT safe to call blind, even under
+      // that flag, rather than trusting the caller to have known this too.
+      if (entry.request_hil) {
+        console.log(chalk.yellow(`   ${entry.name} - skipped: this tool is flagged destructive/non-readonly by the MCP server itself (request_hil) - verify it manually instead`));
+        continue;
+      }
       const proxyResult = await smokeTestProxyEntry(serverUrl, authHeaders, entry, workspaceId);
       results.push(proxyResult);
       const proxyIcon = proxyResult.passed ? chalk.green('✅') : chalk.red('❌');

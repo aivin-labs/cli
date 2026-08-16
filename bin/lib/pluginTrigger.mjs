@@ -3,9 +3,12 @@ import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
+import inquirer from 'inquirer';
 import { flattenManifestFile } from '@aivin-labs/sdk';
 import readline from 'readline';
 import { requireArg } from './util.mjs';
+
+const DELETE_TIMEOUT_MS = 30000;
 
 /**
  * Resolves which manifest entry `plugin trigger` should invoke: the `--func` match if given, the
@@ -641,4 +644,74 @@ export function browseResults(results, headerText, formatLine, formatDetail) {
     process.stdin.resume();
     render();
   });
+}
+
+/**
+ * `aivin plugin delete <id>` / `aivin plugin delete --group <groupId>` - the CLI-side counterpart
+ * that had been missing: everything else in this file (`create`/`trigger`/`deploy`) had no way to
+ * undo itself. Two backend endpoints, both ownership-checked server-side (404, not 403, for a
+ * plugin/group that isn't yours - avoids leaking which ids exist in other orgs):
+ * - `DELETE /plugins/store/:pluginId` - one plugin.
+ * - `DELETE /plugins/group/:groupId` - every plugin sharing one `group_id`, i.e. everything a
+ *   single batch deploy created in one call - the backend's own controller comment says this
+ *   exists specifically "để CLI dùng group_id trả về từ batch deploy để rollback cả lô" (so the
+ *   CLI can use the group_id a batch deploy returns to roll back the whole batch), which is
+ *   exactly `aivin mcp <url>`'s "N plugin(s) generated from this MCP server" case - it already
+ *   prints that group_id after deploy, this is what it's for.
+ *
+ * Both prompt a confirmation (skippable with `-y`/`--yes` for scripts) since neither can be undone
+ * from here - `--group` additionally requires typing the id back, same pattern `pluginstore rm`
+ * uses, since it can delete many plugins at once from one typo'd id.
+ */
+export async function deletePluginCmd(id, options) {
+  const serverUrl = process.env.AIVIN_BASE_URL || 'https://api.aivin.cloud';
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+    console.log(chalk.yellow('⚠️  API_KEY not set - run `aivin login` first'));
+  }
+  const authHeaders = { headers: { Authorization: `Bearer ${apiKey || 'dev-token'}` } };
+
+  if (options.group) {
+    if (!options.yes) {
+      const { confirmId } = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'confirmId',
+          message: chalk.red(`This deletes EVERY plugin in group "${options.group}" - can't be undone. Type the group id to confirm:`),
+        },
+      ]);
+      if (confirmId !== options.group) {
+        console.log(chalk.gray('Cancelled - group id did not match.'));
+        return;
+      }
+    }
+    try {
+      const res = await axios.delete(`${serverUrl}/plugins/group/${encodeURIComponent(options.group)}`, { ...authHeaders, timeout: DELETE_TIMEOUT_MS });
+      console.log(chalk.green(`✅ Deleted ${res.data?.deleted_count ?? '?'} plugin(s) from group "${options.group}".`));
+    } catch (error) {
+      const message = error.response?.data?.message || error.message;
+      const hint = [401, 403].includes(error.response?.status) ? ' - this may need a `full_access`-scoped API key (see `aivin key gen`), not just a logged-in session' : '';
+      throw new Error(`Group delete failed: ${message}${hint}`, { cause: error });
+    }
+    return;
+  }
+
+  id = await requireArg(id, { prompt: 'Plugin id to delete:', usage: 'Usage: aivin plugin delete <id>  (or: aivin plugin delete --group <groupId>)' });
+
+  if (!options.yes) {
+    const { confirmDelete } = await inquirer.prompt([
+      { type: 'confirm', name: 'confirmDelete', message: `Delete plugin "${id}"? This can't be undone.`, default: false },
+    ]);
+    if (!confirmDelete) {
+      console.log(chalk.gray('Cancelled.'));
+      return;
+    }
+  }
+  try {
+    await axios.delete(`${serverUrl}/plugins/store/${encodeURIComponent(id)}`, { ...authHeaders, timeout: DELETE_TIMEOUT_MS });
+    console.log(chalk.green(`✅ Deleted "${id}".`));
+  } catch (error) {
+    const message = error.response?.data?.message || error.message;
+    throw new Error(`Delete failed: ${message}`, { cause: error });
+  }
 }

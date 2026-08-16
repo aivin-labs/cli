@@ -269,6 +269,12 @@ straight to `/plugins/execute`. This really calls the external MCP server - only
 tool(s) involved are safe to invoke automatically (idempotent/read-only), since a repeated `aivin
 test` run means a repeated real call every time.
 
+Entries the MCP server itself flagged destructive/non-readonly (via the MCP spec's own
+`readOnlyHint`/`destructiveHint` tool annotations, surfaced on the manifest as `request_hil: true`)
+are skipped even under `--verify-proxy` - that flag means "the caller vetted these tools as safe to
+call automatically," which doesn't extend to a tool the server itself is warning isn't. Verify
+those by hand instead (`aivin plugin trigger --id <id> -a "..."`).
+
 ## `aivin plugin make <description>`
 
 AI-generates a plugin from a natural-language description, via `POST /code/generate-project` -
@@ -630,6 +636,32 @@ Prints each line as it's written (`console.log` → gray, `console.error` → re
 timestamp. Runs until you press Ctrl+C. If the container restarts (redeploy/crash) mid-stream,
 the connection ends - re-run the command to resume watching.
 
+## `aivin plugin delete [id]`
+
+Deletes a plugin you own - `DELETE /plugins/store/:pluginId` for a single one, or
+`--group <groupId>` for every plugin created by one batch deploy at once (`DELETE
+/plugins/group/:groupId`) - e.g. everything `aivin mcp <url>` generated in a single run, which
+prints its `group_id` right after deploying specifically so you can pass it here later. Neither can
+be undone.
+
+```
+Options:
+  --group <groupId>  Delete every plugin sharing this group_id instead of a single plugin by id
+  -y, --yes          Skip the confirmation prompt (for scripts/CI)
+```
+
+```bash
+aivin plugin delete my-plugin-id
+aivin plugin delete --group 66f2a1...              # everything from one `mcp <url>` run
+aivin plugin delete --group 66f2a1... --yes         # skip the prompt, for scripts
+```
+
+Single delete asks a plain yes/no confirmation. `--group` asks you to **type the group id back** to
+confirm (same pattern `aivin pluginstore rm` uses) since one typo'd id could otherwise delete many
+plugins at once. Both skip the prompt entirely with `-y`/`--yes`. Deleting is scoped to plugins you
+own server-side - a wrong/other org's id fails with "not found" rather than revealing whether it
+exists.
+
 ## `aivin connector`
 
 Connectors are reusable OAuth apps / credential-form namespaces, referenced from `manifest.json`'s
@@ -737,11 +769,11 @@ finds, interactively:
    runs) whatever's at that address to introspect it, same trust model as installing a dependency
    from source. Bounded to 60s (scanning a live server can legitimately take longer than the other
    steps, which is why this one gets more headroom) so an unresponsive server fails with a clear
-   error instead of hanging the CLI indefinitely. Right after a successful scan, this also runs the
-   URL itself as a free-text `plugin search` and prints anything that comes back as an FYI ("might
-   already be from this server, double-check before converting again") - a soft heuristic, not a
-   real duplicate check (there's no reliable way to match "same MCP server" client-side), so it
-   never blocks the flow either way.
+   error instead of hanging the CLI indefinitely. The scan response also carries a deterministic
+   `repo_id` (derived from the source URL, same convention the backend uses for every discovery
+   path so the same server always converges on one id) - right after a successful scan, this is
+   used as an exact `plugin search --mcp <repo_id>` lookup, so anything printed here really is from
+   this exact server, not a fuzzy text guess. Still informational only - never blocks the flow.
 2. **Select** - checkbox prompt lists every tool/resource/prompt found (all checked by default);
    space to toggle, enter to continue with only what you actually want as plugins.
 3. **Build manifests** (`POST /plugins/build-mcp-manifests`, 30s timeout) - one `PluginManifest` per
@@ -750,14 +782,14 @@ finds, interactively:
    before anything is deployed. A second, separate optional prompt offers to attach one connector
    (existing or newly registered) as every generated manifest's `connection_id` in one go - see
    [`aivin mcp create`](#aivin-mcp-create-name)'s connector section above for what that buys you.
-5. **Confirm** - since the checkbox in step 2 defaults to everything checked, and there's no
-   `plugin delete`/`undeploy` command anywhere in this CLI to walk a deploy back, this step asks for
-   an explicit yes ("Deploy N plugin(s) to your org? This can't be undone from the CLI.", default
+5. **Confirm** - since the checkbox in step 2 defaults to everything checked, this step asks for an
+   explicit yes ("Deploy N plugin(s) to your org? This can't be undone from the CLI.", default
    **No**) before anything actually goes out. In a non-TTY context (scripts/CI) this step is skipped
    entirely - the same as everywhere else in the CLI, only a real terminal gets a confirmation prompt.
 6. **Deploy** (`POST /plugins/deploy`, 60s timeout) - always org-scoped first, regardless of the
-   visibility flag below (there's no narrower per-workspace scope for plugins today). This is the
-   point of no return: deployed plugins are visible to your whole org from here on.
+   visibility flag below (there's no narrower per-workspace scope for plugins today). Prints a
+   `group_id` afterward - save it if you might want to remove everything from this run later in one
+   shot with [`aivin plugin delete --group <groupId>`](#aivin-plugin-delete-id).
 7. **Publish** (only with `--publish`, 30s timeout per submission) - submits each deployed plugin for
    community review (`POST /plugins/store/submit`) - the backend re-verifies each one LIVE against
    the real MCP server before it reaches the review queue, not just whatever got deployed (see the

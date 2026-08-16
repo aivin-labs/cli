@@ -4,7 +4,7 @@ import path from 'path';
 import chalk from 'chalk';
 import axios from 'axios';
 import inquirer from 'inquirer';
-import { withSpinner } from './util.mjs';
+import { withSpinner, requireArg } from './util.mjs';
 
 // ── Plugin store (self-host aivin-service worker) — attach/create/ls/enable/disable/detach ──────
 //
@@ -55,7 +55,33 @@ function writeWorkerIdentity(dataDir, { beEndpoint, orgId, storeId, storeName, n
   return filePath;
 }
 
-function printAttachResult(res, dataDir) {
+// How long `attach`/`create` wait for the just-written node to actually show up `online` before
+// giving up and printing troubleshooting hints - long enough to cover a running aivin-service
+// noticing the file (~200ms) + dialing WorkerHub.Connect + TLS handshake, short enough that a
+// first-time setup (container not started yet) doesn't feel like the command hung.
+const NODE_ONLINE_POLL_TOTAL_MS = 12000;
+const NODE_ONLINE_POLL_INTERVAL_MS = 1500;
+
+/** Polls `GET /stores` until `nodeId` shows `status: 'online'` or the budget runs out. Best-effort -
+ *  a transient network/auth error while polling is swallowed (not fatal to `attach`/`create`
+ *  itself, which already succeeded server-side); the caller just sees "not online yet". */
+async function waitForNodeOnline(storeId, nodeId) {
+  const deadline = Date.now() + NODE_ONLINE_POLL_TOTAL_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, NODE_ONLINE_POLL_INTERVAL_MS));
+    try {
+      const res = await axios.get(`${storeBaseUrl()}/stores`, storeAuthHeaders());
+      const store = (res.data || []).find((s) => s.store_id === storeId);
+      const node = store?.nodes?.find((n) => n.node_id === nodeId);
+      if (node?.status === 'online') return true;
+    } catch {
+      // transient - keep polling until the deadline
+    }
+  }
+  return false;
+}
+
+async function printAttachResult(res, dataDir) {
   const { store, node, worker_token, worker_hub_endpoint, sdk_grpc_endpoint } = res.data;
   const filePath = writeWorkerIdentity(dataDir, {
     beEndpoint: worker_hub_endpoint,
@@ -74,7 +100,27 @@ function printAttachResult(res, dataDir) {
       `   If aivin-service isn't running yet: docker run -v ${dataDir}:/app/data ... (mount this exact directory as WORKER_DATA_DIR)`,
     ),
   );
-  console.log(chalk.gray('   Already running? Nothing else to do - it picks up this file within ~200ms, no restart needed.'));
+
+  // Best-effort confirmation, not a hard requirement - a fresh setup with aivin-service not
+  // started yet is expected to still be "offline" here, that's normal, not a failure. This only
+  // upgrades a previously-silent "trust me, it worked" into an actual observed state, so a broken
+  // connect (bad token/TLS/tunnel/firewall) is caught right here instead of surfacing later as a
+  // confusing "no nodes attached"/trigger-hangs-then-524 the next time this store is used.
+  const online = await withSpinner(`   Waiting for "${node.node_id}" to come online`, () => waitForNodeOnline(store.store_id, node.node_id));
+  if (online) {
+    console.log(chalk.green(`   ✅ Connected - node is online.`));
+  } else {
+    console.log(chalk.yellow(`   ⏳ Not online yet.`));
+    console.log(chalk.gray('      Normal if aivin-service isn\'t running yet on this credential\'s data dir - nothing else to do,'));
+    console.log(chalk.gray('      it picks up the file within ~200ms once started, no restart needed.'));
+    console.log(chalk.gray(`      Already running and still offline after a bit? Check: it can reach ${worker_hub_endpoint} over TLS`));
+    console.log(chalk.gray('      (firewall/tunnel in the way?), and its own logs for a connect error. Re-check with `aivin pluginstore ls`.'));
+    console.log(
+      chalk.gray(
+        `      If this node never comes online, remove it with \`aivin pluginstore rm-node ${store.store_id} ${node.node_id}\` and re-attach once fixed.`,
+      ),
+    );
+  }
 }
 
 export async function createStore(storeId, options) {
@@ -98,7 +144,7 @@ export async function createStore(storeId, options) {
     const res = await withSpinner(`📦 Creating store "${storeId}"`, () =>
       axios.post(`${storeBaseUrl()}/stores`, { store_id: storeId, label, node_label: nodeLabel }, storeAuthHeaders()),
     );
-    printAttachResult(res, options.dataDir || defaultDataDir());
+    await printAttachResult(res, options.dataDir || defaultDataDir());
   } catch (error) {
     const message = error.response?.data?.message?.message || error.response?.data?.message || error.message;
     throw new Error(`Create store failed: ${message}`, { cause: error });
@@ -117,7 +163,7 @@ export async function attachStore(storeId, options) {
     const res = await withSpinner(`🔗 Attaching to store "${storeId}"`, () =>
       axios.post(`${storeBaseUrl()}/stores/${encodeURIComponent(storeId)}/attach`, { node_label: options.nodeLabel }, storeAuthHeaders()),
     );
-    printAttachResult(res, options.dataDir || defaultDataDir());
+    await printAttachResult(res, options.dataDir || defaultDataDir());
   } catch (error) {
     if (error.response?.status === 404) {
       console.log(chalk.yellow(`Store "${storeId}" doesn't exist yet.`));
@@ -159,7 +205,13 @@ export async function listStores(options) {
       const nodeStatus = n.status === 'online' ? chalk.green('online') : chalk.gray('offline');
       console.log(chalk.gray(`   - ${n.label || n.node_id} (${n.node_id}) ${nodeStatus}`));
     }
-    if (options.plain !== true && (s.nodes || []).length === 0) console.log(chalk.gray('   (no nodes attached)'));
+    if (options.plain !== true && (s.nodes || []).length === 0) {
+      // `kind=system` (the "aivin default" store) is served by Aivin's own managed fleet, not by
+      // self-host nodes attached via this CLI - it ALWAYS has 0 nodes here, by design, not because
+      // anything is wrong. Printing the same "(no nodes attached)" line self-host stores use made
+      // this look like a standing error on every single `ls` for every account.
+      console.log(chalk.gray(s.kind === 'system' ? '   (served by Aivin\'s managed fleet - self-host nodes not applicable)' : '   (no nodes attached)'));
+    }
     console.log();
   }
 }
@@ -200,6 +252,40 @@ export async function deleteStore(storeId, options) {
   } catch (error) {
     const message = error.response?.data?.message?.message || error.response?.data?.message || error.message;
     throw new Error(`Delete failed: ${message}`, { cause: error });
+  }
+}
+
+/** `rm-node` - removes ONE node from a store without touching any other node attached to it
+ *  (unlike `rm`, which revokes every node's credential at once). Meant for cleaning up a node that
+ *  never came online (bad token/TLS/network at `attach` time - see `waitForNodeOnline` above) and
+ *  is just sitting there `offline` forever, without having to nuke and re-pair every other machine
+ *  attached to the same store. BE refuses this for a node that's currently `online` (409) - detach
+ *  it there first (stop aivin-service, or `aivin pluginstore detach` on that machine). */
+export async function removeNode(storeId, nodeId, options) {
+  storeId = await requireArg(storeId, { prompt: 'Store id:', usage: 'Usage: aivin pluginstore rm-node <store_id> <node_id>' });
+  nodeId = await requireArg(nodeId, { prompt: 'Node id to remove:', usage: 'Usage: aivin pluginstore rm-node <store_id> <node_id>' });
+
+  if (!options.yes) {
+    const { confirm } = await inquirer.prompt([
+      { type: 'confirm', name: 'confirm', message: `Remove node "${nodeId}" from store "${storeId}"? This can't be undone.`, default: false },
+    ]);
+    if (!confirm) {
+      console.log(chalk.gray('Cancelled.'));
+      return;
+    }
+  }
+
+  try {
+    await withSpinner(`🗑  Removing node "${nodeId}"`, () =>
+      axios.delete(`${storeBaseUrl()}/stores/${encodeURIComponent(storeId)}/nodes/${encodeURIComponent(nodeId)}`, storeAuthHeaders()),
+    );
+    console.log(chalk.green(`✅ Node "${nodeId}" removed from store "${storeId}".`));
+  } catch (error) {
+    const message = error.response?.data?.message?.message || error.response?.data?.message || error.message;
+    if (error.response?.status === 409) {
+      throw new Error(`${message} - this node is still online. Stop aivin-service (or run \`aivin pluginstore detach\` on that machine) first.`, { cause: error });
+    }
+    throw new Error(`Remove node failed: ${message}`, { cause: error });
   }
 }
 

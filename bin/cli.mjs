@@ -22,10 +22,10 @@ import { requireArg } from './lib/util.mjs';
 import { readStdin, createFromJSON, createInteractive, validatePluginConfig, validateMcpProxyConfig } from './lib/scaffold.mjs';
 import { buildDeploymentPayload, deployPlugin, incrementVersion } from './lib/deploy.mjs';
 import { initInteractive, makePluginFromDescription, convertExistingProject } from './lib/codegen.mjs';
-import { searchPlugins, showPluginInfo, askPlugin, streamPluginLogs, triggerPlugin } from './lib/pluginTrigger.mjs';
+import { searchPlugins, showPluginInfo, askPlugin, streamPluginLogs, triggerPlugin, deletePluginCmd } from './lib/pluginTrigger.mjs';
 import { connectorAuthHeaders, connectorBaseUrl, listConnectors, registerConnector, searchConnectors } from './lib/connectors.mjs';
-import { attachStore, createStore, deleteStore, detachStore, listStores, setStoreEnabled } from './lib/store.mjs';
-import { buildMcpManifest, parseMcpArgs, createMcpProxyPlugin, scanAndPublishMcp } from './lib/mcpProxy.mjs';
+import { attachStore, createStore, deleteStore, detachStore, listStores, removeNode, setStoreEnabled } from './lib/store.mjs';
+import { buildMcpManifest, parseMcpArgs, guessConnectorQueryFromEnvVarName, createMcpProxyPlugin, scanAndPublishMcp } from './lib/mcpProxy.mjs';
 import {
   saveGlobalApiKey,
   browserLogin,
@@ -471,6 +471,20 @@ pluginCommand
     }
   });
 
+pluginCommand
+  .command('delete [id]')
+  .description("Delete a plugin you own, or every plugin from one batch deploy at once with --group <groupId> (e.g. everything `aivin mcp <url>` generated in one run - see the group_id it prints after deploying)")
+  .option('--group <groupId>', 'Delete every plugin sharing this group_id instead of a single plugin by id')
+  .option('-y, --yes', 'Skip the confirmation prompt (for scripts/CI)')
+  .action(async (id, options) => {
+    try {
+      await deletePluginCmd(id, options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
 const connectorCommand = program.command('connector').description('Register and discover reusable connectors (OAuth apps / credential-form namespaces)');
 
 connectorCommand
@@ -625,6 +639,19 @@ pluginStoreCommand
     try {
       storeId = await requireArg(storeId, { prompt: 'Store id to delete:', usage: 'Usage: aivin pluginstore rm <store_id>' });
       await deleteStore(storeId, options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+pluginStoreCommand
+  .command('rm-node [store_id] [node_id]')
+  .description('Remove one node from a store (e.g. one that never came online) without touching its other nodes - org admin not required')
+  .option('-y, --yes', 'Skip the confirmation prompt')
+  .action(async (storeId, nodeId, options) => {
+    try {
+      await removeNode(storeId, nodeId, options);
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);
@@ -1273,7 +1300,7 @@ projectCommand
     }
   });
 
-export { validatePluginConfig, incrementVersion, validateMcpProxyConfig, buildDeploymentPayload, buildMcpManifest, parseMcpArgs };
+export { validatePluginConfig, incrementVersion, validateMcpProxyConfig, buildDeploymentPayload, buildMcpManifest, parseMcpArgs, guessConnectorQueryFromEnvVarName };
 
 // Only parse argv when run directly (`aivin ...` / `node bin/cli.mjs ...`),
 // not when this module is imported (e.g. by tests) - otherwise Commander

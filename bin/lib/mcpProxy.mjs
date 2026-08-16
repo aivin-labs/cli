@@ -11,14 +11,32 @@ import { triggerPlugin } from './pluginTrigger.mjs';
 
 const CONNECTOR_SEARCH_TIMEOUT_MS = 15000;
 
+// Light, transparent naming guess ONLY - a starting point for the search box below, never a
+// decision. Deliberately not a port of the backend's own McpAwesomeListHelper.resolveConnectionId
+// (suffix list + overrides table maintained there): duplicating that logic client-side would drift
+// out of sync over time and silently give wrong suggestions. This just strips the handful of
+// suffixes common enough to be obvious (GITHUB_TOKEN -> "github", SLACK_BOT_TOKEN -> "slack") and
+// takes the first remaining word - wrong guesses cost nothing since it's an editable default, not
+// an auto-pick.
+export function guessConnectorQueryFromEnvVarName(envVarName) {
+  const suffixes = ['_PERSONAL_ACCESS_TOKEN', '_ACCESS_TOKEN', '_AUTH_TOKEN', '_BOT_TOKEN', '_API_KEY', '_SECRET_KEY', '_TOKEN', '_SECRET', '_KEY', '_PAT'];
+  const upper = (envVarName || '').toUpperCase();
+  const suffix = suffixes.find((s) => upper.endsWith(s));
+  const stripped = suffix ? upper.slice(0, -suffix.length) : upper;
+  return stripped.split('_')[0]?.toLowerCase() || '';
+}
+
 /**
  * Interactive "pick a connector" step shared by `mcp create` and `mcp <url>` - lets the developer
  * attach an existing connector (OAuth login / credential form) to an MCP proxy's `connection_id`
  * instead of typing a raw workspace secret name, or register a brand new one on the spot without
  * leaving this flow. Returns the chosen connector's id, or `undefined` if the developer backs out.
+ * `defaultQuery` pre-fills the search box (editable/clearable) - see guessConnectorQueryFromEnvVarName.
  */
-async function selectConnectorInteractive() {
-  const { query } = await inquirer.prompt([{ type: 'input', name: 'query', message: 'Search connectors (blank to list your org\'s):' }]);
+async function selectConnectorInteractive(defaultQuery = '') {
+  const { query } = await inquirer.prompt([
+    { type: 'input', name: 'query', message: 'Search connectors (blank to list your org\'s):', default: defaultQuery || undefined },
+  ]);
 
   let results;
   try {
@@ -90,7 +108,7 @@ async function collectMcpEnvFieldsInteractive() {
     ]);
 
     if (source === 'connector') {
-      const connectorId = await selectConnectorInteractive();
+      const connectorId = await selectConnectorInteractive(guessConnectorQueryFromEnvVarName(name));
       fields.push({ name, connectorId });
     } else {
       fields.push({ name });
@@ -441,25 +459,28 @@ export async function scanAndPublishMcp(url, options) {
   }
   console.log(chalk.green(`✅ Found ${tools.length} tool(s), ${resources.length} resource(s), ${prompts.length} prompt(s)`));
 
-  // Best-effort FYI, not a hard check: there's no reliable client-side way to know "is this the
-  // same MCP server someone already converted" (plugin search is relevance-ranked text search over
-  // name/description, not a URL match), so this only searches the url itself as free text and
-  // surfaces whatever comes back - purely informational, never blocks the flow, and silently
-  // skipped if the search itself fails for any reason.
-  try {
-    const dupRes = await axios.get(`${connectorBaseUrl()}/plugins/search`, {
-      ...connectorAuthHeaders(),
-      params: { query: url, limit: 5 },
-      timeout: CONNECTOR_SEARCH_TIMEOUT_MS,
-    });
-    const dupResults = Array.isArray(dupRes.data) ? dupRes.data : dupRes.data?.items || [];
-    if (dupResults.length > 0) {
-      console.log(chalk.yellow(`\n⚠ ${dupResults.length} existing plugin(s) came up searching for this URL - might already be from this server (double-check before converting again):`));
-      dupResults.forEach((p) => console.log(`   - ${p.name || p.id} ${chalk.gray(`(${p.id})`)}`));
-      console.log();
+  // Exact check, not a heuristic: `scanned.repo_id` is the SAME deterministic id (derived from the
+  // source URL, see McpScannerHelper.deriveRepoId on the backend) that ends up as every generated
+  // manifest's `proxy_config.mcp_server_id` - so this is exactly what `plugin search --mcp <id>`
+  // already means, not a fuzzy text guess. Still purely informational (never blocks the flow) and
+  // silently skipped if the search itself fails, since a lookup failure here shouldn't stop a
+  // conversion that has nothing to do with search being up.
+  if (scanned.repo_id) {
+    try {
+      const dupRes = await axios.get(`${connectorBaseUrl()}/plugins/search`, {
+        ...connectorAuthHeaders(),
+        params: { mcp_server_id: scanned.repo_id, limit: 10 },
+        timeout: CONNECTOR_SEARCH_TIMEOUT_MS,
+      });
+      const dupResults = Array.isArray(dupRes.data) ? dupRes.data : dupRes.data?.items || [];
+      if (dupResults.length > 0) {
+        console.log(chalk.yellow(`\n⚠ ${dupResults.length} plugin(s) already exist from this exact server (server id "${scanned.repo_id}") - converting again will create duplicates unless you mean to update them:`));
+        dupResults.forEach((p) => console.log(`   - ${p.name || p.id} ${chalk.gray(`(${p.id})`)}`));
+        console.log();
+      }
+    } catch {
+      // Non-fatal - this is a courtesy check, not a requirement to proceed.
     }
-  } catch {
-    // Non-fatal - this is a courtesy check, not a requirement to proceed.
   }
 
   const choices = [
@@ -570,6 +591,7 @@ export async function scanAndPublishMcp(url, options) {
   console.log(chalk.green(`✅ Deployed: ${manifests.map((m) => m.name).join(', ')}`));
   if (deployResult.data?.group_id) {
     console.log(chalk.gray(`   group_id: ${deployResult.data.group_id}`));
+    console.log(chalk.gray(`   (to remove all ${manifests.length} of these later in one shot: aivin plugin delete --group ${deployResult.data.group_id})`));
   }
 
   if (options.publish) {

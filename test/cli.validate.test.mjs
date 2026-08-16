@@ -7,6 +7,7 @@ import {
   buildDeploymentPayload,
   buildMcpManifest,
   parseMcpArgs,
+  guessConnectorQueryFromEnvVarName,
 } from '../bin/cli.mjs';
 
 test('validatePluginConfig accepts a well-formed config', () => {
@@ -211,4 +212,16 @@ test('parseMcpArgs unescapes \\" and \\\\ inside a quoted value', () => {
 
 test('parseMcpArgs throws on an unterminated quote', () => {
   assert.throws(() => parseMcpArgs('--path "unterminated'), /Unterminated/);
+});
+
+test('guessConnectorQueryFromEnvVarName strips common credential suffixes and lowercases the first segment', () => {
+  assert.equal(guessConnectorQueryFromEnvVarName('GITHUB_TOKEN'), 'github');
+  assert.equal(guessConnectorQueryFromEnvVarName('GITHUB_PERSONAL_ACCESS_TOKEN'), 'github');
+  assert.equal(guessConnectorQueryFromEnvVarName('SLACK_BOT_TOKEN'), 'slack');
+  assert.equal(guessConnectorQueryFromEnvVarName('JIRA_API_KEY'), 'jira');
+});
+
+test('guessConnectorQueryFromEnvVarName falls back gracefully for unrecognized names', () => {
+  assert.equal(guessConnectorQueryFromEnvVarName(''), '');
+  assert.equal(guessConnectorQueryFromEnvVarName('SOME_CUSTOM_VAR'), 'some');
 });
