@@ -175,10 +175,10 @@ thật đang chạy production là `initable`/`initial` (Mục 5.1). Cần trao 
 tiếp hay xoá hẳn (khuyến nghị: xoá — nếu hoàn thiện theo đúng tên field, tức lưu giá trị trực tiếp,
 sẽ phá vỡ nguyên tắc "manifest không bao giờ giữ giá trị secret thật" mà mọi cơ chế khác đang theo).
 
-### 6.2. `auth_secret_key` + `--publish` = rò rỉ credential chéo org
+### 6.2. `auth_secret_key` + `--publish` = rò rỉ credential chéo org — ✅ ĐÃ FIX (2026-08, BE)
 
 `auth_secret_key` được thiết kế "dùng chung cho tất cả user" — nhưng comment gốc chỉ nói tới user
-**trong org sở hữu**, không tính tới việc publish. Grep toàn bộ `PluginStoreService.ts`: **không có
+**trong org sở hữu**, không tính tới việc publish. Trước đây `PluginStoreService.ts` **không có
 bước nào strip/reissue `auth_secret_key` khi plugin được publish lên marketplace**. Nếu org khác
 gọi được plugin đã publish (cùng document), request của họ sẽ vô tình resolve đúng secret của org
 publish gốc — tốn quota/tiền của org gốc, hoặc lộ credential.
@@ -188,10 +188,12 @@ publish gốc — tốn quota/tiền của org gốc, hoặc lộ credential.
 connector-bound env var (Mục 5.1 tầng 3 — đã xác nhận an toàn multi-tenant). Cũng cảnh báo ngay lúc
 `mcp create` chọn "1 token dùng chung", trước khi kịp publish.
 
-**Giới hạn của gate này**: chỉ chặn được đường publish mà CLI kiểm soát (`mcp <url> --publish`).
-Nếu có đường publish khác (FE web app) cho plugin tạo bằng `mcp create` + `aivin deploy` riêng, CLI
-không với tới được — **cần BE tự gate ở tầng `/plugins/store/submit`** mới an toàn triệt để, CLI chỉ
-là lớp phòng vệ bổ sung.
+**BE giờ đã tự gate triệt để** ở đúng 3 điểm ghi vào `client: CLIENT_DEFAULT`: `submitPluginForReview`
+(chặn ngay lúc submit), `approvePlugin` (defense-in-depth — phòng plugin bị sửa giữa lúc submit và
+lúc admin duyệt), và `updatePlugin()` (phòng admin/author edit thêm secret vào sau). Gate CLI ở trên
+giờ chỉ còn là lớp UX sớm (báo lỗi ngay tại chỗ thay vì phải đợi round-trip lên BE), không còn là
+lớp phòng vệ DUY NHẤT — đường publish nào khác (FE web app) cũng không lách được nữa. Xem
+`be/docs/draft/plugins/marketplace-catalog.md` §4.5 điểm 2 cho chi tiết phía BE.
 
 ## 7. Danh sách các gate an toàn hiện có trong CLI (tham chiếu nhanh)
 

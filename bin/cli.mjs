@@ -680,6 +680,7 @@ mcpCommand
   .option('--publish', 'Deploy to your org, then submit for community store review (needs admin approval)')
   .option('--private', 'Deploy to your org only - default')
   .option('--org', 'Alias of --private - there is no narrower per-workspace scope today')
+  .option('--quiet', 'Skip live progress output while scanning (on by default otherwise)')
   .action(async (url, options) => {
     try {
       url = await requireArg(url, {

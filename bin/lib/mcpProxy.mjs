@@ -1,9 +1,10 @@
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
 import inquirer from 'inquirer';
 import axios from 'axios';
+import { io } from 'socket.io-client';
 import { validatePluginConfig } from './scaffold.mjs';
 import { withSpinner } from './util.mjs';
 import { connectorBaseUrl, connectorAuthHeaders, registerConnector } from './connectors.mjs';
@@ -417,6 +418,39 @@ export async function createMcpProxyPlugin(name, options) {
 }
 
 /**
+ * Live progress for the `scan-mcp` step (README fetch / AI parse / live container verify - can take
+ * up to 60s) - reuses the exact same Socket.IO connection pattern as `aivin plugin logs`/
+ * `--watch-logs` (`pluginTrigger.mjs`'s `watchPluginLogLines`), but joins the generic `join-room`
+ * event instead of the plugin-specific `subscribe-plugin-logs` one - a scan has no plugin id yet to
+ * scope an ownership check against. `sessionId` is a UUID this CLI generates itself and hands to
+ * `POST /plugins/scan-mcp` as `scan_session_id`; the backend emits progress to room
+ * `scan-log:{sessionId}` (see McpScannerHelper.scanUrl on the backend) - not a secret, just a
+ * correlation id only this CLI process knows, so no server-side ownership check is needed for it.
+ * Returns a `stop()` closer; safe to call even if `connect`/`join` never settled.
+ */
+async function withScanLog(sessionId, { serverUrl, apiKey, onLine }) {
+  const socket = io(serverUrl, { auth: { token: apiKey || 'dev-token' }, transports: ['websocket'], reconnection: true, timeout: 8000 });
+  const room = `scan-log:${sessionId}`;
+
+  await new Promise((resolve) => {
+    const giveUp = setTimeout(resolve, 8000);
+    socket.on('connect_error', () => {
+      clearTimeout(giveUp);
+      resolve();
+    });
+    socket.on('connect', () => {
+      socket.emit('join-room', { name: 'scan-log', rooms: [room] }, () => {
+        clearTimeout(giveUp);
+        resolve();
+      });
+    });
+  });
+
+  socket.on('scan-log', onLine);
+  return { stop: () => socket.disconnect() };
+}
+
+/**
  * `aivin mcp <url>` - the one-shot path from "here's an MCP server" to deployed plugin(s):
  * scan (GET the repo/README or handshake a live server) -> let the developer pick which
  * tools/resources/prompts to bring in -> build manifest(s) -> optional interactive edit ->
@@ -440,15 +474,33 @@ export async function scanAndPublishMcp(url, options) {
   // servers you actually trust, same as installing any other dependency from source.
   console.log(chalk.gray('   ⚠ This connects to the server above to introspect it - only scan MCP servers you trust.\n'));
 
+  // Live progress while scanning - on by default (this step can take up to 60s with nothing else
+  // to show for it otherwise), --quiet skips it and falls back to the plain spinner only.
+  let scanLogWatcher;
+  const scanSessionId = options.quiet ? undefined : randomUUID();
+  if (scanSessionId) {
+    scanLogWatcher = await withScanLog(scanSessionId, {
+      serverUrl: connectorBaseUrl(),
+      apiKey: process.env.API_KEY,
+      onLine: (payload) => console.log(chalk.gray('   ↳'), payload.message),
+    });
+  }
+
   let scanned;
   try {
     const res = await withSpinner('🔎 Scanning MCP server', () =>
-      axios.post(`${connectorBaseUrl()}/plugins/scan-mcp`, { url }, { ...connectorAuthHeaders(), timeout: MCP_SCAN_TIMEOUT_MS }),
+      axios.post(
+        `${connectorBaseUrl()}/plugins/scan-mcp`,
+        { url, scan_session_id: scanSessionId },
+        { ...connectorAuthHeaders(), timeout: MCP_SCAN_TIMEOUT_MS },
+      ),
     );
     scanned = res.data;
   } catch (error) {
     const message = error.response?.data?.message?.message || error.response?.data?.message || error.message;
     throw new Error(`Scan failed: ${message}`, { cause: error });
+  } finally {
+    scanLogWatcher?.stop();
   }
 
   const tools = scanned.tools || [];
