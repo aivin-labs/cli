@@ -328,31 +328,35 @@ export function streamBrowserMissionLog(serverUrl, apiKey, threadId, tenantClien
     const statusIcon = (status) =>
       status === 'error' ? chalk.red('✗') : status === 'success' ? chalk.green('✓') : status === 'warning' ? chalk.yellow('!') : chalk.gray('·');
 
-    const stop = () => {
+    // `reason` lets the caller (browserAutomation.mjs's tunnel-retry loop) tell a genuine mission
+    // outcome ('success'/'failed'/'cancelled') apart from "we just gave up watching"
+    // ('idle'/'sigint'/'connect_error') - only the latter group is worth retrying on tunnel drop.
+    const stop = (reason) => {
       if (settled) return;
       settled = true;
       clearTimeout(idleTimer);
       socket.disconnect();
-      process.off('SIGINT', stop);
+      process.off('SIGINT', onSigint);
       // The auto-opened HIL viewer keeps a listening HTTP server alive (and with it the whole
       // process) past the point the mission actually finished - close it along with everything else.
       viewerServer?.close();
-      resolve();
+      resolve(reason);
     };
 
     const bumpIdleTimer = () => {
       clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         console.log(chalk.gray(`\n(no activity for ${Math.round(idleTimeoutMs / 1000)}s - stopped watching; the run may still be going in the background)`));
-        stop();
+        stop('idle');
       }, idleTimeoutMs);
     };
 
-    process.on('SIGINT', stop);
+    const onSigint = () => stop('sigint');
+    process.on('SIGINT', onSigint);
 
     socket.on('connect_error', (error) => {
       console.log(chalk.yellow(`⚠️  Couldn't watch live progress (${error.message}) - the run continues regardless.`));
-      stop();
+      stop('connect_error');
     });
 
     for (const eventName of MISSION_LOG_EVENTS) {
@@ -397,7 +401,7 @@ export function streamBrowserMissionLog(serverUrl, apiKey, threadId, tenantClien
         if (payload.event_key === 'ai_browser.success' || payload.event_key === 'ai_browser.failed' || MISSION_DONE_EVENT_KEYS.has(payload.event_key)) {
           const ok = payload.event_key !== 'ai_browser.failed' && payload.status !== 'error';
           sendOSNotification(ok ? '✅ AI Browser hoàn tất' : '❌ AI Browser thất bại', payload.message || '');
-          stop();
+          stop(ok ? 'success' : 'failed');
         }
       });
     }
@@ -409,7 +413,7 @@ export function streamBrowserMissionLog(serverUrl, apiKey, threadId, tenantClien
     // even though the backend was emitting a full trace the whole time. `detail` (when present)
     // carries the LLM's actual per-action reasoning (AIBrowserActionItem.reason), not just the
     // truncated one-line summary meant for a chat bubble.
-    const STEP_ICON = { perceiving: '👁', executing: '▶', blocked: '🛡', recovering: '↺', auditing: '🔎', done: '✅', failed: '❌' };
+    const STEP_ICON = { planning: '📋', perceiving: '👁', executing: '▶', blocked: '🛡', recovering: '↺', auditing: '🔎', done: '✅', failed: '❌' };
     socket.on('browser:agent-step', (payload) => {
       if (!payload) return;
       bumpIdleTimer();

@@ -8,7 +8,8 @@ import { randomUUID } from 'crypto';
 import WSClient from 'ws';
 import { missionServerUrl, missionAuthHeaders, resolveWorkspace, resolveAgentInteractive, createAgent, pullAgentIntoWorkspace } from './workspace.mjs';
 import { parseApiKeyClient } from './auth.mjs';
-import { guessStartUrl, streamBrowserMissionLog, BROWSER_MISSION_PREFIX } from './missionStream.mjs';
+import { guessStartUrl, BROWSER_MISSION_PREFIX } from './missionStream.mjs';
+import { watchBrowserMission } from './browserTui.mjs';
 
 // ── `aivin browser` default mode: drive the user's OWN local, already-running browser ──────────
 //
@@ -345,8 +346,13 @@ export async function launchLocalChromeWithDebugging(port = CHROME_DEBUG_PORT, p
  * to the user's own local Chrome's real CDP endpoint - and pipes frames both directions verbatim.
  * `close()` disconnects both sides; the user's actual browser window is never touched beyond this
  * one CDP connection, closing the tunnel just detaches Puppeteer server-side.
+ *
+ * `onUnexpectedClose(side)` fires when either leg drops WITHOUT `close()` having been called first
+ * (side is 'backend' or 'chrome') - lets the caller distinguish "network/tunnel died mid-mission"
+ * from "we're done, tearing down deliberately" (Ctrl+C, mission finished) without guessing from
+ * timing alone. Never fires after a deliberate `close()`.
  */
-export function openLocalTunnel(serverUrl, apiKey, chromeWsUrl) {
+export function openLocalTunnel(serverUrl, apiKey, chromeWsUrl, { onUnexpectedClose } = {}) {
   const tunnelId = randomUUID();
   const relayUrl = `${serverUrl.replace(/^http/, 'ws')}/browser-tunnel/external?tunnel_id=${tunnelId}`;
 
@@ -355,19 +361,23 @@ export function openLocalTunnel(serverUrl, apiKey, chromeWsUrl) {
   const toBackend = new WSClient(relayUrl, { headers: { Authorization: `Bearer ${apiKey || ''}` } });
   const toChrome = new WSClient(chromeWsUrl);
 
-  const relay = (from, to) => {
+  let deliberateClose = false;
+
+  const relay = (from, to, side) => {
     from.on('message', (data, isBinary) => {
       if (to.readyState === WSClient.OPEN) to.send(data, { binary: isBinary });
     });
     from.on('close', () => {
       if (to.readyState === WSClient.OPEN) to.close();
+      if (!deliberateClose) onUnexpectedClose?.(side);
     });
     from.on('error', () => {
       if (to.readyState === WSClient.OPEN) to.close();
+      if (!deliberateClose) onUnexpectedClose?.(side);
     });
   };
-  relay(toBackend, toChrome);
-  relay(toChrome, toBackend);
+  relay(toBackend, toChrome, 'backend');
+  relay(toChrome, toBackend, 'chrome');
 
   const ready = Promise.all([
     new Promise((resolve, reject) => {
@@ -381,6 +391,7 @@ export function openLocalTunnel(serverUrl, apiKey, chromeWsUrl) {
   ]);
 
   const close = () => {
+    deliberateClose = true;
     try { toBackend.close(); } catch { /* already closed */ }
     try { toChrome.close(); } catch { /* already closed */ }
   };
@@ -452,73 +463,114 @@ export async function runBrowserMissionLocal(mission, options) {
   console.log(chalk.blue('🌐 AI Browser (local - your own browser):'), mission);
   console.log(chalk.gray(`   Workspace: ${workspace.name || workspace.id}`));
 
-  const tunnel = openLocalTunnel(serverUrl, apiKey, chromeWsUrl);
-  try {
-    await tunnel.ready;
-  } catch (error) {
-    tunnel.close();
-    throw new Error(`Could not open the local browser tunnel: ${error.message}`, { cause: error });
-  }
-
-  const sessionId = `browser-cli-${randomUUID()}`;
-  console.log(chalk.gray(`   Session: ${sessionId}`));
-
-  // Ctrl+C: request cooperative cancellation (same mechanism sdk.browser.cancel() uses - checked
-  // between agentic-loop steps, can't interrupt a step already in flight) AND close the tunnel.
-  // Closing the tunnel alone isn't enough to stop a mission stuck in an LLM call that hasn't
-  // touched the browser connection yet (confirmed while testing this) - the cancel request is what
-  // actually gets it to stop at its next chance to check. The tab this mission was using stays open
-  // either way - never force-closed, since local mode is explicitly "your own browser, your tabs".
+  // Retry the local tunnel on an UNEXPECTED drop (flaky WiFi) - checkpoint-resume already exists
+  // server-side (AIBrowserCheckpointService, matches on tenant + exact mission text), so re-firing
+  // the SAME mission through a fresh tunnel just continues where it left off instead of restarting.
+  // Only worth doing when we're actually watching (options.watch !== false) - without the log
+  // stream there's no reliable signal for "did the mission already finish" vs "tunnel just dropped",
+  // so a single un-retried attempt (old behavior) is what happens when watch is disabled.
+  const MAX_TUNNEL_RETRIES = 3;
   let interrupted = false;
-  const onSigint = () => {
-    if (interrupted) return;
-    interrupted = true;
-    console.log(chalk.yellow('\n\n⏹  Stopping... (requesting cancellation - may take a moment, one agentic step at a time)'));
-    requestBrowserCancel(serverUrl, authHeaders).catch((e) =>
-      console.log(chalk.red(`   ⚠️  Cancellation request failed to send (${e.message}) - the mission may keep running.`)),
-    );
-    tunnel.close();
-    console.log(chalk.gray('   The tab this mission was using is still open in your browser - close it yourself if you don\'t need it.'));
-  };
-  process.on('SIGINT', onSigint);
+  let terminalReason; // 'success' | 'failed' | undefined (still unresolved / gave up watching)
+  let attempt = 0;
 
-  // Fired concurrently, not sequentially - execute-interactive is a SYNCHRONOUS call (blocks until
-  // the mission ends), so the log watcher has to already be listening before/as it fires, not after.
-  const missionPromise = axios.post(
-    // `/plugins/` prefix: OfficialPluginModules.ts registers every official plugin module (incl.
-    // AIBrowserModule) via RouterModule.register({ path: 'plugins', ... }) - easy to miss, confirmed
-    // by testing directly against the API (plain /ai-browser/... 404s, /plugins/ai-browser/... works).
-    `${serverUrl}/plugins/ai-browser/execute-interactive`,
-    {
-      mission,
-      workspace_id: workspace.id || workspace._id,
-      agent_id: agentId,
-      session_id: sessionId,
-      data: { __local_tunnel_id: tunnel.tunnelId, start_url: options.url || guessStartUrl(mission) },
-    },
-    authHeaders,
-  );
-  const watchPromise = options.watch !== false
-    ? streamBrowserMissionLog(serverUrl, apiKey, sessionId, tenantClient, { openViewerOnHIL: false })
-    : Promise.resolve();
-
-  try {
-    // execute-interactive responds immediately (fire-and-forget - see AIBrowserController.ts's
-    // comment on why: a synchronous wait here would hit the same Cloudflare 524 the gRPC
-    // browser.run() call did). The REAL outcome is whatever the log stream above already printed
-    // (ai_browser.success/failed) - this Promise.all is just making sure both sides are done.
-    await Promise.all([missionPromise, watchPromise]);
-  } catch (error) {
-    if (!interrupted) {
-      const message = error.response?.data?.message || error.message || error.code || 'Unknown error';
-      throw new Error(`AI Browser mission failed to start: ${message}`, { cause: error });
+  while (!interrupted) {
+    attempt++;
+    if (attempt > 1) {
+      // Chrome's CDP websocket URL can go stale after a drop, and the browser itself may have
+      // closed too (user closed the window) - re-probe rather than blindly reusing the old URL.
+      const reprobe = await probeLocalChromeDebugger(debugPort);
+      if (!reprobe.wsUrl) {
+        console.log(chalk.red(`\n❌ Mất kết nối và không tìm lại được ${preferredId || 'Chrome/Edge'} đang chạy ở cổng ${debugPort} - trình duyệt có thể đã bị đóng. Dừng lại đây (mission có thể vẫn đang chạy trên server - kiểm tra lại bằng \`aivin browser --view\` hoặc chạy lại lệnh này).`));
+        break;
+      }
+      chromeWsUrl = reprobe.wsUrl;
+      console.log(chalk.yellow(`\n🔄 Tunnel bị rớt kết nối bất ngờ - đang thử lại (lần ${attempt - 1}/${MAX_TUNNEL_RETRIES})...`));
     }
-  } finally {
-    process.off('SIGINT', onSigint);
-    tunnel.close();
+
+    let unexpectedDrop = false;
+    const tunnel = openLocalTunnel(serverUrl, apiKey, chromeWsUrl, {
+      onUnexpectedClose: () => { unexpectedDrop = true; },
+    });
+    try {
+      await tunnel.ready;
+    } catch (error) {
+      tunnel.close();
+      if (attempt > MAX_TUNNEL_RETRIES) throw new Error(`Could not open the local browser tunnel: ${error.message}`, { cause: error });
+      console.log(chalk.yellow(`\n⚠️  Không mở được tunnel (${error.message}) - đang thử lại (lần ${attempt}/${MAX_TUNNEL_RETRIES})...`));
+      continue;
+    }
+
+    const sessionId = `browser-cli-${randomUUID()}`;
+    console.log(chalk.gray(`   Session: ${sessionId}`));
+
+    // Ctrl+C: request cooperative cancellation (same mechanism sdk.browser.cancel() uses - checked
+    // between agentic-loop steps, can't interrupt a step already in flight) AND close the tunnel.
+    // Closing the tunnel alone isn't enough to stop a mission stuck in an LLM call that hasn't
+    // touched the browser connection yet (confirmed while testing this) - the cancel request is what
+    // actually gets it to stop at its next chance to check. The tab this mission was using stays open
+    // either way - never force-closed, since local mode is explicitly "your own browser, your tabs".
+    const onSigint = () => {
+      if (interrupted) return;
+      interrupted = true;
+      console.log(chalk.yellow('\n\n⏹  Stopping... (requesting cancellation - may take a moment, one agentic step at a time)'));
+      requestBrowserCancel(serverUrl, authHeaders).catch((e) =>
+        console.log(chalk.red(`   ⚠️  Cancellation request failed to send (${e.message}) - the mission may keep running.`)),
+      );
+      tunnel.close();
+      console.log(chalk.gray('   The tab this mission was using is still open in your browser - close it yourself if you don\'t need it.'));
+    };
+    process.on('SIGINT', onSigint);
+
+    // Fired concurrently, not sequentially - execute-interactive is a SYNCHRONOUS call (blocks until
+    // the mission ends), so the log watcher has to already be listening before/as it fires, not after.
+    const missionPromise = axios.post(
+      // `/plugins/` prefix: OfficialPluginModules.ts registers every official plugin module (incl.
+      // AIBrowserModule) via RouterModule.register({ path: 'plugins', ... }) - easy to miss, confirmed
+      // by testing directly against the API (plain /ai-browser/... 404s, /plugins/ai-browser/... works).
+      `${serverUrl}/plugins/ai-browser/execute-interactive`,
+      {
+        mission,
+        workspace_id: workspace.id || workspace._id,
+        agent_id: agentId,
+        session_id: sessionId,
+        data: { __local_tunnel_id: tunnel.tunnelId, start_url: options.url || guessStartUrl(mission) },
+      },
+      authHeaders,
+    );
+    const watchPromise = options.watch !== false
+      ? watchBrowserMission(serverUrl, apiKey, sessionId, tenantClient, { openViewerOnHIL: false })
+      : Promise.resolve(undefined);
+
+    try {
+      // execute-interactive responds immediately (fire-and-forget - see AIBrowserController.ts's
+      // comment on why: a synchronous wait here would hit the same Cloudflare 524 the gRPC
+      // browser.run() call did). The REAL outcome is whatever the log stream above already printed
+      // (ai_browser.success/failed) - this Promise.all is just making sure both sides are done.
+      const [, watchReason] = await Promise.all([missionPromise, watchPromise]);
+      terminalReason = watchReason;
+    } catch (error) {
+      if (!interrupted) {
+        const message = error.response?.data?.message || error.message || error.code || 'Unknown error';
+        throw new Error(`AI Browser mission failed to start: ${message}`, { cause: error });
+      }
+    } finally {
+      process.off('SIGINT', onSigint);
+      tunnel.close();
+    }
+
+    if (interrupted) break;
+    if (terminalReason === 'success' || terminalReason === 'failed') break; // genuine mission outcome - done
+    // options.watch === false (no signal at all) or watch gave up on its own (idle/connect_error,
+    // NOT a tunnel drop) - neither is worth blindly retrying; only retry on a confirmed tunnel drop.
+    if (!unexpectedDrop) break;
+    if (attempt > MAX_TUNNEL_RETRIES) {
+      console.log(chalk.red(`\n❌ Đã thử lại ${MAX_TUNNEL_RETRIES} lần nhưng tunnel vẫn liên tục rớt kết nối - dừng theo dõi. Mission có thể vẫn đang chạy trên server.`));
+      break;
+    }
   }
 
-  if (!interrupted) {
+  if (!interrupted && (terminalReason === 'success' || terminalReason === 'failed')) {
     console.log(chalk.gray('\n   Done - see the log lines above for the outcome, and your own browser for the result.'));
   }
 }
@@ -588,7 +640,7 @@ export async function runBrowserMissionRemote(mission, options) {
 
   try {
     if (options.watch !== false && threadId) {
-      await streamBrowserMissionLog(serverUrl, apiKey, threadId, tenantClient);
+      await watchBrowserMission(serverUrl, apiKey, threadId, tenantClient);
     }
   } finally {
     process.off('SIGINT', onSigint);

@@ -26,7 +26,10 @@
     "chalk": "^5.6.2",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
+    "ink": "^7.1.1",
+    "ink-text-input": "^6.0.0",
     "inquirer": "^14.0.2",
+    "react": "^19.2.8",
     "socket.io-client": "^4.8.3",
     "ws": "^8.18.0"
   },
