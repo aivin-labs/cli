@@ -25,6 +25,32 @@ export async function withSpinner(label, fn) {
   }
 }
 
+// Same as withSpinner but also renders a stage/percent readout that changes over time — for calls
+// where the backend publishes realtime progress (e.g. `plugin trigger`'s cold-start Docker install,
+// which can take 60-150s+ with zero feedback otherwise). `getCurrent()` is polled every tick and
+// should return the latest `{ stage, percent, message }` received (or null before anything arrives).
+export async function withProgressSpinner(label, getCurrent, fn) {
+  if (!process.stdout.isTTY) {
+    console.log(chalk.blue(`${label}...`));
+    return fn();
+  }
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let i = 0;
+  const timer = setInterval(() => {
+    const current = getCurrent?.();
+    const suffix = current?.percent != null ? ` ${current.message || current.stage} ${current.percent}%` : '...';
+    process.stdout.write(`\r${chalk.cyan(frames[i])} ${label}${suffix}`);
+    i = (i + 1) % frames.length;
+  }, 100);
+  try {
+    return await fn();
+  } finally {
+    clearInterval(timer);
+    readline.cursorTo(process.stdout, 0);
+    readline.clearLine(process.stdout, 0);
+  }
+}
+
 // Positional CLI args are declared optional ([arg]) everywhere, not required (<arg>), so Commander
 // never hard-fails before the action() runs - every command instead calls this to fill a missing
 // value interactively. Falls back to throwing `usage` when there's no TTY to prompt on (scripts/

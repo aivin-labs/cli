@@ -4,9 +4,10 @@ import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
 import inquirer from 'inquirer';
+import { randomUUID } from 'crypto';
 import { flattenManifestFile } from '@aivin-labs/sdk';
 import readline from 'readline';
-import { requireArg } from './util.mjs';
+import { requireArg, withProgressSpinner } from './util.mjs';
 
 const DELETE_TIMEOUT_MS = 30000;
 
@@ -71,6 +72,30 @@ export async function watchPluginLogLines(pluginId, { serverUrl, apiKey, onLine 
 
   if (subscribed) socket.on('plugin-log', onLine);
   return { subscribed, denyReason, stop: () => socket.disconnect() };
+}
+
+/**
+ * Realtime stage/percent progress for a single `trigger` call — mirrors `withScanLog`/
+ * `scanAndPublishMcp` (`mcpProxy.mjs`, used for `aivin mcp <url>`'s scan step): join the Socket.IO
+ * room BEFORE the caller sends its POST (so no early progress events are missed), then track the
+ * latest `plugin-execute-progress` payload for a spinner to poll. Useful for the same reason as
+ * `--watch-logs` — a cold-start Docker install can take 60-150s+ with zero feedback otherwise —
+ * but this is on by default (no flag needed) since it's cheap and doesn't require log-view
+ * permission the way `--watch-logs` does.
+ */
+async function withExecuteProgress(executeSessionId, { serverUrl, apiKey }) {
+  const socket = io(serverUrl, { auth: { token: apiKey || 'dev-token' }, transports: ['websocket'], reconnection: true, timeout: 8000 });
+  const room = `plugin-execute:${executeSessionId}`;
+  let current = { stage: 'starting', percent: 0, message: 'Đang gửi yêu cầu...' };
+  await new Promise((resolve) => {
+    const giveUp = setTimeout(resolve, 8000);
+    socket.on('connect_error', () => { clearTimeout(giveUp); resolve(); });
+    socket.on('connect', () => {
+      socket.emit('join-room', { name: 'plugin-execute', rooms: [room] }, () => { clearTimeout(giveUp); resolve(); });
+    });
+  });
+  socket.on('plugin-execute-progress', (payload) => { current = payload; });
+  return { getCurrent: () => current, stop: () => socket.disconnect() };
 }
 
 /**
@@ -207,17 +232,22 @@ export async function triggerPlugin(mission, inputJson, options) {
     }
   }
 
-  console.log(chalk.blue(`🚀 Triggering ${entryLabel || entryId}...`));
+  const executeSessionId = randomUUID();
+  body.execute_session_id = executeSessionId;
+  const progress = await withExecuteProgress(executeSessionId, { serverUrl, apiKey });
 
   let response;
   try {
-    response = await axios.post(`${serverUrl}/plugins/execute`, body, { ...authHeaders, timeout: EXECUTE_TIMEOUT_MS });
+    response = await withProgressSpinner(`🚀 Triggering ${entryLabel || entryId}`, progress.getCurrent, () =>
+      axios.post(`${serverUrl}/plugins/execute`, body, { ...authHeaders, timeout: EXECUTE_TIMEOUT_MS }),
+    );
   } catch (error) {
     if (logWatcher?.subscribed) {
       // Give trailing log lines from this failed call a moment to arrive before disconnecting.
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
     logWatcher?.stop();
+    progress.stop();
     const message = error.response?.data?.message || error.message;
     throw new Error(`Trigger failed: ${message}`, { cause: error });
   }
@@ -226,6 +256,7 @@ export async function triggerPlugin(mission, inputJson, options) {
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
   logWatcher?.stop();
+  progress.stop();
 
   const result = response.data ?? {};
 
