@@ -169,6 +169,7 @@ const MCP_SCAN_TIMEOUT_MS = 60000;
 const MCP_BUILD_TIMEOUT_MS = 30000;
 const MCP_DEPLOY_TIMEOUT_MS = 60000;
 const MCP_SUBMIT_TIMEOUT_MS = 30000;
+const MCP_WATCH_TIMEOUT_MS = 15000;
 
 // ── MCP proxy plugins - wrap an external MCP server tool/resource/prompt, no code required ────
 
@@ -714,4 +715,59 @@ export async function scanAndPublishMcp(url, options) {
       }
     }
   }
+}
+
+function extractApiErrorMessage(error) {
+  return error.response?.data?.message?.message || error.response?.data?.message || error.message;
+}
+
+/**
+ * Register (or reactivate) a server-side watch on a GitHub repo+branch previously scanned via
+ * `aivin mcp <url>` - the backend cron-checks the branch's HEAD commit every ~5 min and
+ * auto-rescans+resyncs the plugins it owns when it changes. No CLI process needs to stay running;
+ * this call just registers the watch and returns.
+ */
+export async function registerMcpWatch(url, options = {}) {
+  let watch;
+  try {
+    const res = await withSpinner('👀 Registering watch', () =>
+      axios.post(`${connectorBaseUrl()}/plugins/mcp-watch`, { url, branch: options.branch },
+        { ...connectorAuthHeaders(), timeout: MCP_WATCH_TIMEOUT_MS }));
+    watch = res.data;
+  } catch (error) {
+    throw new Error(`Watch registration failed: ${extractApiErrorMessage(error)}`, { cause: error });
+  }
+  console.log(chalk.green(`✅ Watching ${watch.repo_id} @ ${watch.branch}`));
+  console.log(chalk.gray('   Checked server-side every ~5 min - no need to keep this terminal open.'));
+}
+
+/** Stop auto-resyncing a previously watched repo. Does not touch already-deployed plugins. */
+export async function unwatchMcp(url, options = {}) {
+  try {
+    await axios.delete(`${connectorBaseUrl()}/plugins/mcp-watch`,
+      { ...connectorAuthHeaders(), data: { url, branch: options.branch } });
+  } catch (error) {
+    throw new Error(`Unwatch failed: ${extractApiErrorMessage(error)}`, { cause: error });
+  }
+  console.log(chalk.green('✅ Watch removed - deployed plugins are untouched.'));
+}
+
+/** List the caller's watched repos. */
+export async function listMcpWatches() {
+  let watches;
+  try {
+    const res = await axios.get(`${connectorBaseUrl()}/plugins/mcp-watch`, connectorAuthHeaders());
+    watches = res.data || [];
+  } catch (error) {
+    throw new Error(`Listing watches failed: ${extractApiErrorMessage(error)}`, { cause: error });
+  }
+  if (watches.length === 0) {
+    console.log(chalk.gray('No watched repos. Run `aivin mcp watch <url>` to add one.'));
+    return;
+  }
+  watches.forEach((w) => {
+    console.log(`${chalk.bold(w.repo_id)} @ ${w.branch}  ${chalk.gray(`[${w.status}]`)}`);
+    console.log(chalk.gray(`   sha: ${w.last_known_sha || '(not yet checked)'}  last checked: ${w.last_checked_at || 'never'}`));
+    if (w.status === 'error') console.log(chalk.red(`   ⚠ ${w.last_error}`));
+  });
 }

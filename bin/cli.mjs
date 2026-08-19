@@ -25,7 +25,7 @@ import { initInteractive, makePluginFromDescription, convertExistingProject } fr
 import { searchPlugins, showPluginInfo, askPlugin, streamPluginLogs, triggerPlugin, deletePluginCmd } from './lib/pluginTrigger.mjs';
 import { connectorAuthHeaders, connectorBaseUrl, listConnectors, registerConnector, searchConnectors } from './lib/connectors.mjs';
 import { attachStore, createStore, deleteStore, detachStore, listStores, removeNode, setStoreEnabled } from './lib/store.mjs';
-import { buildMcpManifest, parseMcpArgs, guessConnectorQueryFromEnvVarName, createMcpProxyPlugin, scanAndPublishMcp } from './lib/mcpProxy.mjs';
+import { buildMcpManifest, parseMcpArgs, guessConnectorQueryFromEnvVarName, createMcpProxyPlugin, scanAndPublishMcp, registerMcpWatch, unwatchMcp, listMcpWatches } from './lib/mcpProxy.mjs';
 import {
   saveGlobalApiKey,
   browserLogin,
@@ -717,6 +717,41 @@ mcpCommand
     try {
       name = await requireArg(name, { prompt: 'Plugin name (lowercase letters, numbers, hyphens):', usage: 'Usage: aivin mcp create <name>' });
       await createMcpProxyPlugin(name, options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+mcpCommand
+  .command('watch [url]')
+  .description('Watch a GitHub repo/branch and auto-rescan+resync its plugins when the branch updates (checked server-side every ~5 min, no CLI process needs to stay running)')
+  .option('--branch <name>', "Branch to watch (default: the repo's default branch)")
+  .option('--list', 'List your watched repos instead of registering a new one')
+  .action(async (url, options) => {
+    try {
+      if (options.list) {
+        await listMcpWatches();
+        return;
+      }
+      url = await requireArg(url, {
+        prompt: 'GitHub repo URL to watch:',
+        usage: 'Usage: aivin mcp watch <url> [--branch <name>] | aivin mcp watch --list',
+      });
+      await registerMcpWatch(url, options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+mcpCommand
+  .command('unwatch <url>')
+  .description('Stop auto-resyncing a previously watched repo')
+  .option('--branch <name>', 'Branch to unwatch (default: all watched branches for this repo)')
+  .action(async (url, options) => {
+    try {
+      await unwatchMcp(url, options);
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);
