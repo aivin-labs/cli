@@ -393,7 +393,7 @@ pluginCommand
   .command('ask [mission]')
   .description('One-shot: search for the best-matching plugin for a plain-language mission and trigger it right away, like an agent would')
   .option('--top <n>', 'How many candidates to consider/print as runner-up context (default 5) - only the top match is ever run')
-  .option('-i, --input <json>', 'Force specific fields (as JSON) alongside the auto-mapped ones - explicit fields win')
+  .option('-i, --input <json>', 'Input fields as a JSON string - skips the interactive field-by-field prompt')
   .option('--workspace <id>', 'Workspace id to search/run against (default: auto-picks your first one)')
   .option('--agent <id>', 'Agent id to run as, if the plugin needs one for HIL/confirm behavior to be accurate')
   .option('--watch-logs', "Also stream the chosen plugin's own live console output inline")
@@ -441,7 +441,6 @@ pluginCommand
 pluginCommand
   .command('trigger [mission] [input]')
   .description('Invoke this deployed plugin for real and print the result - like the platform\'s Playground')
-  .option('-a, --auto <prompt>', 'Natural-language prompt - the platform auto-maps it onto the input schema for you')
   .option('--id <pluginId>', 'Plugin id to trigger directly - skips the local manifest.json lookup (e.g. for `aivin mcp` plugins, which have no local project directory)')
   .option('--func <name>', 'Which function to trigger, for a multi-function plugin (matches name/func/id) - ignored when --id is given')
   .option('--workspace <id>', 'Workspace id to run against (default: auto-picks your first one)')

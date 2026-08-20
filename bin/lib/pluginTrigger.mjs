@@ -12,6 +12,83 @@ import { requireArg, withProgressSpinner } from './util.mjs';
 const DELETE_TIMEOUT_MS = 30000;
 
 /**
+ * Parses one manifest `input` field's declared shape, e.g. `"object - Input data for processing"`
+ * or `"number - How many items"`, into `{ type, description }` - `type` drives which inquirer
+ * prompt kind `promptInputFields` uses below. Unrecognized/missing type text falls back to a plain
+ * string prompt, since that's a safe default for anything free-text.
+ */
+function parseFieldSpec(spec) {
+  if (typeof spec !== 'string') return { type: 'string', description: '' };
+  const match = spec.match(/^\s*(\w+)\s*-?\s*(.*)$/);
+  if (!match) return { type: 'string', description: spec };
+  const type = match[1].toLowerCase();
+  return { type: ['string', 'number', 'integer', 'boolean', 'object', 'array'].includes(type) ? type : 'string', description: match[2] || '' };
+}
+
+/**
+ * Interactive replacement for the old "-a/--auto <prompt>, let the backend's mapDataToSchema guess
+ * your input" flow: walks a plugin's manifest `input` schema (`{ fieldName: "type - description" }`)
+ * field by field and asks the user directly, instead of asking for one raw JSON blob or an
+ * AI-guessed mapping. A blank answer omits that field from the result entirely so optional fields
+ * stay optional. Falls back to a single generic `data` field when no schema is available at all
+ * (e.g. `--id` given for a plugin whose schema lookup came back empty).
+ */
+async function promptInputFields(schema) {
+  const fields = schema && typeof schema === 'object' ? Object.entries(schema) : [];
+  if (fields.length === 0) {
+    const { data } = await inquirer.prompt([
+      { type: 'input', name: 'data', message: 'Input data (as a JSON string, e.g. {"text":"hello"}), or leave blank for none:' },
+    ]);
+    if (!data) return {};
+    try {
+      return JSON.parse(data);
+    } catch (error) {
+      throw new Error(`Invalid JSON for input: ${error.message}`, { cause: error });
+    }
+  }
+
+  const result = {};
+  for (const [fieldName, spec] of fields) {
+    const { type, description } = parseFieldSpec(spec);
+    const label = description ? `${fieldName} (${type}) - ${description}:` : `${fieldName} (${type}):`;
+
+    if (type === 'boolean') {
+      const { value } = await inquirer.prompt([{ type: 'confirm', name: 'value', message: label, default: false }]);
+      result[fieldName] = value;
+      continue;
+    }
+
+    const { value } = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'value',
+        message: label,
+        validate: (input) => {
+          if (!input) return true; // blank = skip this field
+          if ((type === 'number' || type === 'integer') && Number.isNaN(Number(input))) return 'Enter a number';
+          if ((type === 'object' || type === 'array') && !tryParseJson(input)) return 'Enter valid JSON';
+          return true;
+        },
+      },
+    ]);
+    if (!value) continue; // blank = optional field, leave it out
+    if (type === 'number' || type === 'integer') result[fieldName] = Number(value);
+    else if (type === 'object' || type === 'array') result[fieldName] = JSON.parse(value);
+    else result[fieldName] = value;
+  }
+  return result;
+}
+
+function tryParseJson(input) {
+  try {
+    JSON.parse(input);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolves which manifest entry `plugin trigger` should invoke: the `--func` match if given, the
  * one-and-only entry for a single-function/single-entry plugin, or a clear error listing the
  * choices for a multi-function plugin with no `--func` given.
@@ -101,20 +178,18 @@ async function withExecuteProgress(executeSessionId, { serverUrl, apiKey }) {
 /**
  * `aivin plugin trigger` - invokes an already-deployed plugin for real via the same
  * `POST /plugins/execute` the platform's own Playground uses (PluginExecutionService.executePlugin
- * on the backend), and prints the result. Two modes:
- * - Direct: `<mission>` + `<input>` (a JSON string) sent as `purpose`/`arguments` as-is.
- * - Auto (`-a/--auto <prompt>`): sends the prompt as `raw_text` instead - the backend's own
- *   `mapDataToSchema` maps it onto `manifest.input` for you (same mechanism the Playground's "Thử
- *   nghiệm" tab uses), same as pasting a free-text request into the platform's chat-style tester.
- *   `<input>` can still be given alongside `-a` for fields you want to force rather than let the AI
- *   infer - explicit `arguments` win over auto-mapped ones per field.
+ * on the backend), and prints the result. `<mission>` + `<input>` (a JSON string) are sent as
+ * `purpose`/`arguments` as-is; if either is missing, this prompts for it interactively - mission as
+ * free text, input field-by-field from the plugin's manifest `input` schema (see
+ * `promptInputFields`). No more auto-mapping (`-a/--auto`, backend's `mapDataToSchema`) - the user
+ * fills in every field themselves instead of the AI guessing at a free-text prompt.
  *
  * By default this only surfaces what `/plugins/execute`'s response itself carries: `processing_log`
- * (the mapping/execution stage messages, all at once, not the plugin's own internal console output)
- * and `mapped_arguments` (only present when `-a` was used). Pass `--watch-logs` to also stream the
- * plugin's own console.log/console.error output inline (subscribes right before the call, same feed
- * `aivin plugin logs` tails) instead of needing a second terminal - see `watchPluginLogLines` for
- * why this silently does nothing for a plugin you don't have log-view permission on.
+ * (the mapping/execution stage messages, all at once, not the plugin's own internal console output).
+ * Pass `--watch-logs` to also stream the plugin's own console.log/console.error output inline
+ * (subscribes right before the call, same feed `aivin plugin logs` tails) instead of needing a
+ * second terminal - see `watchPluginLogLines` for why this silently does nothing for a plugin you
+ * don't have log-view permission on.
  *
  * `--id <pluginId>` skips the local manifest.json lookup - required for plugins with no scaffolded
  * project directory, e.g. proxy plugins built by `aivin mcp <url>`, which deploy straight from an
@@ -147,6 +222,7 @@ export async function triggerPlugin(mission, inputJson, options) {
   // MCP plugin from the Playground-equivalent flow was impossible outside the web app.
   let entryId = options.id;
   let entryLabel = options.id;
+  let inputSchema;
   if (!entryId) {
     const currentDir = process.cwd();
     const manifestPath = path.join(currentDir, 'manifest.json');
@@ -157,33 +233,8 @@ export async function triggerPlugin(mission, inputJson, options) {
     const entry = resolveTriggerEntry(manifest, options.func);
     entryId = entry.id;
     entryLabel = `${entry.name}${entry.func ? ` [${entry.func}]` : ''}`;
+    inputSchema = entry.input;
   }
-
-  const body = { plugin_id: entryId };
-  if (options.auto) {
-    body.raw_text = options.auto;
-    body.purpose = mission || options.auto;
-    if (inputJson) {
-      try {
-        body.arguments = JSON.parse(inputJson);
-      } catch (error) {
-        throw new Error(`Invalid JSON for <input>: ${error.message}`, { cause: error });
-      }
-    }
-  } else {
-    if (!mission || !inputJson) {
-      const usage = 'Usage: aivin plugin trigger "<mission>" \'<input JSON>\'  (or: aivin plugin trigger -a "<prompt>")';
-      mission = await requireArg(mission, { prompt: 'Mission (why this run was triggered):', usage });
-      inputJson = await requireArg(inputJson, { prompt: 'Input (as a JSON string, e.g. {"text":"hello"}):', usage });
-    }
-    body.purpose = mission;
-    try {
-      body.arguments = JSON.parse(inputJson);
-    } catch (error) {
-      throw new Error(`Invalid JSON for <input>: ${error.message}`, { cause: error });
-    }
-  }
-  if (options.agent) body.agent_id = options.agent;
 
   const serverUrl = process.env.AIVIN_BASE_URL || 'https://api.aivin.cloud';
   const apiKey = process.env.API_KEY;
@@ -191,6 +242,34 @@ export async function triggerPlugin(mission, inputJson, options) {
     console.log(chalk.yellow('⚠️  API_KEY not set - run `aivin login` first'));
   }
   const authHeaders = { headers: { Authorization: `Bearer ${apiKey || 'dev-token'}` } };
+
+  const body = { plugin_id: entryId };
+  mission = await requireArg(mission, { prompt: 'Mission (why this run was triggered):', usage: 'Usage: aivin plugin trigger "<mission>" \'<input JSON>\'' });
+  body.purpose = mission;
+
+  if (inputJson) {
+    try {
+      body.arguments = JSON.parse(inputJson);
+    } catch (error) {
+      throw new Error(`Invalid JSON for <input>: ${error.message}`, { cause: error });
+    }
+  } else {
+    // No auto-mapping anymore - ask the user for each input field directly instead of guessing
+    // (or asking for one raw JSON blob) on their behalf.
+    if (!inputSchema && options.id) {
+      try {
+        const res = await axios.get(`${serverUrl}/plugins/search`, { ...authHeaders, params: { query: options.id, limit: 10 } });
+        const results = Array.isArray(res.data) ? res.data : res.data?.items || [];
+        inputSchema = results.find((p) => p.id === options.id)?.input;
+      } catch {
+        // Best-effort only - falls back to the generic single-field prompt below.
+      }
+    }
+    console.log(chalk.gray(`\nInput for ${entryLabel || entryId}:`));
+    body.arguments = await promptInputFields(inputSchema);
+  }
+
+  if (options.agent) body.agent_id = options.agent;
   // No client-side timeout here before meant a hung backend (or a genuinely stuck plugin - the
   // server side already caps at MAX_DOCKER_TIMEOUT_MS/effectiveTimeout, but that's enforced on the
   // backend, not by this CLI process) could leave `trigger` sitting forever with no feedback short
@@ -509,10 +588,10 @@ export async function showPluginInfo(id, options) {
 /**
  * `aivin plugin ask "<mission>"` - the one-shot "just simulate the agent" mode: given a
  * plain-language mission, it searches the plugin ecosystem the same relevance-ranked way the
- * platform's own agent does to auto-select a plugin, picks the top match, and immediately triggers
- * it with that same mission auto-mapped onto the input schema (`plugin trigger -a` under the hood).
- * Where `plugin search` + `plugin trigger --id <id> -a "..."` is the two-step "pick, then run" flow,
- * `ask` collapses both into what an agent actually does at execution time - no manual id copy/paste.
+ * platform's own agent does to auto-select a plugin, picks the top match, then triggers it -
+ * prompting for each input field directly (`plugin trigger` under the hood, no auto-mapping).
+ * Where `plugin search` + `plugin trigger --id <id>` is the two-step "pick, then run" flow, `ask`
+ * collapses both into one - no manual id copy/paste, but input is still filled in by hand.
  *
  * `--top <n>` (default 5) controls how many candidates are fetched so the runner-up(s) can be
  * printed for context/debugging when the auto-pick looks wrong; only the #1 match is ever run.
@@ -552,7 +631,7 @@ export async function askPlugin(mission, options) {
   }
   console.log();
 
-  await triggerPlugin(mission, options.input, { ...options, auto: mission, id: chosen.id });
+  await triggerPlugin(mission, options.input, { ...options, id: chosen.id });
 }
 
 export function formatPluginListLine(plugin, isSelected) {
