@@ -90,7 +90,7 @@ Hàm: `scanAndPublishMcp()`.
 
 ```
 1. Cảnh báo trust ("chỉ scan MCP server bạn tin tưởng")
-2. POST /plugins/scan-mcp {url}   [timeout 60s]
+2. POST /plugins/scan-mcp {url}   [timeout 180s]
    - URL sống → handshake thật qua giao thức MCP (initialize, tools/list, ...)
    - Repo/npm chưa chạy → rất có thể BE phải tải + chạy thử (vd `npx -y <package>`) để lấy
      schema thật, tương tự cách MCP Inspector hoạt động — "cài đặt" xảy ra ở BƯỚC NÀY,

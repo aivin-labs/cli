@@ -165,7 +165,10 @@ export function parseMcpArgs(argsString) {
 // short of Ctrl+C (the exact failure mode `plugin trigger` already guards against - see its
 // EXECUTE_TIMEOUT_MS). Scanning gets more headroom since it may have to handshake a live remote
 // MCP server, not just hit this platform's own backend.
-const MCP_SCAN_TIMEOUT_MS = 60000;
+// A scan includes README/source discovery, one AI extraction, and up to 30s of container
+// verification. Sixty seconds regularly cut off a healthy cold npx scan before the backend could
+// return its AI fallback, producing Axios' misleading "timeout of 60000ms exceeded" error.
+const MCP_SCAN_TIMEOUT_MS = 180000;
 const MCP_BUILD_TIMEOUT_MS = 30000;
 const MCP_DEPLOY_TIMEOUT_MS = 60000;
 const MCP_SUBMIT_TIMEOUT_MS = 30000;
