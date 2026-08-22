@@ -508,6 +508,8 @@ Options:
   --agent <id>        Agent id to run as, if the plugin needs one for
                       HIL/confirm behavior to be accurate
   --watch-logs        Also stream the chosen plugin's own live console output inline
+  --no-auth-prompt    Don't offer to connect/configure a missing connector
+                      interactively - just print the needs_auth result and exit
   --save              Write this run's result to .test/trigger/<ts>.json
   --compare <file>    Diff this run against a previously --save'd file
 ```
@@ -543,6 +545,8 @@ Options:
                        needed. Requires permission to view that plugin's logs;
                        most store plugins from other orgs just fall back to
                        the REST result only.
+  --no-auth-prompt     Don't offer to connect/configure a missing connector
+                       interactively - just print the needs_auth result and exit
   --save               Write this run's result to .test/trigger/<ts>.json
   --compare <file>     Diff this run against a previously --save'd file
 ```
@@ -598,6 +602,27 @@ your org's deployments). Triggering a plugin from the public store that some oth
 print `(--watch-logs: no live console output - ...)` and fall back to the REST result only - there's
 no way around that from the CLI, raw container stdout isn't something the platform exposes across
 org boundaries.
+
+### Missing a connector? `trigger` sets it up for you, right there
+
+If the plugin needs a connector (OAuth account, or a plain credential form like SMTP
+host/user/pass) that isn't configured yet, `/plugins/execute` comes back `needs_auth` instead of
+running. In an interactive terminal, `trigger`/`ask` catch that and offer to fix it on the spot
+instead of just printing the failure and making you go set it up in the web app:
+
+- **OAuth connector** - asks "Open your browser to connect now?", then opens the same
+  authorize-flow the web app's "Connect" button uses (falls back to printing the URL if it can't
+  launch a browser), and polls in the background until you've finished. No timeout hunting - it
+  waits up to 3 minutes, then retries the trigger automatically.
+- **Credential-form connector** (SMTP, or any custom `credential_form` connector registered via
+  `aivin connector register`) - prompts for each declared field right in the terminal (masked for
+  `secret` fields), saves it, then retries.
+
+Either way, you get exactly one automatic retry after setup - if it still needs auth after that
+(e.g. you declined, or the OAuth flow timed out), the `needs_auth` result just prints as-is. Pass
+`--no-auth-prompt` to skip all of this and always just print the result (useful for scripts/CI,
+where there's no one to answer the prompt anyway - it's also skipped automatically whenever stdin/
+stdout isn't a real TTY).
 
 ### Turning ad-hoc tries into a regression check: `--save` / `--compare`
 

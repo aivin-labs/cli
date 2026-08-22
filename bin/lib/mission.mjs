@@ -14,7 +14,19 @@ export async function runBrowserMission(mission, options) {
   // without starting a new mission. Useful if the auto-open above was missed/closed by accident.
   // Same for both modes - the viewer just reacts to whatever browser:cast-start fires next.
   if (options.view) {
-    await openBrowserViewer(serverUrl, apiKey, tenantClient);
+    // ✅ FIX: openBrowserViewer's own HTTP server keeps listening (and with it the whole CLI
+    // process, since a live listener holds the Node event loop open) until something explicitly
+    // closes it - streamBrowserMissionLog's `stop()` does that for the auto-opened-on-HIL case, but
+    // this standalone --view path never had an equivalent, so `aivin browser --view` never exited
+    // on its own - Ctrl+C looked like the only way out, with no indication that was expected.
+    const server = await openBrowserViewer(serverUrl, apiKey, tenantClient);
+    console.log(chalk.gray('   Press Ctrl+C to close the viewer and exit.'));
+    await new Promise((resolve) => {
+      process.on('SIGINT', () => {
+        server.close();
+        resolve();
+      });
+    });
     return;
   }
 

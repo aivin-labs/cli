@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import axios from 'axios';
 import inquirer from 'inquirer';
 import { trustBadge, browseResults } from './pluginTrigger.mjs';
-import { withSpinner } from './util.mjs';
+import { withSpinner, DEFAULT_API_TIMEOUT_MS } from './util.mjs';
 
 // ── Connectors - reusable OAuth apps / credential-form namespaces plugins can reference ────────
 
@@ -11,7 +11,11 @@ export function connectorAuthHeaders() {
   if (!apiKey) {
     console.log(chalk.yellow('⚠️  API_KEY not set - run `aivin login` first'));
   }
-  return { headers: { Authorization: `Bearer ${apiKey || 'dev-token'}` } };
+  // ✅ FIX: no call site in this file set a `timeout` before - worst case was `registerConnector`,
+  // where a hang meant re-typing an entire OAuth client_secret from scratch after Ctrl+C. Setting it
+  // once here (this object is passed straight through as the axios config everywhere it's used)
+  // covers every call site.
+  return { headers: { Authorization: `Bearer ${apiKey || 'dev-token'}` }, timeout: DEFAULT_API_TIMEOUT_MS };
 }
 
 export function connectorBaseUrl() {
@@ -34,12 +38,16 @@ export function formatConnectorDetail(connector) {
   lines.push(`${chalk.gray('type')}       ${connector.type}`);
   lines.push(`${chalk.gray('visibility')} ${connector.visibility}${connector.store_status ? ` (${connector.store_status})` : ''}`);
   if (connector.description) lines.push(`\n${connector.description}`);
-  if (connector.type === 'oauth' && connector.oauth) {
-    lines.push(`\n${chalk.gray('authorize_url')} ${connector.oauth.authorize_url}`);
-    lines.push(`${chalk.gray('access_url')}    ${connector.oauth.access_url}`);
-    if (connector.oauth.scopes?.length) lines.push(`${chalk.gray('scopes')}        ${connector.oauth.scopes.join(', ')}`);
-  } else if (connector.type === 'credential_form' && connector.fields?.length) {
-    lines.push(`\n${chalk.gray('fields')}\n${connector.fields.map(f => `  - ${f.name}${f.required ? ' (required)' : ''}${f.label ? `: ${f.label}` : ''}`).join('\n')}`);
+  // Backend's ConnectorManifest nests OAuth/form details under `config` (discriminated by `type`) -
+  // not top-level `oauth`/`fields` (see ConnectorDTO.ts's RegisterConnectorDto/ConnectorManifest and
+  // ConnectorService.sanitize, which keeps `config` intact). Reading the wrong path here used to
+  // print an empty detail section for every connector regardless of what it actually holds.
+  if (connector.type === 'oauth' && connector.config) {
+    lines.push(`\n${chalk.gray('authorize_url')} ${connector.config.authorize_url}`);
+    lines.push(`${chalk.gray('access_url')}    ${connector.config.access_url}`);
+    if (connector.config.scopes?.length) lines.push(`${chalk.gray('scopes')}        ${connector.config.scopes.join(', ')}`);
+  } else if (connector.type === 'credential_form' && connector.config?.fields?.length) {
+    lines.push(`\n${chalk.gray('fields')}\n${connector.config.fields.map(f => `  - ${f.name}${f.required ? ' (required)' : ''}${f.label ? `: ${f.label}` : ''}`).join('\n')}`);
   }
   lines.push(chalk.gray(`\nReference it from a plugin manifest's connection_id: "${connector.id}"`));
   return lines.join('\n');
@@ -109,6 +117,40 @@ export async function listConnectors(options) {
   }
 }
 
+/**
+ * Pure assembly of the request body `POST /connectors/register` expects, split out of
+ * registerConnector() so it's unit-testable without stubbing inquirer prompts - this exact
+ * assembly (nesting under `config`, not top-level `oauth`/`fields`) is what drifted from the
+ * backend's actual RegisterConnectorDto before and broke every registration; a regression test
+ * pins the shape down going forward. `oauthAnswers`/`fields` are already-collected inquirer
+ * answers, not prompted here.
+ */
+export function buildRegisterConnectorDto(base, { oauthAnswers, fields } = {}) {
+  const dto = { id: base.id, name: base.name, description: base.description || undefined, image: base.image || undefined, type: base.type, visibility: base.visibility };
+
+  // ⚠ Backend's RegisterConnectorDto expects these nested under `config` (discriminated by `type` -
+  // see ConnectorDTO.ts / ConnectorService.register, which reads `dto.config.authorize_url` /
+  // `dto.config.fields`, never a top-level `dto.oauth`/`dto.fields`). This used to send them
+  // top-level, which the backend's `config` field (now validated with `@IsObject()`, previously
+  // silently stripped by the global whitelist ValidationPipe for having no class-validator
+  // decorators at all) would see as missing/wrong-shaped - registration failed every time regardless
+  // of what was typed here.
+  if (base.type === 'oauth') {
+    dto.config = {
+      authorize_url: oauthAnswers.authorize_url,
+      access_url: oauthAnswers.access_url,
+      profile_url: oauthAnswers.profile_url || undefined,
+      client_id: oauthAnswers.client_id,
+      client_secret: oauthAnswers.client_secret,
+      scopes: oauthAnswers.scopes ? oauthAnswers.scopes.split(',').map((s) => s.trim()).filter(Boolean) : [],
+    };
+  } else {
+    if (!fields || fields.length === 0) throw new Error('credential_form connectors need at least one field');
+    dto.config = { fields };
+  }
+  return dto;
+}
+
 export async function registerConnector() {
   console.log(chalk.blue('🔌 Register a new connector\n'));
 
@@ -137,10 +179,9 @@ export async function registerConnector() {
     },
   ]);
 
-  const dto = { id: base.id, name: base.name, description: base.description || undefined, image: base.image || undefined, type: base.type, visibility: base.visibility };
-
+  let oauthAnswers, fields;
   if (base.type === 'oauth') {
-    const oauth = await inquirer.prompt([
+    oauthAnswers = await inquirer.prompt([
       { type: 'input', name: 'authorize_url', message: 'Authorize URL:' },
       { type: 'input', name: 'access_url', message: 'Token/access URL:' },
       { type: 'input', name: 'profile_url', message: 'Profile URL (optional):' },
@@ -148,16 +189,8 @@ export async function registerConnector() {
       { type: 'password', name: 'client_secret', message: 'Client secret:' },
       { type: 'input', name: 'scopes', message: 'Scopes (comma-separated, optional):' },
     ]);
-    dto.oauth = {
-      authorize_url: oauth.authorize_url,
-      access_url: oauth.access_url,
-      profile_url: oauth.profile_url || undefined,
-      client_id: oauth.client_id,
-      client_secret: oauth.client_secret,
-      scopes: oauth.scopes ? oauth.scopes.split(',').map((s) => s.trim()).filter(Boolean) : [],
-    };
   } else {
-    const fields = [];
+    fields = [];
     console.log(chalk.gray('Add the fields a user must fill in (leave name blank to stop):'));
     for (;;) {
       const f = await inquirer.prompt([
@@ -172,8 +205,9 @@ export async function registerConnector() {
       fields.push({ name: f.name, label: rest.label || undefined, type: rest.type, required: rest.required });
     }
     if (fields.length === 0) throw new Error('credential_form connectors need at least one field');
-    dto.fields = fields;
   }
+
+  const dto = buildRegisterConnectorDto(base, { oauthAnswers, fields });
 
   // Warn about likely-duplicate connectors before submitting - registering "Gmail" when
   // official.google already covers the same thing just fragments the catalog.

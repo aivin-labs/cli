@@ -75,6 +75,12 @@ function MissionTuiApp({ serverUrl, apiKey, threadId, tenantClient, idleTimeoutM
       appendLine(`⚠️  Không theo dõi được tiến độ trực tiếp (${error.message}) - mission vẫn tiếp tục.`, 'yellow');
       settle('connect_error');
     });
+    // ✅ FIX: chưa có listener 'error' nào ở đây - socket.io lỗi phía server (khác connect_error)
+    // trước đây sẽ throw và crash cả tiến trình CLI thay vì chỉ dừng theo dõi như connect_error.
+    socket.on('error', (error) => {
+      appendLine(`⚠️  Lỗi luồng tiến độ (${error?.message || error}) - mission vẫn tiếp tục.`, 'yellow');
+      settle('connect_error');
+    });
 
     // Học đúng sessionKey (clientId) của phiên HIL hiện tại - browser:cast-start bắn vào room
     // `client:<tenant>` (auto-join, cùng room browser:agent-step dùng - xem comment tại nơi emit

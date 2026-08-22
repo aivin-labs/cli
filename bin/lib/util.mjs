@@ -2,6 +2,14 @@ import chalk from 'chalk';
 import readline from 'readline';
 import inquirer from 'inquirer';
 
+// ✅ FIX: several axios calls across the CLI (store.mjs, connectors.mjs, deploy.mjs's main deploy
+// POST) had no `timeout` at all - a network glitch/overloaded backend left the spinner spinning
+// forever with no way out short of Ctrl+C, which is especially costly for a call like `connector
+// register` where the whole interactive form (including a typed-in OAuth client_secret) would have
+// to be re-entered from scratch afterwards. A generous but finite default so a genuinely slow-but-
+// alive backend still succeeds, while a truly hung connection eventually surfaces as a normal error.
+export const DEFAULT_API_TIMEOUT_MS = 30000;
+
 // Same spinner deployPlugin has always had, factored out so other long-running network calls
 // (AI codegen, connector register) get the same "still working, not hung" feedback instead of a
 // static line that just sits there for however many seconds the request takes.

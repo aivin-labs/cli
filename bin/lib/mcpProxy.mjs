@@ -19,6 +19,20 @@ const CONNECTOR_SEARCH_TIMEOUT_MS = 15000;
 // suffixes common enough to be obvious (GITHUB_TOKEN -> "github", SLACK_BOT_TOKEN -> "slack") and
 // takes the first remaining word - wrong guesses cost nothing since it's an editable default, not
 // an auto-pick.
+/**
+ * Writes one env-var field's connector binding into a manifest's `initial` map, the one operation
+ * that actually matters for a credential to get injected at runtime (see PluginProxyService.
+ * resolveMcpEnv on the backend - it only ever reads `manifest.initial[field].connection_id`, never
+ * a bare top-level `connection_id`). Both `buildMcpManifest` (`mcp create`) and `scanAndPublishMcp`'s
+ * "attach a connector" step (`mcp <url>`) need this exact same write - previously the latter
+ * reimplemented (and got wrong) its own version of it, which is exactly how that bug happened.
+ * Pulling it out here means there's only one place to get it right, and future changes to the
+ * `initial[field]` shape can't drift between the two commands again.
+ */
+export function setFieldConnector(initial, fieldName, connectorId) {
+  initial[fieldName] = { ...(initial[fieldName] || {}), source: 'static', connection_id: connectorId };
+}
+
 export function guessConnectorQueryFromEnvVarName(envVarName) {
   const suffixes = ['_PERSONAL_ACCESS_TOKEN', '_ACCESS_TOKEN', '_AUTH_TOKEN', '_BOT_TOKEN', '_API_KEY', '_SECRET_KEY', '_TOKEN', '_SECRET', '_KEY', '_PAT'];
   const upper = (envVarName || '').toUpperCase();
@@ -218,8 +232,12 @@ export function buildMcpManifest(name, description, opts) {
   const connectorIdsUsed = new Set();
   for (const field of opts.envFields || []) {
     initable.push(field.name);
-    initial[field.name] = field.connectorId ? { source: 'static', connection_id: field.connectorId } : { source: 'static' };
-    if (field.connectorId) connectorIdsUsed.add(field.connectorId);
+    if (field.connectorId) {
+      setFieldConnector(initial, field.name, field.connectorId);
+      connectorIdsUsed.add(field.connectorId);
+    } else {
+      initial[field.name] = { source: 'static' };
+    }
   }
   const connectionId = opts.connectorId || (connectorIdsUsed.size > 0 ? [...connectorIdsUsed].sort()[0] : undefined);
 
@@ -591,37 +609,80 @@ export async function scanAndPublishMcp(url, options) {
     }
   }
 
-  // Server-generated manifests come back with whatever `auth_secret_key`/`connection_id` the
-  // build step inferred (often none) - offer to bind an existing/new connector to all of them here
-  // rather than leaving that to be edited by hand after the fact. Skipped in non-TTY contexts, same
-  // as every other prompt in this flow.
-  if (process.stdout.isTTY && process.stdin.isTTY) {
+  // Server-generated manifests come back with whatever `metadata.required_env_vars`/`initial` the
+  // build step inferred (deterministic per-server connection_id, often no registered connector yet)
+  // - offer to bind an existing/new connector to all of them here rather than leaving that to be
+  // edited by hand after the fact. Skipped in non-TTY contexts, same as every other prompt in this
+  // flow, and skipped entirely when nothing here actually needs a credential (e.g. mcp-server-fetch)
+  // so this doesn't ask a pointless question every single run.
+  //
+  // ⚠ Must write `manifest.initial[field].connection_id` per required field, NOT just a top-level
+  // `manifest.connection_id` (what this used to do). PluginProxyService.resolveMcpEnv on the backend
+  // only ever reads `manifest.initial[field].connection_id` to inject a credential into the spawned
+  // MCP process - a bare top-level `connection_id` only feeds the "requires logging in" readiness
+  // badge. Worse, on deploy `PluginStoreService.sanitizeUpsertConnectionIds` silently NULLS a
+  // top-level `connection_id` that no `initial` field references, unless it happens to match an
+  // already-registered CONNECTOR OF TYPE OAUTH specifically (`ConnectorService.
+  // existingOAuthConnectorIds` filters `type: 'oauth'`, excluding `credential_form` connectors
+  // entirely). So attaching a freshly-registered API-key/form connector here used to print a
+  // confident "Attached connector X" and then have the backend quietly drop it on deploy - the exact
+  // same pitfall `mcp create`'s own `buildMcpManifest` already works around (see its comment), which
+  // this flow had drifted out of sync with.
+  const requiredFieldNames = new Set();
+  for (const m of manifests) {
+    for (const f of m.metadata?.required_env_vars || []) requiredFieldNames.add(f.name);
+    for (const key of Object.keys(m.initial || {})) requiredFieldNames.add(key);
+  }
+  if (requiredFieldNames.size > 0 && process.stdout.isTTY && process.stdin.isTTY) {
     const { attachConnector } = await inquirer.prompt([
-      { type: 'confirm', name: 'attachConnector', message: '\nAttach a connector for auth to all of these? (optional)', default: false },
+      {
+        type: 'confirm',
+        name: 'attachConnector',
+        message: `\nAttach a connector for auth (${[...requiredFieldNames].join(', ')})? (optional)`,
+        default: false,
+      },
     ]);
     if (attachConnector) {
       const connectorId = await selectConnectorInteractive();
       if (connectorId) {
-        for (const manifest of manifests) manifest.connection_id = connectorId;
-        console.log(chalk.gray(`   Attached connector "${connectorId}" to ${manifests.length} manifest(s).`));
+        for (const manifest of manifests) {
+          manifest.initial = manifest.initial || {};
+          for (const fieldName of requiredFieldNames) {
+            setFieldConnector(manifest.initial, fieldName, connectorId);
+          }
+          // Derived readiness-display value only, same convention as buildMcpManifest - not read for
+          // actual credential injection (see the warning above).
+          manifest.connection_id = connectorId;
+        }
+        console.log(chalk.gray(`   Attached connector "${connectorId}" to ${manifests.length} manifest(s) (${[...requiredFieldNames].join(', ')}).`));
       }
     }
   }
 
-  // This is the point of no return - `aivin` has no `plugin delete`/`undeploy` command, so once
-  // this POST succeeds the plugin(s) are live and visible to your whole org (and, with --publish,
-  // queued for a community review that also can't be withdrawn from here) until someone removes
-  // them from the platform directly. The checkbox above defaults every discovered item to checked,
-  // so an unconfirmed "just press enter through it" run could deploy far more than intended -
-  // require an explicit yes here rather than only gating on the (default-off, easy to skip) edit
-  // prompt above.
-  if (process.stdout.isTTY && process.stdin.isTTY) {
+  // This is a real, consequential action - once this POST succeeds the plugin(s) are live and
+  // visible to your whole org (and, with --publish, queued for a community review that also can't
+  // be withdrawn from here) until someone removes them via `aivin plugin delete`. The checkbox
+  // above defaults every discovered item to checked, so an unconfirmed "just press enter through
+  // it" run could deploy far more than intended - require an explicit yes here rather than only
+  // gating on the (default-off, easy to skip) edit prompt above.
+  //
+  // ✅ FIX: this used to only ask when both stdout/stdin were a TTY, and silently proceeded to
+  // deploy (with every item checked) whenever either wasn't - e.g. piping output through `| tee
+  // log.txt` or running inside any CI job makes stdout non-TTY. That meant the "point of no return"
+  // this comment used to warn about could trigger with zero confirmation and zero way to opt in to
+  // skipping it on purpose. Now: `--yes`/`-y` skips the prompt explicitly (same pattern as `plugin
+  // delete`/`pluginstore rm`), a real TTY still gets the interactive prompt, and anything else
+  // (non-TTY without --yes) refuses to deploy instead of silently proceeding.
+  if (!options.yes) {
+    if (!process.stdout.isTTY || !process.stdin.isTTY) {
+      throw new Error('Refusing to deploy without confirmation in a non-interactive session - pass --yes to deploy anyway.');
+    }
     const scopeLabel = options.publish ? 'your org now, and submitted for community review' : 'your org';
     const { confirmDeploy } = await inquirer.prompt([
       {
         type: 'confirm',
         name: 'confirmDeploy',
-        message: `\nDeploy ${manifests.length} plugin(s) to ${scopeLabel}? This can't be undone from the CLI.`,
+        message: `\nDeploy ${manifests.length} plugin(s) to ${scopeLabel}? Remove them later with \`aivin plugin delete\` if needed.`,
         default: false,
       },
     ]);

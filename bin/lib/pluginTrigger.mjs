@@ -8,6 +8,8 @@ import { randomUUID } from 'crypto';
 import { flattenManifestFile } from '@aivin-labs/sdk';
 import readline from 'readline';
 import { requireArg, withProgressSpinner } from './util.mjs';
+import { resolveWorkspace } from './workspace.mjs';
+import { resolveConnectorAuth } from './pluginAuthResolve.mjs';
 
 const DELETE_TIMEOUT_MS = 30000;
 
@@ -137,6 +139,14 @@ export async function watchPluginLogLines(pluginId, { serverUrl, apiKey, onLine 
       denyReason = error.message;
       resolve();
     });
+    // ✅ FIX: no 'error' listener anywhere for this socket - a server-side socket.io error (not the
+    // connection-level 'connect_error') would crash the whole CLI process instead of just falling
+    // back to "no live output" like connect_error does.
+    socket.on('error', (error) => {
+      clearTimeout(giveUp);
+      denyReason = error?.message || String(error);
+      resolve();
+    });
     socket.on('connect', () => {
       socket.emit('subscribe-plugin-logs', { plugin_id: pluginId }, (ack) => {
         clearTimeout(giveUp);
@@ -167,6 +177,9 @@ async function withExecuteProgress(executeSessionId, { serverUrl, apiKey }) {
   await new Promise((resolve) => {
     const giveUp = setTimeout(resolve, 8000);
     socket.on('connect_error', () => { clearTimeout(giveUp); resolve(); });
+    // ✅ FIX: same missing 'error' handler class of bug as watchPluginLogLines above - without it a
+    // server-side socket.io error crashes the CLI instead of just skipping the live progress bar.
+    socket.on('error', () => { clearTimeout(giveUp); resolve(); });
     socket.on('connect', () => {
       socket.emit('join-room', { name: 'plugin-execute', rooms: [room] }, () => { clearTimeout(giveUp); resolve(); });
     });
@@ -276,68 +289,87 @@ export async function triggerPlugin(mission, inputJson, options) {
   // of Ctrl+C. `AIVIN_TRIGGER_TIMEOUT_MS` overrides if 3 minutes isn't enough for a legitimately
   // slow plugin.
   const EXECUTE_TIMEOUT_MS = parseInt(process.env.AIVIN_TRIGGER_TIMEOUT_MS || '180000');
-  const WORKSPACE_LOOKUP_TIMEOUT_MS = 15000;
 
-  let workspaceId = options.workspace;
-  if (!workspaceId) {
-    try {
-      const wsRes = await axios.get(`${serverUrl}/workspace/list`, { ...authHeaders, timeout: WORKSPACE_LOOKUP_TIMEOUT_MS });
-      const workspaces = Array.isArray(wsRes.data) ? wsRes.data : wsRes.data?.items || [];
-      workspaceId = workspaces[0]?.id || workspaces[0]?._id;
-    } catch (error) {
-      throw new Error(`Couldn't look up a workspace to run against (${error.message}). Pass --workspace <id>.`, { cause: error });
-    }
-  }
-  if (!workspaceId) {
-    throw new Error('No workspace found for this account. Pass --workspace <id>.');
-  }
+  // ✅ FIX: this used to only look up/validate a workspace when `--workspace` was OMITTED, and
+  // trusted an explicitly-passed `--workspace <id>` as-is with no existence check - every other
+  // command taking `--workspace` (aivin do/browser/agent .../task ...) routes through
+  // resolveWorkspace(), which validates it and throws a clear "not found or not accessible" error.
+  // A typo'd/wrong id here instead sailed straight through to the backend and came back as
+  // whatever generic error `/plugins/execute` happens to give for an invalid workspace_id.
+  const workspace = await resolveWorkspace(serverUrl, authHeaders, options.workspace);
+  const workspaceId = workspace.id || workspace._id;
   body.workspace_id = workspaceId;
 
-  let logWatcher;
-  if (options.watchLogs) {
-    logWatcher = await watchPluginLogLines(entryId, {
-      serverUrl,
-      apiKey,
-      onLine: (payload) => {
-        const time = new Date(payload.timestamp || Date.now()).toLocaleTimeString();
-        const streamColor = payload.stream === 'stderr' ? chalk.red : payload.stream === 'system' ? chalk.yellow : chalk.gray;
-        console.log(chalk.gray(`[${time}]`), streamColor(payload.line));
-      },
-    });
-    if (logWatcher.subscribed) {
-      console.log(chalk.blue(`📡 Watching live console output for ${entryLabel || entryId}...`));
-    } else {
-      console.log(chalk.gray(`(--watch-logs: no live console output - ${logWatcher.denyReason})`));
+  // A run can come back needing a connector that isn't set up yet (`status: 'needs_auth'`) - rather
+  // than just printing that and leaving the user to go set it up and re-run the whole command by
+  // hand, offer to resolve it right here (OAuth: open a browser and wait; form: prompt for the
+  // fields) and automatically retry the exact same call once. Only in an interactive terminal - a
+  // script/CI run with no TTY just gets the needs_auth result printed, same as before this existed.
+  // `logWatcher` is re-subscribed each attempt (not hoisted outside the loop) so `--watch-logs`
+  // still streams live output on the post-auth retry, not just the first (doomed-to-fail) attempt.
+  let result;
+  let attempt = 0;
+  for (;;) {
+    attempt++;
+
+    let logWatcher;
+    if (options.watchLogs) {
+      logWatcher = await watchPluginLogLines(entryId, {
+        serverUrl,
+        apiKey,
+        onLine: (payload) => {
+          const time = new Date(payload.timestamp || Date.now()).toLocaleTimeString();
+          const streamColor = payload.stream === 'stderr' ? chalk.red : payload.stream === 'system' ? chalk.yellow : chalk.gray;
+          console.log(chalk.gray(`[${time}]`), streamColor(payload.line));
+        },
+      });
+      if (logWatcher.subscribed) {
+        console.log(chalk.blue(`📡 Watching live console output for ${entryLabel || entryId}...`));
+      } else {
+        console.log(chalk.gray(`(--watch-logs: no live console output - ${logWatcher.denyReason})`));
+      }
     }
-  }
 
-  const executeSessionId = randomUUID();
-  body.execute_session_id = executeSessionId;
-  const progress = await withExecuteProgress(executeSessionId, { serverUrl, apiKey });
+    const executeSessionId = randomUUID();
+    body.execute_session_id = executeSessionId;
+    const progress = await withExecuteProgress(executeSessionId, { serverUrl, apiKey });
 
-  let response;
-  try {
-    response = await withProgressSpinner(`🚀 Triggering ${entryLabel || entryId}`, progress.getCurrent, () =>
-      axios.post(`${serverUrl}/plugins/execute`, body, { ...authHeaders, timeout: EXECUTE_TIMEOUT_MS }),
-    );
-  } catch (error) {
+    let response;
+    try {
+      response = await withProgressSpinner(`🚀 Triggering ${entryLabel || entryId}`, progress.getCurrent, () =>
+        axios.post(`${serverUrl}/plugins/execute`, body, { ...authHeaders, timeout: EXECUTE_TIMEOUT_MS }),
+      );
+    } catch (error) {
+      if (logWatcher?.subscribed) {
+        // Give trailing log lines from this failed call a moment to arrive before disconnecting.
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      logWatcher?.stop();
+      progress.stop();
+      const message = error.response?.data?.message || error.message;
+      throw new Error(`Trigger failed: ${message}`, { cause: error });
+    }
+
     if (logWatcher?.subscribed) {
-      // Give trailing log lines from this failed call a moment to arrive before disconnecting.
       await new Promise((resolve) => setTimeout(resolve, 300));
     }
     logWatcher?.stop();
     progress.stop();
-    const message = error.response?.data?.message || error.message;
-    throw new Error(`Trigger failed: ${message}`, { cause: error });
-  }
 
-  if (logWatcher?.subscribed) {
-    await new Promise((resolve) => setTimeout(resolve, 300));
-  }
-  logWatcher?.stop();
-  progress.stop();
+    result = response.data ?? {};
 
-  const result = response.data ?? {};
+    // `--no-auth-prompt` -> commander sets options.authPrompt = false (negatable option convention -
+    // there is no options.noAuthPrompt). Defaults to true (flag omitted) so this is opt-out, not opt-in.
+    const canResolveNow = attempt === 1 && options.authPrompt !== false && process.stdout.isTTY && process.stdin.isTTY;
+    if (String(result.status || '').toLowerCase() === 'needs_auth' && canResolveNow) {
+      const connected = await resolveConnectorAuth(result.data, { serverUrl, apiKey, workspaceId });
+      if (connected) {
+        console.log(chalk.gray('\nRetrying...'));
+        continue;
+      }
+    }
+    break;
+  }
 
   if (Array.isArray(result.processing_log) && result.processing_log.length) {
     console.log(chalk.gray('\n--- Log ---'));
@@ -469,6 +501,12 @@ export async function streamPluginLogs(pluginId, options) {
     });
     socket.on('connect_error', (error) => {
       console.error(chalk.red('❌'), `Connection failed: ${error.message}`);
+      stop();
+    });
+    // ✅ FIX: same missing 'error' handler class of bug as above - without it a server-side
+    // socket.io error crashes the CLI (`aivin plugin logs`) instead of just ending the tail cleanly.
+    socket.on('error', (error) => {
+      console.error(chalk.red('❌'), `Log stream error: ${error?.message || error}`);
       stop();
     });
   });

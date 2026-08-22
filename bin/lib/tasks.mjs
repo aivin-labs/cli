@@ -161,9 +161,25 @@ export async function updateTaskById(id, options) {
   console.log(chalk.gray(`   Status: ${task.status}`));
 }
 
-export async function deleteTaskById(id) {
+// ✅ FIX: had no confirmation at all before - unlike every other destructive command in this CLI
+// (`plugin delete`, `pluginstore rm`/`rm-node`), a typo'd id here deleted immediately with nothing
+// to catch it. Same `-y/--yes` escape hatch for scripts/CI as those commands.
+export async function deleteTaskById(id, options = {}) {
   const serverUrl = missionServerUrl();
   const authHeaders = missionAuthHeaders();
+
+  if (!options.yes) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      throw new Error('Refusing to delete without confirmation in a non-interactive session - pass --yes to delete anyway.');
+    }
+    const { confirm } = await inquirer.prompt([
+      { type: 'confirm', name: 'confirm', message: `Delete task "${id}"? This can't be undone.`, default: false },
+    ]);
+    if (!confirm) {
+      console.log(chalk.gray('Cancelled.'));
+      return;
+    }
+  }
 
   try {
     await axios.delete(`${serverUrl}/task/${id}/delete`, authHeaders);
@@ -173,6 +189,23 @@ export async function deleteTaskById(id) {
   }
 
   console.log(chalk.green(`✅ Task ${id} deleted.`));
+}
+
+/**
+ * Pure assembly of `POST /task/create`'s body, split out of createTask() so it's unit-testable
+ * without stubbing axios/inquirer. Backend's TaskService._sanitizeCreateTaskInput whitelists
+ * `description`, not `content` - sending the wrong key here used to look like success (200 + a
+ * task id back) while silently dropping the user's actual text, which is exactly the kind of drift
+ * a regression test on this function's output shape catches going forward.
+ */
+export function buildCreateTaskPayload(description, workspaceId, options = {}) {
+  return {
+    title: description.length > 80 ? `${description.slice(0, 77)}...` : description,
+    description,
+    workspace_id: workspaceId,
+    project_id: options.project,
+    assign_id: options.assignee,
+  };
 }
 
 export async function createTask(description, options) {
@@ -188,13 +221,7 @@ export async function createTask(description, options) {
   try {
     response = await axios.post(
       `${serverUrl}/task/create`,
-      {
-        title: description.length > 80 ? `${description.slice(0, 77)}...` : description,
-        content: description,
-        workspace_id: workspace.id || workspace._id,
-        project_id: options.project,
-        assign_id: options.assignee,
-      },
+      buildCreateTaskPayload(description, workspace.id || workspace._id, options),
       authHeaders,
     );
   } catch (error) {
@@ -336,9 +363,26 @@ export async function updateProjectCmd(projectId, options) {
   console.log(chalk.green(`✅ Project ${projectId} updated.`));
 }
 
+// ✅ FIX: had no confirmation at all before, and deleting a project is more consequential than
+// deleting a single task (its tasks go with it) - same missing-protection issue as deleteTaskById
+// above, same `-y/--yes` fix.
 export async function deleteProjectCmd(projectId, options) {
   const serverUrl = missionServerUrl();
   const authHeaders = missionAuthHeaders();
+
+  if (!options.yes) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      throw new Error('Refusing to delete without confirmation in a non-interactive session - pass --yes to delete anyway.');
+    }
+    const { confirm } = await inquirer.prompt([
+      { type: 'confirm', name: 'confirm', message: `Delete project "${projectId}"? Its tasks go with it. This can't be undone.`, default: false },
+    ]);
+    if (!confirm) {
+      console.log(chalk.gray('Cancelled.'));
+      return;
+    }
+  }
+
   const workspace = await resolveWorkspace(serverUrl, authHeaders, options.workspace);
   await deleteProjectById(serverUrl, authHeaders, { workspaceId: workspace.id || workspace._id, projectId });
   console.log(chalk.green(`✅ Project ${projectId} deleted.`));

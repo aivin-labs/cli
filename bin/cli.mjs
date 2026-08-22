@@ -23,9 +23,9 @@ import { readStdin, createFromJSON, createInteractive, validatePluginConfig, val
 import { buildDeploymentPayload, deployPlugin, incrementVersion } from './lib/deploy.mjs';
 import { initInteractive, makePluginFromDescription, convertExistingProject } from './lib/codegen.mjs';
 import { searchPlugins, showPluginInfo, askPlugin, streamPluginLogs, triggerPlugin, deletePluginCmd } from './lib/pluginTrigger.mjs';
-import { connectorAuthHeaders, connectorBaseUrl, listConnectors, registerConnector, searchConnectors } from './lib/connectors.mjs';
+import { connectorAuthHeaders, connectorBaseUrl, listConnectors, registerConnector, searchConnectors, buildRegisterConnectorDto } from './lib/connectors.mjs';
 import { attachStore, createStore, deleteStore, detachStore, listStores, removeNode, setStoreEnabled } from './lib/store.mjs';
-import { buildMcpManifest, parseMcpArgs, guessConnectorQueryFromEnvVarName, createMcpProxyPlugin, scanAndPublishMcp, registerMcpWatch, unwatchMcp, listMcpWatches } from './lib/mcpProxy.mjs';
+import { buildMcpManifest, parseMcpArgs, guessConnectorQueryFromEnvVarName, createMcpProxyPlugin, scanAndPublishMcp, registerMcpWatch, unwatchMcp, listMcpWatches, setFieldConnector } from './lib/mcpProxy.mjs';
 import {
   saveGlobalApiKey,
   browserLogin,
@@ -58,6 +58,7 @@ import {
   updateTaskById,
   deleteTaskById,
   createTask,
+  buildCreateTaskPayload,
   pickWorkspaceAndProject,
   createProjectCmd,
   updateProjectCmd,
@@ -397,6 +398,7 @@ pluginCommand
   .option('--workspace <id>', 'Workspace id to search/run against (default: auto-picks your first one)')
   .option('--agent <id>', 'Agent id to run as, if the plugin needs one for HIL/confirm behavior to be accurate')
   .option('--watch-logs', "Also stream the chosen plugin's own live console output inline")
+  .option('--no-auth-prompt', "Don't offer to connect/configure a missing connector interactively when the run comes back needing one - just print the result and exit")
   .option('--save', 'Write this run\'s result to .test/trigger/<timestamp>.json for later --compare')
   .option('--compare <file>', 'Diff this run\'s result against a previously --save\'d .test/trigger/*.json file')
   .action(async (mission, options) => {
@@ -446,6 +448,7 @@ pluginCommand
   .option('--workspace <id>', 'Workspace id to run against (default: auto-picks your first one)')
   .option('--agent <id>', 'Agent id to run as, if the plugin needs one for HIL/confirm behavior to be accurate')
   .option('--watch-logs', 'Also stream the plugin\'s own live console output inline (same feed as `aivin plugin logs`) instead of needing a second terminal - requires permission to view that plugin\'s logs (your own/org\'s deployments; most store plugins from other orgs will just skip this and fall back to the REST result only)')
+  .option('--no-auth-prompt', "Don't offer to connect/configure a missing connector interactively when the run comes back needing one - just print the result and exit")
   .option('--save', 'Write this run\'s result to .test/trigger/<timestamp>.json for later --compare')
   .option('--compare <file>', 'Diff this run\'s result against a previously --save\'d .test/trigger/*.json file')
   .action(async (mission, input, options) => {
@@ -680,6 +683,7 @@ mcpCommand
   .option('--private', 'Deploy to your org only - default')
   .option('--org', 'Alias of --private - there is no narrower per-workspace scope today')
   .option('--quiet', 'Skip live progress output while scanning (on by default otherwise)')
+  .option('-y, --yes', 'Skip the deploy confirmation prompt (required in non-TTY/CI contexts, which otherwise now refuse to deploy at all - see scanAndPublishMcp)')
   .action(async (url, options) => {
     try {
       url = await requireArg(url, {
@@ -1084,10 +1088,11 @@ taskCommand
 taskCommand
   .command('delete [id]')
   .description('Delete a task')
-  .action(async (id) => {
+  .option('-y, --yes', 'Skip the confirmation prompt (for scripts/CI)')
+  .action(async (id, options) => {
     try {
       id = await requireArg(id, { prompt: 'Task id to delete:', usage: 'Usage: aivin task delete <id>' });
-      await deleteTaskById(id);
+      await deleteTaskById(id, options);
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);
@@ -1325,6 +1330,7 @@ projectCommand
   .command('delete [id]')
   .description('Delete a project')
   .option('--workspace <id>', 'Workspace id (default: your personal workspace)')
+  .option('-y, --yes', 'Skip the confirmation prompt (for scripts/CI)')
   .action(async (id, options) => {
     try {
       id = await requireArg(id, { prompt: 'Project id to delete:', usage: 'Usage: aivin project delete <id>' });
@@ -1335,7 +1341,7 @@ projectCommand
     }
   });
 
-export { validatePluginConfig, incrementVersion, validateMcpProxyConfig, buildDeploymentPayload, buildMcpManifest, parseMcpArgs, guessConnectorQueryFromEnvVarName };
+export { validatePluginConfig, incrementVersion, validateMcpProxyConfig, buildDeploymentPayload, buildMcpManifest, parseMcpArgs, guessConnectorQueryFromEnvVarName, setFieldConnector, buildRegisterConnectorDto, buildCreateTaskPayload };
 
 // Only parse argv when run directly (`aivin ...` / `node bin/cli.mjs ...`),
 // not when this module is imported (e.g. by tests) - otherwise Commander

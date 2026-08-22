@@ -5,6 +5,7 @@ import http from 'http';
 import os from 'os';
 import fs from 'fs';
 import { execSync, spawn } from 'child_process';
+import { randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { openBrowser } from './auth.mjs';
@@ -74,6 +75,14 @@ export function streamMissionLog(serverUrl, apiKey, threadId, { idleTimeoutMs = 
 
     socket.on('connect_error', (error) => {
       console.log(chalk.yellow(`⚠️  Couldn't watch live progress (${error.message}) - the run continues regardless.`));
+      stop();
+    });
+    // ✅ FIX: socket.io-client's generic 'error' event (server-side middleware/auth failure, not
+    // the connection-level 'connect_error') has no listener registered anywhere in this file - an
+    // EventEmitter with no 'error' handler throws on that event, which crashes this whole CLI
+    // process outright instead of just ending the log stream gracefully like connect_error does.
+    socket.on('error', (error) => {
+      console.log(chalk.yellow(`⚠️  Live progress stream error (${error?.message || error}) - the run continues regardless.`));
       stop();
     });
 
@@ -291,17 +300,32 @@ export function browserViewerHtml({ serverUrl, apiKey, tenantClient }) {
  * Serves the viewer page on a random local port (127.0.0.1 only - never exposed beyond this
  * machine) and opens it in the default OS browser. The HTTP server is torn down when the CLI
  * process exits (SIGINT/mission end) - it only needs to live for the duration of `aivin browser`.
+ *
+ * ✅ FIX: the page embeds the real API_KEY in plaintext (see browserViewerHtml) so the viewer's own
+ * socket.io connection can authenticate - loopback-only binding keeps this off the network, but
+ * anything ELSE already running on this same machine (another local process, another browser tab
+ * that guesses/scans the port before the real one connects) could previously just GET the port and
+ * read the key straight out of the page source, no auth needed. A random one-time token in the URL
+ * closes that window - only whoever already has the exact URL this function printed/opened can
+ * actually get the page back.
  */
 export function openBrowserViewer(serverUrl, apiKey, tenantClient) {
   return new Promise((resolve) => {
+    const token = randomBytes(16).toString('hex');
     const html = browserViewerHtml({ serverUrl, apiKey, tenantClient });
     const server = http.createServer((req, res) => {
+      const reqToken = new URL(req.url, 'http://127.0.0.1').searchParams.get('t');
+      if (reqToken !== token) {
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Forbidden');
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
     });
     server.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
-      const url = `http://127.0.0.1:${port}/`;
+      const url = `http://127.0.0.1:${port}/?t=${token}`;
       console.log(chalk.cyan(`\n🖥️  Mở phiên tương tác trực tiếp: ${url}`));
       openBrowser(url);
       resolve(server);
@@ -356,6 +380,13 @@ export function streamBrowserMissionLog(serverUrl, apiKey, threadId, tenantClien
 
     socket.on('connect_error', (error) => {
       console.log(chalk.yellow(`⚠️  Couldn't watch live progress (${error.message}) - the run continues regardless.`));
+      stop('connect_error');
+    });
+    // ✅ FIX: see the identical fix/comment on streamMissionLog above - no 'error' listener meant a
+    // server-side socket.io error here could crash the whole CLI process instead of just ending the
+    // watcher.
+    socket.on('error', (error) => {
+      console.log(chalk.yellow(`⚠️  Live progress stream error (${error?.message || error}) - the run continues regardless.`));
       stop('connect_error');
     });
 

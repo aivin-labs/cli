@@ -4,7 +4,7 @@ import path from 'path';
 import chalk from 'chalk';
 import axios from 'axios';
 import inquirer from 'inquirer';
-import { withSpinner, requireArg } from './util.mjs';
+import { withSpinner, requireArg, DEFAULT_API_TIMEOUT_MS } from './util.mjs';
 
 // ── Plugin store (self-host aivin-service worker) — attach/create/ls/enable/disable/detach ──────
 //
@@ -19,7 +19,11 @@ export function storeAuthHeaders() {
   if (!apiKey) {
     console.log(chalk.yellow('⚠️  API_KEY not set - run `aivin login` first'));
   }
-  return { headers: { Authorization: `Bearer ${apiKey || 'dev-token'}` } };
+  // ✅ FIX: every axios call in this file passes this object straight through as its request config
+  // (never overriding timeout) - none of them had a `timeout` before, so a hung/overloaded backend
+  // left the spinner spinning forever with no way out short of Ctrl+C. Setting it once here covers
+  // every call site instead of patching each individually.
+  return { headers: { Authorization: `Bearer ${apiKey || 'dev-token'}` }, timeout: DEFAULT_API_TIMEOUT_MS };
 }
 
 export function storeBaseUrl() {
@@ -51,7 +55,17 @@ function writeWorkerIdentity(dataDir, { beEndpoint, orgId, storeId, storeName, n
     ...(sdkGrpcEndpoint ? { sdk_grpc_endpoint: sdkGrpcEndpoint } : {}),
     paired_at: new Date().toISOString(),
   };
+  // `mode: 0o600` only actually restricts access on POSIX (Linux/macOS) - Node's `mode` option maps
+  // to very little on Windows NTFS (no real per-user read restriction the way POSIX permission bits
+  // do), so on Windows this file's `worker_token` is effectively readable by any account that can
+  // read this directory at all. Encrypting it at rest would need a real key-management decision
+  // (where does the encryption key itself live, without just moving the same problem one level
+  // down?) - out of scope for a CLI-side fix, so surfacing the risk explicitly instead of silently
+  // relying on a permission bit that doesn't do what it looks like it does on this platform.
   fs.writeFileSync(filePath, JSON.stringify(payload, null, 2) + '\n', { mode: 0o600 });
+  if (process.platform === 'win32') {
+    console.log(chalk.gray(`   Note: on Windows, "${filePath}" is only as protected as the folder it's in (0o600 has no POSIX-style effect here) - keep this machine/account access appropriately restricted.`));
+  }
   return filePath;
 }
 

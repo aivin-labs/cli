@@ -8,6 +8,9 @@ import {
   buildMcpManifest,
   parseMcpArgs,
   guessConnectorQueryFromEnvVarName,
+  setFieldConnector,
+  buildRegisterConnectorDto,
+  buildCreateTaskPayload,
 } from '../bin/cli.mjs';
 
 test('validatePluginConfig accepts a well-formed config', () => {
@@ -224,4 +227,64 @@ test('guessConnectorQueryFromEnvVarName strips common credential suffixes and lo
 test('guessConnectorQueryFromEnvVarName falls back gracefully for unrecognized names', () => {
   assert.equal(guessConnectorQueryFromEnvVarName(''), '');
   assert.equal(guessConnectorQueryFromEnvVarName('SOME_CUSTOM_VAR'), 'some');
+});
+
+// ── Regression tests for bugs found/fixed 2026-08-21: CLI/backend contract drift ──────────────
+// Each of these pins down the exact shape a real backend DTO expects, so a future edit that
+// reintroduces the same class of mismatch (right-looking field, wrong name/nesting) fails a test
+// immediately instead of only surfacing when a real user hits it.
+
+test('setFieldConnector writes connection_id into initial[field], preserving other props on that field', () => {
+  const initial = { API_KEY: { type: 'string', secret: true } };
+  setFieldConnector(initial, 'API_KEY', 'firecrawl');
+  assert.deepEqual(initial.API_KEY, { type: 'string', secret: true, source: 'static', connection_id: 'firecrawl' });
+});
+
+test('setFieldConnector creates the field entry if it does not exist yet', () => {
+  const initial = {};
+  setFieldConnector(initial, 'GITHUB_TOKEN', 'github');
+  assert.deepEqual(initial.GITHUB_TOKEN, { source: 'static', connection_id: 'github' });
+});
+
+test('buildRegisterConnectorDto nests OAuth fields under `config`, matching backend RegisterConnectorDto - not top-level `oauth`', () => {
+  const dto = buildRegisterConnectorDto(
+    { id: 'slack', name: 'Slack', type: 'oauth', visibility: 'private' },
+    { oauthAnswers: { authorize_url: 'https://slack.com/authorize', access_url: 'https://slack.com/token', client_id: 'a', client_secret: 's', scopes: 'chat:write, channels:read' } },
+  );
+  assert.equal(dto.config.authorize_url, 'https://slack.com/authorize');
+  assert.equal(dto.config.client_secret, 's');
+  assert.deepEqual(dto.config.scopes, ['chat:write', 'channels:read']);
+  assert.ok(!('oauth' in dto), 'must not send a top-level `oauth` key - backend reads dto.config, not dto.oauth');
+});
+
+test('buildRegisterConnectorDto nests credential_form fields under `config`, matching backend RegisterConnectorDto - not top-level `fields`', () => {
+  const dto = buildRegisterConnectorDto(
+    { id: 'firecrawl', name: 'FireCrawl', type: 'credential_form', visibility: 'private' },
+    { fields: [{ name: 'API_KEY', type: 'string', required: true }] },
+  );
+  assert.deepEqual(dto.config, { fields: [{ name: 'API_KEY', type: 'string', required: true }] });
+  assert.ok(!('fields' in dto), 'must not send a top-level `fields` key - backend reads dto.config.fields, not dto.fields');
+});
+
+test('buildRegisterConnectorDto rejects a credential_form connector with no fields', () => {
+  assert.throws(
+    () => buildRegisterConnectorDto({ id: 'x', name: 'X', type: 'credential_form', visibility: 'private' }, { fields: [] }),
+    /at least one field/,
+  );
+});
+
+test('buildCreateTaskPayload sends `description`, not `content` - backend\'s create-task whitelist drops anything else silently', () => {
+  const payload = buildCreateTaskPayload('Fix the login bug', 'ws1', { project: 'p1', assignee: 'u1' });
+  assert.equal(payload.description, 'Fix the login bug');
+  assert.ok(!('content' in payload), 'must not send `content` - TaskService._sanitizeCreateTaskInput whitelists `description` only');
+  assert.equal(payload.workspace_id, 'ws1');
+  assert.equal(payload.project_id, 'p1');
+  assert.equal(payload.assign_id, 'u1');
+});
+
+test('buildCreateTaskPayload truncates the title to 80 chars but keeps the full text in description', () => {
+  const longDescription = 'a'.repeat(120);
+  const payload = buildCreateTaskPayload(longDescription, 'ws1', {});
+  assert.equal(payload.title.length, 80);
+  assert.equal(payload.description, longDescription);
 });

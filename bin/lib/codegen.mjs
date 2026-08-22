@@ -573,11 +573,18 @@ export function buildProjectTree(dir, basePath = '', entries = []) {
     if (entries.length >= CONVERT_MAX_TREE_ENTRIES) break;
     const fullPath = path.join(dir, item);
     const relativePath = path.join(basePath, item).split(path.sep).join('/');
-    const stat = fs.statSync(fullPath);
-    if (stat.isDirectory()) {
+    // lstat (not stat) so a symlink is never followed here - stat() would happily report a
+    // symlink-to-directory as isDirectory()==true and recurse into it, walking (and later, via
+    // resolveProjectPath/executeProjectTool, reading) whatever it actually points to outside the
+    // project (e.g. a symlink committed into a project pulled from an untrusted source pointing at
+    // ~/.ssh or ~/.aivin/credentials). Silently skipping is fine - a real project source file is
+    // never a symlink.
+    const lstat = fs.lstatSync(fullPath);
+    if (lstat.isSymbolicLink()) continue;
+    if (lstat.isDirectory()) {
       if (!CONVERT_EXCLUDE_DIRS.includes(item)) buildProjectTree(fullPath, relativePath, entries);
     } else if (!CONVERT_EXCLUDE_FILES.includes(item) && !isEnvFile(item) && !CONVERT_BINARY_EXT.test(item)) {
-      entries.push({ path: relativePath, size: stat.size });
+      entries.push({ path: relativePath, size: lstat.size });
     }
   }
   return entries;
@@ -586,13 +593,35 @@ export function buildProjectTree(dir, basePath = '', entries = []) {
 /** Resolves a backend-requested relative path against the real project directory, rejecting
  *  anything that would escape it. This is the actual security boundary for the tool-call relay -
  *  the backend validates paths too (assertSafeProjectPath), but this process is the one holding
- *  the real filesystem, so this check is the one that actually matters. */
+ *  the real filesystem, so this check is the one that actually matters.
+ *
+ *  ✅ FIX: the lexical `startsWith` check alone only catches `../`-style escapes - a symlink
+ *  physically located INSIDE the project (e.g. `project/link -> ~/.ssh` or `-> C:\Users\<user>`)
+ *  has a lexically-valid, in-bounds path while its *real* target is anywhere on disk. Re-resolving
+ *  through `fs.realpathSync` after the lexical check catches that: read_file/create_file/
+ *  confirm_update all funnel through here, so a backend-driven (or AI-hallucinated, or a
+ *  compromised backend's) tool-call requesting a project-relative path that happens to traverse
+ *  such a symlink can no longer read/write files outside the project undetected. */
 export function resolveProjectPath(currentDir, requestedPath) {
   if (typeof requestedPath !== 'string' || !requestedPath) throw new Error('Invalid path');
   const resolved = path.resolve(currentDir, requestedPath);
   const rootWithSep = currentDir.endsWith(path.sep) ? currentDir : currentDir + path.sep;
   if (resolved !== currentDir && !resolved.startsWith(rootWithSep)) {
     throw new Error(`Path escapes project directory: ${requestedPath}`);
+  }
+  // Symlink re-check: skip if the path doesn't exist yet (e.g. create_file writing a brand new
+  // file/directory - nothing to resolve, and the write itself lands at `resolved` on disk, not
+  // through any symlink since none exists there yet).
+  let real;
+  try {
+    real = fs.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+  const realRoot = fs.realpathSync(currentDir);
+  const realRootWithSep = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+  if (real !== realRoot && !real.startsWith(realRootWithSep)) {
+    throw new Error(`Path escapes project directory (symlink): ${requestedPath}`);
   }
   return resolved;
 }
@@ -652,7 +681,11 @@ export async function executeProjectTool(currentDir, tool, args) {
           if (matches.length >= 20) return;
           const fullPath = path.join(dir, item);
           const rel = path.join(base, item).split(path.sep).join('/');
-          const stat = fs.statSync(fullPath);
+          // lstat, not stat - this walker never goes through resolveProjectPath, so it needs its
+          // own symlink guard (same reasoning as buildProjectTree above) to avoid grepping through
+          // a symlink out of the project.
+          const stat = fs.lstatSync(fullPath);
+          if (stat.isSymbolicLink()) continue;
           if (stat.isDirectory()) {
             if (!CONVERT_EXCLUDE_DIRS.includes(item)) walk(fullPath, rel);
           } else if (!CONVERT_BINARY_EXT.test(item) && stat.size > 0 && stat.size <= 200_000) {
@@ -721,6 +754,29 @@ export async function connectProjectToolServer(serverUrl, apiKey, codeId, curren
     socket.disconnect();
     throw error;
   }
+
+  // ✅ FIX: no 'error' listener registered at all after the initial connect - a server-side
+  // socket.io error later in the (potentially several-minute) scan/plan/generate/verify loop would
+  // crash the whole CLI process instead of just being visible as a log line.
+  socket.on('error', (error) => {
+    console.log(chalk.red(`   Socket error: ${error?.message || error}`));
+  });
+
+  // ✅ FIX: `code:join` was only ever emitted once, before this promise resolved - `reconnection:
+  // true` means the client transparently reconnects on a network blip, but the server-side room
+  // membership from the original `code:join` is gone with the old connection. Without re-joining,
+  // the tool-call relay silently "dies" after a reconnect (no more code:tool_call/code:progress
+  // ever arrives) while the backend's own HTTP request just keeps waiting until its own timeout -
+  // no early warning to the user that anything went wrong.
+  socket.on('reconnect', () => {
+    socket.emit('code:join', { code_id: codeId }, (ack) => {
+      if (!ack?.success) {
+        console.log(chalk.yellow(`⚠️  Reconnected but couldn't rejoin conversion session: ${ack?.error || 'unknown error'} - tool calls may stop arriving.`));
+      } else {
+        console.log(chalk.gray('   (reconnected)'));
+      }
+    });
+  });
 
   socket.on('code:tool_call', async (payload) => {
     const { call_id, tool, args } = payload || {};

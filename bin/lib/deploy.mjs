@@ -17,6 +17,15 @@ export const DEPLOY_EXCLUDE_FILES = ['.gitignore', 'yarn.lock'];
 // secrets and must never end up in the uploaded `files` payload.
 export const isEnvFile = (name) => name === '.env' || name.startsWith('.env.');
 
+// ✅ FIX: readDirectoryRecursive used to read EVERY file with `fs.readFileSync(fullPath, 'utf8')`
+// unconditionally - any binary asset (image, font, .wasm, a zip fixture used by a test) gets
+// decoded as UTF-8 text and silently mangled before upload, with no warning anywhere. The backend's
+// PluginDeployRequestDto only ever accepts `files` as plain UTF-8 string content (no base64/binary
+// path exists there), so there is currently no way to deploy a binary asset correctly through this
+// command - skipping with a clear warning is strictly better than corrupting it and finding out only
+// when the deployed plugin is actually exercised. Same extension list `plugin convert` already uses.
+const DEPLOY_BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|svg|woff2?|ttf|eot|zip|tar|gz|pdf|mp4|mp3|wasm|node)$/i;
+
 export function readDirectoryRecursive(dir, basePath = '') {
   const files = {};
   const items = fs.readdirSync(dir);
@@ -28,13 +37,20 @@ export function readDirectoryRecursive(dir, basePath = '') {
     // backslash-separated keys (e.g. "src\\main.ts") that the backend's POSIX filesystem treats as
     // one literal filename containing a backslash, not a nested path - breaking every deploy.
     const relativePath = basePath ? `${basePath}/${item}` : item;
-    const stat = fs.statSync(fullPath);
+    // lstat (not stat) so a symlink is never followed and treated as a real directory/file to
+    // upload - same reasoning as codegen.mjs's buildProjectTree.
+    const stat = fs.lstatSync(fullPath);
+    if (stat.isSymbolicLink()) continue;
 
     if (stat.isDirectory()) {
       if (!DEPLOY_EXCLUDE_DIRS.includes(item)) {
         Object.assign(files, readDirectoryRecursive(fullPath, relativePath));
       }
     } else if (!DEPLOY_EXCLUDE_FILES.includes(item) && !isEnvFile(item)) {
+      if (DEPLOY_BINARY_EXT.test(item)) {
+        console.log(chalk.yellow(`⚠️  Skipping "${relativePath}" - binary files aren't supported by \`aivin deploy\` (would be corrupted if uploaded as text).`));
+        continue;
+      }
       files[relativePath] = fs.readFileSync(fullPath, 'utf8');
     }
   }
@@ -95,7 +111,10 @@ export function ensureLockfile(currentDir) {
 
   console.log(chalk.gray('   No package-lock.json found - generating one (required for the container build)...'));
   try {
-    execSync('npm install --package-lock-only', { cwd: currentDir, stdio: 'pipe' });
+    // ✅ FIX: no timeout - a hung npm registry (corporate proxy, network drop mid-request, a
+    // private-package auth prompt npm can't actually show under `stdio: 'pipe'`) used to hang
+    // `aivin deploy`/`aivin test` indefinitely with no feedback beyond "generating one...".
+    execSync('npm install --package-lock-only', { cwd: currentDir, stdio: 'pipe', timeout: 60000 });
   } catch (error) {
     throw new Error(
       `Failed to generate package-lock.json: ${error.stderr?.toString().trim() || error.message}`,
@@ -331,6 +350,10 @@ export async function deployPlugin({ endpointPath, label, smokeTest, workspaceOv
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey || 'dev-token'}`,
       },
+      // ✅ FIX: no timeout at all before - a hung/overloaded backend meant this could sit forever
+      // with no way out short of Ctrl+C. 5 minutes (not the usual short default) since this call
+      // covers the actual container build/scan, which can legitimately take a while.
+      timeout: 300000,
     });
 
     clearInterval(loadingInterval);
