@@ -589,7 +589,14 @@ export async function scanAndPublishMcp(url, options) {
   }
 
   console.log(chalk.cyan(`\n📦 ${manifests.length} plugin manifest(s) generated:`));
-  manifests.forEach((m, i) => console.log(`   ${i + 1}. ${chalk.bold(m.name)} ${chalk.gray(`(${m.id})`)} - ${m.description || 'no description'}`));
+  manifests.forEach((m, i) => {
+    // The backend names every manifest "mcp_server: <item name>" by default (same generic prefix
+    // regardless of the actual server) - swap it for the actual kind (tool/resource/prompt, from
+    // `proxy_config.mcp_kind`) so the listing says what each one IS instead of a fixed label.
+    const kind = m.proxy_config?.mcp_kind || 'tool';
+    const displayName = m.name.replace(/^mcp_server:\s*/i, '');
+    console.log(`   ${i + 1}. ${chalk.gray(`[${kind}]`)} ${chalk.bold(displayName)} ${chalk.gray(`(${m.id})`)} - ${m.description || 'no description'}`);
+  });
 
   const { shouldEdit } = await inquirer.prompt([
     { type: 'confirm', name: 'shouldEdit', message: '\nEdit any name/description before deploying?', default: false },

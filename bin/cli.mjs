@@ -17,6 +17,11 @@ import { createRequire } from 'module';
 // expands into.
 import { flattenManifestFile } from '@aivin-labs/sdk';
 
+// Side-effect only import - installs the global Ctrl+C → abort-in-flight-requests wiring
+// (`bin/lib/cancellation.mjs`) once, before any command runs. Must load before any lib file below
+// makes its first axios call so the interceptor is already in place.
+import './lib/cancellation.mjs';
+
 import { DEFAULT_AIVIN_BASE_URL, GLOBAL_CREDENTIALS_PATH, fetchWebUrl, loadActiveContext, clearActiveContext } from './lib/context.mjs';
 import { requireArg } from './lib/util.mjs';
 import { readStdin, createFromJSON, createInteractive, validatePluginConfig, validateMcpProxyConfig } from './lib/scaffold.mjs';
