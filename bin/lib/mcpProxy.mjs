@@ -513,7 +513,7 @@ export async function scanAndPublishMcp(url, options) {
     const res = await withSpinner('🔎 Scanning MCP server', () =>
       axios.post(
         `${connectorBaseUrl()}/plugins/scan-mcp`,
-        { url, scan_session_id: scanSessionId },
+        { url, scan_session_id: scanSessionId, ...(options.testToken ? { test_token: options.testToken } : {}) },
         { ...connectorAuthHeaders(), timeout: MCP_SCAN_TIMEOUT_MS },
       ),
     );
@@ -529,6 +529,21 @@ export async function scanAndPublishMcp(url, options) {
   const resources = scanned.resources || [];
   const prompts = scanned.prompts || [];
   if (tools.length + resources.length + prompts.length === 0) {
+    // `requires_oauth` là tín hiệu RIÊNG BIỆT với "catalog rỗng": server ĐÃ bắt tay thành công
+    // nhưng chỉ trả tool sau khi đăng nhập (remote MCP official của Notion/Slack/Linear/Figma...
+    // đều vậy - xem McpUrlScanner.tryScanAsRemoteMcp, nó set cờ này qua RFC 9728
+    // /.well-known/oauth-protected-resource). Trước đây nhánh này gộp cả 2 vào một lỗi cụt
+    // "nothing to convert", nuốt mất thông tin server vừa nói và khiến user tưởng URL sai.
+    if (scanned.requires_oauth) {
+      throw new Error(
+        `MCP server này cần đăng nhập (OAuth) trước khi liệt kê được tool.\n` +
+        `   Server đã kết nối OK nhưng chỉ trả danh sách tool sau khi có token.\n\n` +
+        `   Cách xử lý:\n` +
+        `     1. Lấy access token của ${new URL(url).hostname} (đăng nhập trên trang của họ)\n` +
+        `     2. Quét lại kèm token:  aivin mcp ${url} --test-token <token>\n\n` +
+        `   Token chỉ dùng để đọc danh sách tool lúc quét, KHÔNG được lưu lại.`,
+      );
+    }
     throw new Error('No tools/resources/prompts discovered at that URL - nothing to convert.');
   }
   console.log(chalk.green(`✅ Found ${tools.length} tool(s), ${resources.length} resource(s), ${prompts.length} prompt(s)`));
