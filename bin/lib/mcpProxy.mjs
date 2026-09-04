@@ -593,7 +593,10 @@ export async function scanAndPublishMcp(url, options) {
     // đúng field này. MCP chạy local qua npx không bao giờ tự bật cờ (chỉ remote server
     // mới set qua RFC 9728), nên MCP npm cần API key vẫn deploy ra plugin KHÔNG có chỗ
     // nhập credential. `--oauth` để user tự khai điều đó.
-    ...(options.oauth ? { requires_oauth: true } : {}),
+    // Cờ chỉ bật `requires_oauth` để BE sinh connection_id + initial.Authorization; việc chọn
+    // OAuth hay credential_form diễn ra SAU đó ở bước CLI hỏi gắn connector. Tên `--oauth` ban
+    // đầu gây hiểu nhầm là ép OAuth nên đổi thành `--auth`, giữ `--oauth` làm bí danh.
+    ...(options.auth || options.oauth ? { requires_oauth: true } : {}),
     tools: selected.filter((s) => s.kind === 'tools').map((s) => s.item),
     resources: selected.filter((s) => s.kind === 'resources').map((s) => s.item),
     prompts: selected.filter((s) => s.kind === 'prompts').map((s) => s.item),
