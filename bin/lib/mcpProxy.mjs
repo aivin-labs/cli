@@ -587,6 +587,13 @@ export async function scanAndPublishMcp(url, options) {
 
   const filteredScanned = {
     ...scanned,
+    // `requires_oauth` là công tắc DUY NHẤT bật connector: BE sinh `connection_id` +
+    // block `initial.Authorization` (source: "connection") từ nó, còn khi cờ tắt thì cả
+    // hai đều null — đã đối chứng bằng 2 lần gọi /plugins/build-mcp-manifests chỉ khác
+    // đúng field này. MCP chạy local qua npx không bao giờ tự bật cờ (chỉ remote server
+    // mới set qua RFC 9728), nên MCP npm cần API key vẫn deploy ra plugin KHÔNG có chỗ
+    // nhập credential. `--oauth` để user tự khai điều đó.
+    ...(options.oauth ? { requires_oauth: true } : {}),
     tools: selected.filter((s) => s.kind === 'tools').map((s) => s.item),
     resources: selected.filter((s) => s.kind === 'resources').map((s) => s.item),
     prompts: selected.filter((s) => s.kind === 'prompts').map((s) => s.item),
