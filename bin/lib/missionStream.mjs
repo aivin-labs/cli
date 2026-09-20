@@ -163,6 +163,7 @@ export function browserViewerHtml({ serverUrl, apiKey, tenantClient }) {
   const stage = document.getElementById('stage');
 
   let sessionKey = null;
+  let castToken = undefined;
   let canvas = null, ctx = null;
   let viewportW = 1280, viewportH = 800;
 
@@ -194,6 +195,10 @@ export function browserViewerHtml({ serverUrl, apiKey, tenantClient }) {
 
   socket.on('browser:cast-start', (payload) => {
     sessionKey = payload.clientId;
+    // 🆕 (2026-09-13) castToken — echo lại trên mọi lệnh browser:* gửi lên, cho Gateway phát hiện
+    // lệnh trễ nhắm vào 1 session ĐÃ bị thay thế bởi phiên HIL mới hơn dùng chung sessionKey. Xem
+    // AIBrowserGateway.isCastTokenFresh's own doc (be repo).
+    castToken = payload.castToken;
     viewportW = payload.viewportWidth || 1280;
     viewportH = payload.viewportHeight || 800;
     statusText.textContent = 'Phiên tương tác: ' + sessionKey + ' (' + (payload.url || '') + ')';
@@ -246,18 +251,18 @@ export function browserViewerHtml({ serverUrl, apiKey, tenantClient }) {
     canvas.addEventListener('click', (e) => {
       if (!sessionKey) return;
       const { x, y } = toPageCoords(e);
-      socket.emit('browser:click', { clientId: sessionKey, x, y });
+      socket.emit('browser:click', { clientId: sessionKey, x, y, castToken });
     });
     canvas.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       if (!sessionKey) return;
       const { x, y } = toPageCoords(e);
-      socket.emit('browser:rightclick', { clientId: sessionKey, x, y });
+      socket.emit('browser:rightclick', { clientId: sessionKey, x, y, castToken });
     });
     canvas.addEventListener('dblclick', (e) => {
       if (!sessionKey) return;
       const { x, y } = toPageCoords(e);
-      socket.emit('browser:dblclick', { clientId: sessionKey, x, y });
+      socket.emit('browser:dblclick', { clientId: sessionKey, x, y, castToken });
     });
     let lastHover = 0;
     canvas.addEventListener('mousemove', (e) => {
@@ -266,12 +271,12 @@ export function browserViewerHtml({ serverUrl, apiKey, tenantClient }) {
       if (now - lastHover < 50) return;
       lastHover = now;
       const { x, y } = toPageCoords(e);
-      socket.emit('browser:hover', { clientId: sessionKey, x, y });
+      socket.emit('browser:hover', { clientId: sessionKey, x, y, castToken });
     });
     canvas.addEventListener('wheel', (e) => {
       if (!sessionKey) return;
       e.preventDefault();
-      socket.emit('browser:scroll', { clientId: sessionKey, deltaY: e.deltaY });
+      socket.emit('browser:scroll', { clientId: sessionKey, deltaY: e.deltaY, castToken });
     }, { passive: false });
     canvas.tabIndex = 0;
     canvas.addEventListener('keydown', (e) => {
@@ -280,12 +285,12 @@ export function browserViewerHtml({ serverUrl, apiKey, tenantClient }) {
       const special = SPECIAL_KEYS[e.key];
       if (special) {
         e.preventDefault();
-        socket.emit('browser:type', { clientId: sessionKey, text: special });
+        socket.emit('browser:type', { clientId: sessionKey, text: special, castToken });
         return;
       }
       if (e.key.length === 1) {
         e.preventDefault();
-        socket.emit('browser:type', { clientId: sessionKey, text: e.key });
+        socket.emit('browser:type', { clientId: sessionKey, text: e.key, castToken });
       }
     });
     canvas.addEventListener('mouseenter', () => canvas.focus());
