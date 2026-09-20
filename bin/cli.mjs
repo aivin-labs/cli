@@ -688,6 +688,9 @@ mcpCommand
   .option('--private', 'Deploy to your org only - default')
   .option('--org', 'Alias of --private - there is no narrower per-workspace scope today')
   .option('--quiet', 'Skip live progress output while scanning (on by default otherwise)')
+  .option('--auth', 'Đánh dấu MCP này cần credential -> BE sinh connection_id, CLI hỏi gắn connector (OAuth HOẶC credential_form tuỳ chọn lúc đó). Dùng cho MCP cần API key/token mà scan không tự nhận ra')
+  .option('--oauth', 'Bí danh cũ của --auth (giữ để không phá lệnh đã dùng)')
+  .option('--test-token <token>', 'Access token dùng THỬ để đọc tool của remote MCP cần OAuth (Notion/Slack/Linear/Figma...). Chỉ dùng lúc quét, KHÔNG lưu lại - xem test_token trong plugin-store.proto')
   .option('-y, --yes', 'Skip the deploy confirmation prompt (required in non-TTY/CI contexts, which otherwise now refuse to deploy at all - see scanAndPublishMcp)')
   .action(async (url, options) => {
     try {
