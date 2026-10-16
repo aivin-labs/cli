@@ -9,7 +9,7 @@
   "scripts": {
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "node --test test/cli.validate.test.mjs"
+    "test": "node --test test/*.test.mjs"
   },
   "keywords": [
     "aivin",
@@ -31,7 +31,8 @@
     "inquirer": "^14.0.2",
     "react": "^19.2.8",
     "socket.io-client": "^4.8.3",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

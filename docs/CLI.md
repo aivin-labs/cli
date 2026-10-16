@@ -1107,6 +1107,32 @@ aivin browser --remote "Check the current price of BTC on coinmarketcap.com"
 is already active, without starting anything new - handy if you closed the auto-opened window by
 accident.
 
+## `aivin remote` — let your agents work on this computer (Device Agent)
+
+Turns this computer into a device your Aivin agents can hand jobs to (`official.device_agent`): run commands, read/search/edit
+files, inspect projects and the system — only inside the folder you allow.
+
+```bash
+aivin remote start --dir D:\code     # first run pairs this computer (device token), then listens for work
+aivin remote do "run the tests of the be project and summarize failures"
+aivin remote devices                  # your paired computers + online state
+aivin remote pause | resume           # local kill switch - refuses every remote call while paused
+aivin remote unpair [deviceId]        # revoke (token stops working immediately)
+aivin remote memory list|search|add|forget|clear   # on-device memory, plain YAML in ~/.aivin/memory/
+aivin remote status | test | logs | reindex | enable | disable | reset-id
+```
+
+- **Device token, not your API key**: pairing (`POST /plugins/device-agent/devices/pair`) gives this machine its own token
+  (`~/.aivin/device-credentials.json`, the server only keeps a hash). Revoking a device never touches your API key.
+- **Tools per device**: discovered from what is installed (git, ripgrep, node, python, docker…) — `aivin remote status` lists them.
+- **Permissions come from the agent's own rules** (autonomous decisions / needs approval / must not): every step that changes
+  something goes through the platform policy gate and may ask you to approve. This computer keeps a hard floor the server cannot
+  change: allowed folder (checked with realpath, symlinks can't escape), secrets stripped from command environments, a safety net
+  against system-destroying commands, and the kill switch.
+- **Memory stays on this computer**: `~/.aivin/memory/<kind>.yaml` (edit by hand if you like) + `vectors.json`; the agent recalls it
+  before planning and saves procedures that worked.
+- Env: `AIVIN_REMOTE_HOME` (config folder), `AIVIN_REMOTE_LIMIT_<GROUP>` (parallel limit per tool group: fs_read, fs_write, exec, git, system, memory).
+
 ## `aivin do <agent_nickname> <mission>`
 
 Has a specific agent start a background mission toward a free-text goal (`POST /agent/start-work`),

@@ -70,6 +70,35 @@ import {
   deleteProjectCmd,
   listProjectsCmd,
 } from './lib/tasks.mjs';
+import {
+  startRemoteClient,
+  testRemoteConnection,
+  enableAutoStart,
+  disableAutoStart,
+  getAutoStartStatus,
+  buildDeviceProfile,
+  buildTools,
+  buildCatalog,
+  getOrCreateDeviceId,
+  resetDeviceId,
+  loadDeviceCredentials,
+  pairDevice,
+  listDevices,
+  unpairDevice,
+  isRemotePaused,
+  setRemotePaused,
+  getRecentLogs,
+  clearLogs,
+  memoryStats,
+  listMemoryItems,
+  searchMemory,
+  putMemoryItems,
+  deleteMemoryItems,
+  clearDeviceMemory,
+  createFileIndex,
+  runRemoteMission,
+  MemoryKind,
+} from './lib/remoteControl.mjs';
 
 // Load env vars: the current project's `.env` first (any deliberate per-project override), THEN
 // fill in AIVIN_BASE_URL/API_KEY/SDK_ENDPOINT from the machine's active context if the project
@@ -976,6 +1005,262 @@ program
     }
   });
 
+const remoteCommand = program
+  .command('remote')
+  .description('Let your Aivin agents work on this computer (Device Agent) - pair, run the listener, manage memory and safety');
+
+const remoteFail = (error) => {
+  console.error(chalk.red('❌'), error.message);
+  process.exit(1);
+};
+
+remoteCommand
+  .command('start')
+  .description('Pair this computer (first time) and listen for work from your agents in the foreground')
+  .option('--dir <path>', 'Folder the agent may work in (default: the folder saved at pairing, else the current folder)')
+  .option('--name <name>', 'Name shown for this computer (default: hostname)')
+  .option('--repair', 'Pair again (new device token; the old one stops working)')
+  .option('--quiet', 'No interactive logs')
+  .action(async (options) => {
+    try {
+      await startRemoteClient(options);
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('pair')
+  .description('Pair (or re-pair) this computer with your account without starting the listener')
+  .option('--dir <path>', 'Folder the agent may work in (default: current folder)')
+  .option('--name <name>', 'Name shown for this computer (default: hostname)')
+  .action(async (options) => {
+    try {
+      const roots = [path.resolve(options.dir || process.cwd())];
+      const creds = await pairDevice({ serverUrl: missionServerUrl(), apiKey: process.env.API_KEY, roots, name: options.name, profile: buildDeviceProfile(roots) });
+      console.log(chalk.green(`✅ Đã ghép máy "${creds.name}" (${creds.device_id})`));
+      console.log(chalk.gray(`   Thư mục được phép: ${creds.roots.join(' | ')}`));
+      console.log(chalk.gray('   Chạy `aivin remote start` để bắt đầu nhận việc.'));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('devices')
+  .description('List computers paired with your account and whether they are online')
+  .action(async () => {
+    try {
+      const devices = await listDevices({ serverUrl: missionServerUrl(), apiKey: process.env.API_KEY });
+      const mine = loadDeviceCredentials()?.device_id;
+      if (!devices.length) return console.log(chalk.gray('Chưa có máy nào được ghép. Chạy `aivin remote start` trên máy cần dùng.'));
+      for (const d of devices) {
+        const state = d.online ? chalk.green('● online') : chalk.gray('○ offline');
+        console.log(`${state}  ${chalk.bold(d.name)}${d.device_id === mine ? chalk.cyan(' (máy này)') : ''}  ${chalk.gray(`${d.platform || ''} · ${d.tools_count} công cụ · ${d.device_id}`)}`);
+      }
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('unpair [deviceId]')
+  .description('Revoke a paired computer (default: this one) - its token stops working immediately')
+  .action(async (deviceId) => {
+    try {
+      const target = deviceId || loadDeviceCredentials()?.device_id;
+      if (!target) throw new Error('Máy này chưa được ghép.');
+      await unpairDevice({ serverUrl: missionServerUrl(), apiKey: process.env.API_KEY, deviceId: target });
+      console.log(chalk.green(`✅ Đã thu hồi máy ${target}.`));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('pause')
+  .description('Kill switch: refuse every remote call on this computer until `aivin remote resume`')
+  .action(() => {
+    setRemotePaused(true);
+    console.log(chalk.yellow('⏸  Đã tạm dừng — máy này từ chối mọi việc từ xa.'));
+  });
+
+remoteCommand
+  .command('resume')
+  .description('Turn the kill switch off')
+  .action(() => {
+    setRemotePaused(false);
+    console.log(chalk.green('▶  Máy này nhận việc từ xa trở lại.'));
+  });
+
+remoteCommand
+  .command('enable')
+  .description('Start the listener automatically when this computer starts')
+  .option('--dir <path>', 'Folder the agent may work in (default: current folder)')
+  .action((options) => {
+    try {
+      const res = enableAutoStart(options);
+      console.log(chalk.green('✅ Đã bật tự khởi động cùng máy.'));
+      console.log(chalk.gray(`   Thư mục: ${res.rootDir}`));
+      console.log(chalk.gray(`   Tệp khởi động: ${res.filePath}`));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('disable')
+  .description('Stop starting the listener with this computer')
+  .action(() => {
+    try {
+      disableAutoStart();
+      console.log(chalk.green('✅ Đã tắt tự khởi động cùng máy.'));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('status')
+  .description('Show pairing, allowed folders, kill switch, auto-start, tools and memory of this computer')
+  .action(() => {
+    try {
+      const creds = loadDeviceCredentials();
+      const roots = creds?.roots?.length ? creds.roots : [process.cwd()];
+      const profile = buildDeviceProfile(roots);
+      const { catalog, hash } = buildCatalog(buildTools({ roots, binaries: profile.binaries, projects: profile.projects }));
+      const stats = memoryStats();
+      console.log(chalk.blue('💻 Máy này:'));
+      console.log(chalk.gray(`   Mã máy:        ${getOrCreateDeviceId()}`));
+      console.log(chalk.gray(`   Đã ghép:       ${creds ? chalk.green(`có — ${creds.name} @ ${creds.server_url}`) : chalk.yellow('chưa')}`));
+      console.log(chalk.gray(`   Thư mục:       ${roots.join(' | ')}`));
+      console.log(chalk.gray(`   Công tắc ngắt: ${isRemotePaused() ? chalk.yellow('ĐANG TẠM DỪNG') : 'tắt'}`));
+      console.log(chalk.gray(`   Tự khởi động:  ${getAutoStartStatus().enabled ? 'bật' : 'tắt'}`));
+      console.log(chalk.gray(`   Chương trình:  ${profile.binaries.join(', ') || '-'}`));
+      console.log(chalk.gray(`   Dự án:         ${profile.projects.map((p) => `${p.name} (${p.kind})`).join(', ') || '-'}`));
+      console.log(chalk.gray(`   Ghi nhớ:       ${stats.total} mục (${stats.with_vector} có vector) — ${stats.dir}`));
+      console.log(chalk.blue(`\n🛠️  ${catalog.length} công cụ (dấu vân tay ${hash.slice(0, 12)}):`));
+      for (const t of catalog) console.log(`   - ${chalk.cyan(t.name)}${t.read_only ? chalk.gray(' [chỉ đọc]') : t.destructive ? chalk.red(' [không hoàn tác]') : chalk.yellow(' [ghi]')}`);
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('test')
+  .description('Check the server connection and whether the server sees this computer online')
+  .action(async () => {
+    try {
+      const r = await testRemoteConnection();
+      console.log(chalk.gray(`   Máy chủ:   ${r.serverUrl} — ${r.httpOk ? chalk.green(`thông (${r.latencyMs} ms)`) : chalk.red('không kết nối được')}`));
+      console.log(chalk.gray(`   Đã ghép:   ${r.paired ? `có (${r.deviceId})` : chalk.yellow('chưa — chạy aivin remote start')}`));
+      if (r.online !== null) console.log(chalk.gray(`   Online:    ${r.online ? chalk.green('có') : chalk.yellow(r.registered === false ? 'máy chủ không có máy này (đã thu hồi?)' : 'không — chạy aivin remote start')}`));
+      if (r.error) console.log(chalk.yellow(`   ⚠️  ${r.error}`));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('logs')
+  .description('Recent remote activity on this computer')
+  .option('--limit <n>', 'Entries to show (default 30)', '30')
+  .option('--clear', 'Clear the activity log')
+  .action((options) => {
+    if (options.clear) {
+      clearLogs();
+      return console.log(chalk.green('✅ Đã xoá nhật ký.'));
+    }
+    const logs = getRecentLogs(options.limit);
+    if (!logs.length) return console.log(chalk.gray('Chưa có hoạt động nào.'));
+    for (const log of logs) {
+      const time = log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : '';
+      if (log.type === 'tool_call') console.log(`  [${time}] ${log.success ? chalk.green('✓') : chalk.red('✗')} ${chalk.cyan(log.tool)}${log.ms !== undefined ? chalk.gray(` ${log.ms} ms`) : ''} ${log.error ? chalk.red(log.error) : ''}`);
+      else console.log(`  [${time}] ${chalk.gray(log.type)} ${chalk.gray(log.reason || log.serverUrl || '')}`);
+    }
+  });
+
+remoteCommand
+  .command('memory [action] [value...]')
+  .description('On-device memory (~/.aivin/memory/*.yaml): list [kind] | search <words> | add <text> | forget <id> | clear [kind]')
+  .option('--kind <kind>', `Kind: ${Object.values(MemoryKind).join(', ')}`)
+  .option('--key <key>', 'Stable key for add (default: derived from the text)')
+  .action((action = 'list', valueParts = [], options) => {
+    try {
+      const value = valueParts.join(' ').trim();
+      if (action === 'search') {
+        if (!value) throw new Error('Dùng: aivin remote memory search <từ khoá>');
+        const hits = searchMemory({ query: value, kinds: options.kind ? [options.kind] : undefined, limit: 20 });
+        if (!hits.length) return console.log(chalk.gray('Không có mục nào khớp.'));
+        hits.forEach((h) => console.log(`  ${chalk.gray(h.id)} [${h.kind}] ${chalk.bold(h.key)}: ${h.text}`));
+        return;
+      }
+      if (action === 'add') {
+        if (!value) throw new Error('Dùng: aivin remote memory add "<nội dung>" --kind fact --key <khoá>');
+        const kind = options.kind || MemoryKind.FACT;
+        const key = options.key || value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').slice(0, 60);
+        putMemoryItems([{ kind, key, text: value }]);
+        return console.log(chalk.green(`✅ Đã nhớ [${kind}] ${key}`));
+      }
+      if (action === 'forget') {
+        if (!value) throw new Error('Dùng: aivin remote memory forget <id> (xem id bằng memory list / search)');
+        const res = deleteMemoryItems({ ids: value.split(/[\s,]+/) });
+        return console.log(chalk.green(`✅ Đã quên ${res.deleted} mục.`));
+      }
+      if (action === 'clear') {
+        clearDeviceMemory(value || options.kind || undefined);
+        return console.log(chalk.green('✅ Đã xoá bộ nhớ.'));
+      }
+      const page = listMemoryItems({ kind: value || options.kind, limit: 100 });
+      const stats = memoryStats();
+      console.log(chalk.blue(`🧠 Bộ nhớ trên máy: ${stats.total} mục — ${stats.dir} (sửa tay các tệp .yaml được)`));
+      page.items.forEach((i) => console.log(`  ${chalk.gray(i.id)} [${i.kind}] ${chalk.bold(i.key)}: ${String(i.text).slice(0, 160)}`));
+      if (page.next_cursor !== null) console.log(chalk.gray(`  … còn ${page.total - page.items.length} mục`));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('reindex')
+  .description('Rebuild the file index of the allowed folders now')
+  .action(async () => {
+    try {
+      const roots = loadDeviceCredentials()?.roots || [process.cwd()];
+      const index = createFileIndex(roots);
+      const stats = await index.build();
+      index.close();
+      console.log(chalk.green(`✅ Chỉ mục: ${stats.files} tệp (${stats.updated} cập nhật, ${stats.removed} bỏ) trong ${stats.ms} ms`));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('reset-id')
+  .description('Give this computer a new device id (cloned machines) - you must pair again')
+  .action(() => {
+    const id = resetDeviceId();
+    console.log(chalk.green(`✅ Mã máy mới: ${id} — chạy \`aivin remote start\` để ghép lại.`));
+  });
+
+remoteCommand
+  .command('do [objective]')
+  .description('Give a job to the Device Agent on your computer (the listener must be running there)')
+  .option('--device <name>', 'Which paired computer (default: your online one)')
+  .option('--cwd <path>', 'Folder the job is about')
+  .option('--workspace <id>', 'Workspace id (default: your personal workspace)')
+  .option('--agent <id>', 'Agent to act as (default: the workspace default agent)')
+  .option('--no-watch', 'Do not stream progress')
+  .action(async (objective, options) => {
+    try {
+      objective = await requireArg(objective, { prompt: 'What should the agent do on your computer?', usage: 'Usage: aivin remote do "<job>"' });
+      await runRemoteMission(objective, options);
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
 const doCommand = program
   .command('do [agentNickname] [mission]')
   .description("Have <agentNickname> work toward a goal in the background - not a specific deployed plugin")
@@ -1349,7 +1634,29 @@ projectCommand
     }
   });
 
-export { validatePluginConfig, incrementVersion, validateMcpProxyConfig, buildDeploymentPayload, buildMcpManifest, parseMcpArgs, guessConnectorQueryFromEnvVarName, setFieldConnector, buildRegisterConnectorDto, buildCreateTaskPayload };
+export {
+  validatePluginConfig,
+  incrementVersion,
+  validateMcpProxyConfig,
+  buildDeploymentPayload,
+  buildMcpManifest,
+  parseMcpArgs,
+  guessConnectorQueryFromEnvVarName,
+  setFieldConnector,
+  buildRegisterConnectorDto,
+  buildCreateTaskPayload,
+  buildDeviceProfile,
+  buildTools,
+  buildCatalog,
+  enableAutoStart,
+  disableAutoStart,
+  getAutoStartStatus,
+  resetDeviceId,
+  getRecentLogs,
+  clearLogs,
+  testRemoteConnection,
+  runRemoteMission,
+};
 
 // Only parse argv when run directly (`aivin ...` / `node bin/cli.mjs ...`),
 // not when this module is imported (e.g. by tests) - otherwise Commander
