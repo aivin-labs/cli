@@ -10,7 +10,8 @@
 # Optional environment variables (`irm | iex` cannot pass arguments):
 #   AIVIN_PAIR_CODE      one-time pairing code from Aivin
 #   AIVIN_SERVER         Aivin server the code belongs to
-#   AIVIN_DIR            folder the agent may work in (default: current folder)
+#   AIVIN_FULL_ACCESS    set to 1 to let the agent work anywhere on this computer (otherwise one folder)
+#   AIVIN_DIR            folder the agent may work in (default: current folder; ignored with AIVIN_FULL_ACCESS)
 #   AIVIN_VERSION        release, e.g. v1.1.0 (default: the one in <root>/latest.txt)
 #   AIVIN_DOWNLOAD_ROOT  versioned download site: <root>/latest.txt + <root>/<version>/<asset> (default: https://get.aivin.vn)
 #   AIVIN_DOWNLOAD_BASE  one folder holding every asset, e.g. a GitHub release - overrides the root
@@ -116,7 +117,8 @@ function Install-AivinCli {
     if ($env:AIVIN_PAIR_CODE) {
         $argsList = @('remote', 'start', '--code', $env:AIVIN_PAIR_CODE)
         if ($env:AIVIN_SERVER) { $argsList += @('--server', $env:AIVIN_SERVER) }
-        if ($env:AIVIN_DIR) { $argsList += @('--dir', $env:AIVIN_DIR) }
+        if ($env:AIVIN_FULL_ACCESS) { $argsList += @('--full-access') }
+        elseif ($env:AIVIN_DIR) { $argsList += @('--dir', $env:AIVIN_DIR) }
         Write-Step 'Connecting this computer to Aivin - keep this window open so the AI can work here.'
         Write-Host ''
         & $target @argsList

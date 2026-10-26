@@ -61,12 +61,25 @@ export function isProtectedPath(absolute) {
   return protectedReal.some((dir) => isInside(dir, real));
 }
 
-/** Đường hiển thị: tương đối với gốc chứa nó (gọn cho Planner), không thì tuyệt đối. */
+/**
+ * Đường hiển thị: tương đối với gốc ĐẦU TIÊN (gọn cho Planner), ngoài nó thì tuyệt đối. Chỉ gốc đầu: đường tương đối luôn được hiểu
+ * theo gốc đầu (resolveInRoots) — rút gọn theo gốc khác (vd ổ D: khi toàn quyền) thì Planner dùng lại sẽ trỏ nhầm sang thư mục nhà.
+ */
 export function displayPath(roots, absolute) {
-  for (const root of roots || []) {
-    if (isInside(path.resolve(root), absolute)) return path.relative(path.resolve(root), absolute) || '.';
-  }
+  const first = roots?.[0];
+  if (first && isInside(path.resolve(first), absolute)) return path.relative(path.resolve(first), absolute) || '.';
   return absolute;
+}
+
+/**
+ * Gốc khi chủ máy cho TOÀN QUYỀN (`--full-access`): thư mục nhà đứng đầu (đường tương đối tính từ đây), rồi mọi ổ đĩa (Windows: các
+ * ổ có mặt; macOS/Linux: `/`). Thư mục cấu hình Aivin vẫn bị chặn (isProtectedPath), lệnh thảm hoạ vẫn bị chặn.
+ */
+export function fullAccessRoots() {
+  const home = os.homedir();
+  if (process.platform !== 'win32') return [home, '/'];
+  const drives = 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('').map((d) => `${d}:\\`).filter((d) => { try { return fs.existsSync(d); } catch { return false; } });
+  return [home, ...drives];
 }
 
 const SECRET_ENV = /(^API_KEY$|^AIVIN_|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|CREDENTIAL|COOKIE|SESSION_KEY|ACCESS_KEY|_API_KEY$)/i;

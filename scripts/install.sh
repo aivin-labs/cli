@@ -8,18 +8,20 @@
 #
 #   curl -fsSL https://get.aivin.vn/install.sh | sh -s -- --code ABCD-EFGH
 #
-# Options: --code <pairing code> --server <server the code belongs to> --dir <folder the agent may use> --version <e.g. v1.1.0>
+# Options: --code <pairing code> --server <server the code belongs to> --full-access (agent may work anywhere on this computer)
+#          --dir <folder the agent may use> --version <e.g. v1.1.0>
 # Environment: AIVIN_DOWNLOAD_ROOT (versioned site: <root>/latest.txt + <root>/<version>/<asset>, default https://get.aivin.vn),
 #              AIVIN_DOWNLOAD_BASE (one folder holding every asset, e.g. a GitHub release - overrides the root),
 #              AIVIN_INSTALL_DIR (default: ~/.local/bin).
 set -eu
 
-CODE=""; SERVER=""; DIR=""; VERSION="${AIVIN_VERSION:-}"
+CODE=""; SERVER=""; DIR=""; FULL=""; VERSION="${AIVIN_VERSION:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --code) CODE="$2"; shift 2 ;;
     --server) SERVER="$2"; shift 2 ;;
     --dir) DIR="$2"; shift 2 ;;
+    --full-access) FULL=1; shift ;;
     --version) VERSION="$2"; shift 2 ;;
     *) echo "  Ignoring unknown option: $1" >&2; shift ;;
   esac
@@ -121,7 +123,8 @@ esac
 if [ -n "$CODE" ]; then
   set -- remote start --code "$CODE"
   if [ -n "$SERVER" ]; then set -- "$@" --server "$SERVER"; fi
-  if [ -n "$DIR" ]; then set -- "$@" --dir "$DIR"; fi
+  if [ -n "$FULL" ]; then set -- "$@" --full-access
+  elif [ -n "$DIR" ]; then set -- "$@" --dir "$DIR"; fi
   say "Connecting this computer to Aivin - keep this window open so the AI can work here."
   echo ""
   # Run from `curl | sh`: stdin is the pipe - give the keyboard back to the program (so Ctrl+C works).

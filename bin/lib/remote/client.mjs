@@ -1,16 +1,19 @@
+import os from 'os';
 import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
 import { io } from 'socket.io-client';
 import { DEFAULT_AIVIN_BASE_URL } from '../context.mjs';
 import { logActivity } from './activityLog.mjs';
-import { DEVICE_NAMESPACE, DeviceErrorCode, DeviceEvent, MAX_RESULT_BYTES, PROTOCOL_VERSION } from './constants.mjs';
+import { DEVICE_NAMESPACE, DeviceAccess, DeviceErrorCode, DeviceEvent, MAX_RESULT_BYTES, PROTOCOL_VERSION } from './constants.mjs';
 import { clearDeviceCredentials, listDevices, loadDeviceCredentials, pairDevice, pairDeviceWithCode, saveDeviceCredentials } from './credentials.mjs';
 import { ensureMemoryLoaded, memoryStats, stopWatchingMemory, watchMemoryDir } from './deviceMemory.mjs';
 import { buildCatalog, buildDeviceProfile } from './deviceProfile.mjs';
 import { createFileIndex } from './fileIndexer.mjs';
 import { createScheduler } from './scheduler.mjs';
-import { isRemotePaused } from './sandbox.mjs';
+import { acquireDaemonLock } from './daemonLock.mjs';
+import { randomUUID } from 'crypto';
+import { fullAccessRoots, isRemotePaused } from './sandbox.mjs';
 import { buildTools, toolMap } from './toolHandlers.mjs';
 
 const HEARTBEAT_MS = 20_000;
@@ -87,16 +90,35 @@ export async function startRemoteClient(options = {}) {
   const serverUrl = resolveServerUrl(options, saved);
   const apiKey = options.apiKey ?? process.env.API_KEY;
   const rootsGiven = Boolean(options.dir);
-  const roots = rootsGiven ? [path.resolve(options.dir)] : (saved?.roots?.length ? saved.roots : [process.cwd()]);
+  // Toàn quyền: chủ máy chọn lúc kết nối (`--full-access`), giữ qua các lần khởi động lại; `--dir` tường minh thì về chế độ một thư mục.
+  const fullAccess = !rootsGiven && (!!options.fullAccess || (!options.code && saved?.access === DeviceAccess.FULL));
+  const roots = fullAccess ? fullAccessRoots()
+    : rootsGiven ? [path.resolve(options.dir)] : (saved?.access !== DeviceAccess.FULL && saved?.roots?.length ? saved.roots : [process.cwd()]);
+  // Dò dự án + chỉ mục tệp chỉ trong thư mục nhà khi toàn quyền — quét cả ổ C: là hàng trăm nghìn tệp hệ thống vô ích.
+  const scanRoots = fullAccess ? [os.homedir()] : roots;
   const quiet = !!options.quiet;
   const say = (...args) => { if (!quiet) console.log(...args); };
 
-  const profile = buildDeviceProfile(roots);
-  const creds = await ensurePaired({ serverUrl, apiKey, code: options.code, roots, rootsGiven, name: options.name, repair: options.repair, profile });
+  // Cửa sổ thứ hai cùng thư mục cấu hình → dừng ngay với hướng dẫn (trừ khi ghép lại bằng mã: cửa sổ cũ sẽ tự dừng).
+  const releaseLock = acquireDaemonLock({ takeOver: !!options.code });
+  const access = fullAccess ? DeviceAccess.FULL : DeviceAccess.FOLDERS;
+  const profile = { ...buildDeviceProfile(scanRoots), roots: roots.map((r) => path.resolve(r)), access };
+  let creds;
+  try {
+    creds = await ensurePaired({ serverUrl, apiKey, code: options.code, roots, rootsGiven, name: options.name, repair: options.repair, profile });
+  } catch (e) {
+    releaseLock();
+    throw e;
+  }
+  if (creds.access !== access || JSON.stringify(creds.roots) !== JSON.stringify(profile.roots)) {
+    creds.access = access;
+    creds.roots = profile.roots;
+    saveDeviceCredentials(creds);
+  }
   if (options.code) say(chalk.green(`✅ Đã kết nối máy "${creds.name}" với tài khoản Aivin của bạn — quay lại Aivin để chọn máy này.`));
   ensureMemoryLoaded();
   watchMemoryDir();
-  const fileIndex = createFileIndex(roots);
+  const fileIndex = createFileIndex(scanRoots);
   const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex };
   const tools = buildTools(env);
   const byName = toolMap(tools);
@@ -105,7 +127,7 @@ export async function startRemoteClient(options = {}) {
 
   say(chalk.blue('💻 Aivin Device Agent — máy này nhận việc từ agent của bạn'));
   say(chalk.gray(`   Máy:        ${creds.name} (${creds.device_id})`));
-  say(chalk.gray(`   Thư mục:    ${roots.join(' | ')}`));
+  say(chalk.gray(fullAccess ? `   Quyền:      TOÀN QUYỀN máy (${roots.slice(1).join(' ')}) — trừ thư mục cấu hình Aivin` : `   Thư mục:    ${roots.join(' | ')}`));
   say(chalk.gray(`   Máy chủ:    ${serverUrl}`));
   say(chalk.gray(`   Công cụ:    ${catalog.length} (${profile.binaries.join(', ') || 'không phát hiện chương trình nào'})`));
   say(chalk.gray(`   Ghi nhớ:    ${memoryStats().total} mục — ${memoryStats().dir}`));
@@ -115,8 +137,11 @@ export async function startRemoteClient(options = {}) {
     .then((s) => { say(chalk.gray(`   Chỉ mục tệp: ${s.files} tệp (${s.updated} cập nhật, ${s.ms} ms)`)); fileIndex.watch(); })
     .catch((e) => say(chalk.yellow(`   ⚠️  Lập chỉ mục tệp lỗi: ${e.message}`)));
 
+  // Mã phiên chạy của tiến trình này: BE báo socket cũ "bị thay bởi instance X" — chỉ dừng khi X là tiến trình KHÁC (tự nối lại
+  // sau khi mạng chập chờn thì không dừng nhầm).
+  const instance = randomUUID();
   const socket = io(`${serverUrl}${DEVICE_NAMESPACE}`, {
-    auth: { device_token: creds.device_token, protocol: PROTOCOL_VERSION },
+    auth: { device_token: creds.device_token, protocol: PROTOCOL_VERSION, instance },
     transports: ['websocket'],
     reconnection: true,
     reconnectionDelay: 1000,
@@ -134,6 +159,7 @@ export async function startRemoteClient(options = {}) {
     socket.disconnect();
     fileIndex.close();
     stopWatchingMemory();
+    releaseLock();
     say(chalk.gray('🛑 Đã dừng nhận việc từ xa.'));
   };
 
@@ -192,6 +218,11 @@ export async function startRemoteClient(options = {}) {
       return;
     }
     say(chalk.gray(`   (chưa nối được: ${err?.message} — thử lại...)`));
+  });
+  socket.on(DeviceEvent.REPLACED, (payload) => {
+    if (!payload?.by_instance || payload.by_instance === instance) return;
+    console.log(chalk.red('❌ Máy này vừa được mở nhận việc ở một cửa sổ hoặc máy khác — cửa sổ này dừng để hai bên không tranh nhau.'));
+    stop();
   });
   socket.on(DeviceEvent.REVOKED, () => {
     clearDeviceCredentials(creds.device_token);

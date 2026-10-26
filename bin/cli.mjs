@@ -1023,6 +1023,7 @@ remoteCommand
   .option('--dir <path>', 'Folder the agent may work in (default: the folder saved at pairing, else the current folder)')
   .option('--name <name>', 'Name shown for this computer (default: hostname)')
   .option('--repair', 'Pair again (new device token; the old one stops working)')
+  .option('--full-access', 'Let the agent work anywhere on this computer (all drives; relative paths start at your home folder). Kept across restarts; --dir switches back to one folder')
   .option('--code <code>', 'Pair with a one-time code from Aivin (chat box → Browser ▾ → Add this computer) - no `aivin login` needed')
   .option('--server <url>', 'Aivin server the code belongs to (Aivin prints it in the command when needed)')
   .option('--quiet', 'No interactive logs')

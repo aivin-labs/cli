@@ -53,6 +53,25 @@ test('thư mục cấu hình Aivin không bao giờ truy cập từ xa — kể 
   assert.doesNotThrow(() => assertCommandAllowed('npm run build && cat my.aivin-notes.txt'));
 });
 
+test('khoá một tiến trình nhận việc: cửa sổ thứ hai bị từ chối, ghép lại bằng mã thì lấy được, khoá cũ chết thì lấy lại', async () => {
+  const { acquireDaemonLock, lockHolder } = await import('../bin/lib/remote/daemonLock.mjs');
+  const lockFile = path.join(sandboxDir(), 'remote-daemon.lock');
+  // Tiến trình cha (đang sống, khác tiến trình này) giữ khoá.
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.ppid }));
+  assert.equal(lockHolder(lockFile), process.ppid);
+  assert.throws(() => acquireDaemonLock({ lockFile }), new RegExp(`PID ${process.ppid}`));
+  const release = acquireDaemonLock({ lockFile, takeOver: true });
+  assert.equal(JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid, process.pid);
+  release();
+  assert.equal(fs.existsSync(lockFile), false);
+  // Khoá của tiến trình đã chết → lấy lại; nhả khoá không xoá khoá đã sang tay tiến trình khác.
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: 2147483646 }));
+  const release2 = acquireDaemonLock({ lockFile });
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.ppid }));
+  release2();
+  assert.equal(fs.existsSync(lockFile), true);
+});
+
 test('daemon cũ chỉ xoá token của chính nó — không xoá token mới vừa ghép bởi cửa sổ khác', async () => {
   const { saveDeviceCredentials, loadDeviceCredentials, clearDeviceCredentials } = await import('../bin/lib/remote/credentials.mjs');
   saveDeviceCredentials({ server_url: 'http://x', device_id: 'dev-test-1', device_token: 'wes-dk-new', roots: [] });

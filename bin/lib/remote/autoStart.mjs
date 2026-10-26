@@ -3,6 +3,8 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { REMOTE_CONFIG_DIR } from './deviceProfile.mjs';
+import { DeviceAccess } from './constants.mjs';
+import { loadDeviceCredentials } from './credentials.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,6 +47,9 @@ export function getAllAutoStartFilePaths() {
  */
 export function enableAutoStart(options = {}) {
   const rootDir = path.resolve(options.dir || process.cwd());
+  // Máy đang TOÀN QUYỀN và không nêu --dir: khởi động không kèm --dir để giữ chế độ đã lưu (kèm --dir là về chế độ một thư mục).
+  const keepFullAccess = !options.dir && loadDeviceCredentials()?.access === DeviceAccess.FULL;
+  const scopeArgs = keepFullAccess ? [] : ['--dir', rootDir];
   const filePath = getAutoStartFilePath();
   const launch = cliLaunchCommand();
   const nodeExec = launch[0];
@@ -57,7 +62,7 @@ export function enableAutoStart(options = {}) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const vbsContent = [
       'Set WshShell = CreateObject("WScript.Shell")',
-      `WshShell.Run "${launch.map((part) => `""${part}""`).join(' ')} remote start --quiet --dir ""${rootDir}""", 0, False`,
+      `WshShell.Run "${launch.map((part) => `""${part}""`).join(' ')} remote start --quiet${keepFullAccess ? '' : ` --dir ""${rootDir}""`}", 0, False`,
     ].join('\r\n') + '\r\n';
     fs.writeFileSync(filePath, vbsContent, 'utf8');
   } else if (process.platform === 'darwin') {
@@ -75,8 +80,7 @@ ${launch.map((part) => `        <string>${part}</string>`).join('\n')}
         <string>remote</string>
         <string>start</string>
         <string>--quiet</string>
-        <string>--dir</string>
-        <string>${rootDir}</string>
+${scopeArgs.map((part) => `        <string>${part}</string>`).join('\n')}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -99,7 +103,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${launch.map((part) => `"${part}"`).join(' ')} remote start --quiet --dir "${rootDir}"
+ExecStart=${launch.map((part) => `"${part}"`).join(' ')} remote start --quiet${keepFullAccess ? '' : ` --dir "${rootDir}"`}
 Restart=always
 RestartSec=10
 WorkingDirectory=${rootDir}
@@ -117,7 +121,7 @@ WantedBy=default.target
     const desktopContent = `[Desktop Entry]
 Type=Application
 Name=AIVIN Remote Control
-Exec=${launch.map((part) => `"${part}"`).join(' ')} remote start --quiet --dir "${rootDir}"
+Exec=${launch.map((part) => `"${part}"`).join(' ')} remote start --quiet${keepFullAccess ? '' : ` --dir "${rootDir}"`}
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true

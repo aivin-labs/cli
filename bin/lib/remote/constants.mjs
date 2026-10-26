@@ -10,6 +10,8 @@ export const DEVICE_CREDENTIALS_FILE = path.join(REMOTE_CONFIG_DIR, 'device-cred
 export const DEVICE_DB_FILE = path.join(REMOTE_CONFIG_DIR, 'device-memory.db');
 /** Công tắc ngắt: tệp này tồn tại → máy từ chối mọi lời gọi từ xa (`aivin remote pause`). */
 export const KILL_SWITCH_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-paused');
+/** Khoá một tiến trình nhận việc cho mỗi thư mục cấu hình (PID) — xem daemonLock.mjs. */
+export const DAEMON_LOCK_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-daemon.lock');
 
 /** Namespace socket.io phía BE (DeviceGateway). */
 export const DEVICE_NAMESPACE = '/device';
@@ -17,6 +19,9 @@ export const PROTOCOL_VERSION = 1;
 /** Đường REST của Device Agent — mọi official plugin nằm dưới tiền tố `/plugins`. */
 export const DEVICE_API_PREFIX = '/plugins/device-agent';
 export const DEVICE_AGENT_PLUGIN_ID = 'official.device_agent';
+
+/** Phạm vi chủ máy cho AI: toàn máy (`--full-access`) hoặc chỉ các thư mục được phép. Gửi BE trong hồ sơ máy (`profile.access`). */
+export const DeviceAccess = Object.freeze({ FULL: 'full', FOLDERS: 'folders' });
 
 export const DeviceEvent = Object.freeze({
   HELLO: 'device:hello',
@@ -28,6 +33,8 @@ export const DeviceEvent = Object.freeze({
   STREAM: 'device:stream',
   RESULT: 'device:result',
   REVOKED: 'device:revoked',
+  /** Một tiến trình KHÁC vừa nối bằng cùng token máy (`{ by_instance }`) — tiến trình này dừng hẳn, không nối lại tranh chỗ. */
+  REPLACED: 'device:replaced',
 });
 
 /** Nhóm giới hạn song song trên máy — mỗi công cụ thuộc một nhóm. */
