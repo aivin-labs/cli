@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 import { IGNORED_DIRS, REMOTE_CONFIG_DIR } from './constants.mjs';
+import { isProtectedPath } from './sandbox.mjs';
 import { createTextIndex } from './textIndex.mjs';
 
 /**
@@ -72,6 +73,7 @@ async function walk(root, limit) {
       for (const entry of entries) {
         if (entry.isSymbolicLink()) continue;
         const full = path.join(dir, entry.name);
+        if (isProtectedPath(full)) continue;
         if (entry.isDirectory()) { if (!IGNORED_DIRS.has(entry.name)) queue.push(full); } else if (entry.isFile()) files.push(full);
       }
     });
@@ -170,6 +172,7 @@ export function createFileIndex(roots) {
           if (!name) return;
           const rel = String(name);
           if (rel.split(/[\\/]/).some((seg) => IGNORED_DIRS.has(seg))) return;
+          if (isProtectedPath(path.join(root, rel))) return;
           pending.add(path.join(root, rel));
           clearTimeout(timer);
           timer = setTimeout(() => void flush(), WATCH_DEBOUNCE_MS);

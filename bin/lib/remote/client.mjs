@@ -5,7 +5,7 @@ import { io } from 'socket.io-client';
 import { DEFAULT_AIVIN_BASE_URL } from '../context.mjs';
 import { logActivity } from './activityLog.mjs';
 import { DEVICE_NAMESPACE, DeviceErrorCode, DeviceEvent, MAX_RESULT_BYTES, PROTOCOL_VERSION } from './constants.mjs';
-import { clearDeviceCredentials, listDevices, loadDeviceCredentials, pairDevice, saveDeviceCredentials } from './credentials.mjs';
+import { clearDeviceCredentials, listDevices, loadDeviceCredentials, pairDevice, pairDeviceWithCode, saveDeviceCredentials } from './credentials.mjs';
 import { ensureMemoryLoaded, memoryStats, stopWatchingMemory, watchMemoryDir } from './deviceMemory.mjs';
 import { buildCatalog, buildDeviceProfile } from './deviceProfile.mjs';
 import { createFileIndex } from './fileIndexer.mjs';
@@ -47,10 +47,28 @@ function boundedResult(outcome) {
   return { ok: false, error: `Result too large (${size} bytes) — read smaller ranges`, error_code: DeviceErrorCode.OUTPUT_TOO_LARGE, duration_ms: outcome.duration_ms };
 }
 
-/** Thông tin ghép máy: có sẵn và đúng máy chủ thì dùng, không thì ghép mới bằng API key đang đăng nhập. */
-async function ensurePaired({ serverUrl, apiKey, roots, rootsGiven, name, repair, profile }) {
+/**
+ * Máy chủ của daemon: `--server` nêu rõ → có mã kết nối thì mặc định (mã chỉ đúng với máy chủ tạo ra nó, không theo cấu hình đăng nhập
+ * cũ) → máy chủ ĐÃ GHÉP → cấu hình đăng nhập → mặc định. Máy đã ghép đứng trước đăng nhập: ngược lại thì máy ghép bằng mã với máy chủ A,
+ * khởi động lại trên máy đang đăng nhập CLI với máy chủ B sẽ lặng lẽ ghép lại sang B bằng API key (chạy thật 26/10/2026). Đổi máy chủ
+ * thì dùng `--server` (hoặc `--repair`).
+ */
+export function resolveServerUrl(options, saved, env = process.env) {
+  const url = options.server || options.serverUrl
+    || (options.code ? undefined : (options.repair ? undefined : saved?.server_url) || env.AIVIN_BASE_URL)
+    || DEFAULT_AIVIN_BASE_URL;
+  return String(url).replace(/\/+$/, '');
+}
+
+/**
+ * Thông tin ghép máy: có mã kết nối thì luôn ghép bằng mã (người dùng vừa bấm "Thêm máy tính này"); có sẵn và đúng máy chủ thì dùng;
+ * không thì ghép mới bằng API key đang đăng nhập.
+ */
+async function ensurePaired({ serverUrl, apiKey, code, roots, rootsGiven, name, repair, profile }) {
   let creds = loadDeviceCredentials();
-  if (!creds || creds.server_url !== serverUrl || repair) {
+  if (code) {
+    creds = await pairDeviceWithCode({ serverUrl, code, roots, name, profile });
+  } else if (!creds || creds.server_url !== serverUrl || repair) {
     creds = await pairDevice({ serverUrl, apiKey, roots, name, profile });
   } else if (rootsGiven && JSON.stringify(roots) !== JSON.stringify(creds.roots)) {
     creds.roots = roots;
@@ -65,16 +83,17 @@ async function ensurePaired({ serverUrl, apiKey, roots, rootsGiven, name, repair
  * trường là sàn cứng trên máy — BE không đổi được.
  */
 export async function startRemoteClient(options = {}) {
-  const serverUrl = options.serverUrl || process.env.AIVIN_BASE_URL || DEFAULT_AIVIN_BASE_URL;
-  const apiKey = options.apiKey ?? process.env.API_KEY;
   const saved = loadDeviceCredentials();
+  const serverUrl = resolveServerUrl(options, saved);
+  const apiKey = options.apiKey ?? process.env.API_KEY;
   const rootsGiven = Boolean(options.dir);
   const roots = rootsGiven ? [path.resolve(options.dir)] : (saved?.roots?.length ? saved.roots : [process.cwd()]);
   const quiet = !!options.quiet;
   const say = (...args) => { if (!quiet) console.log(...args); };
 
   const profile = buildDeviceProfile(roots);
-  const creds = await ensurePaired({ serverUrl, apiKey, roots, rootsGiven, name: options.name, repair: options.repair, profile });
+  const creds = await ensurePaired({ serverUrl, apiKey, code: options.code, roots, rootsGiven, name: options.name, repair: options.repair, profile });
+  if (options.code) say(chalk.green(`✅ Đã kết nối máy "${creds.name}" với tài khoản Aivin của bạn — quay lại Aivin để chọn máy này.`));
   ensureMemoryLoaded();
   watchMemoryDir();
   const fileIndex = createFileIndex(roots);
@@ -165,15 +184,17 @@ export async function startRemoteClient(options = {}) {
   socket.on('connect', () => { serverKicks = 0; });
   socket.on('connect_error', (err) => {
     if (err?.message === 'DEVICE_UNAUTHORIZED') {
-      clearDeviceCredentials();
-      console.log(chalk.red('❌ Token của máy không còn hiệu lực (đã thu hồi hoặc ghép lại ở nơi khác). Chạy `aivin remote start` để ghép lại.'));
+      const replaced = !clearDeviceCredentials(creds.device_token);
+      console.log(chalk.red(replaced
+        ? '❌ Máy này vừa được ghép lại bởi một cửa sổ khác — cửa sổ này dừng, cửa sổ mới tiếp tục nhận việc.'
+        : '❌ Token của máy không còn hiệu lực (đã thu hồi hoặc ghép lại ở nơi khác). Chạy `aivin remote start` để ghép lại.'));
       stop();
       return;
     }
     say(chalk.gray(`   (chưa nối được: ${err?.message} — thử lại...)`));
   });
   socket.on(DeviceEvent.REVOKED, () => {
-    clearDeviceCredentials();
+    clearDeviceCredentials(creds.device_token);
     console.log(chalk.red('❌ Máy này đã bị thu hồi quyền điều khiển từ xa.'));
     stop();
   });
@@ -199,9 +220,9 @@ export async function startRemoteClient(options = {}) {
  * socket, bắt tay thử sẽ đá daemon đang chạy ra.
  */
 export async function testRemoteConnection(options = {}) {
-  const serverUrl = options.serverUrl || process.env.AIVIN_BASE_URL || DEFAULT_AIVIN_BASE_URL;
-  const apiKey = options.apiKey ?? process.env.API_KEY;
   const creds = loadDeviceCredentials();
+  const serverUrl = resolveServerUrl(options, creds);
+  const apiKey = options.apiKey ?? process.env.API_KEY;
   const report = { serverUrl, paired: !!creds, deviceId: creds?.device_id, httpOk: false, latencyMs: null, online: null, error: null };
   const startedAt = Date.now();
   try {

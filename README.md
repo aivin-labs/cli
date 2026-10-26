@@ -86,6 +86,41 @@ Requires Node.js ≥ 22.0.0 — the SDK relies on Node's native TypeScript execu
 `src/main.ts` directly, with no separate build step. `aivin start`/`aivin test` check this up
 front and fail with a clear message (not a cryptic loader error) if your Node is too old.
 
+### Install without Node.js (connect a computer to Aivin)
+
+Single-file builds are served from **https://get.aivin.vn** (mirrored on
+[GitHub Releases](https://github.com/aivin-labs/cli/releases)) together with `SHA256SUMS`. The
+installers pick the right build, verify its checksum, check it starts, and put `aivin` first on
+your PATH:
+
+```powershell
+# Windows 10/11 (PowerShell 5.1 or 7), x64 or ARM64
+irm https://get.aivin.vn/install.ps1 | iex
+```
+
+```bash
+# macOS (Intel / Apple Silicon) and Linux (x64 / arm64, glibc or musl)
+curl -fsSL https://get.aivin.vn/install.sh | sh
+# Alpine / systems without curl
+wget -qO- https://get.aivin.vn/install.sh | sh
+```
+
+| Platform | Build |
+|---|---|
+| Windows x64 / ARM64 | `aivin-windows-x64.exe` (baseline, no AVX2 needed) / `aivin-windows-arm64.exe` |
+| macOS Intel / Apple Silicon | `aivin-darwin-x64` (baseline) / `aivin-darwin-arm64` (ad-hoc signed) |
+| Linux glibc x64 / arm64 | `aivin-linux-x64` (baseline) / `aivin-linux-arm64` |
+| Linux musl (Alpine) x64 / arm64 | `aivin-linux-x64-musl` / `aivin-linux-arm64-musl` — needs `libstdc++ libgcc`, which the installer adds with `apk` when it can |
+
+In Aivin, **chat box → Browser menu → Add this computer** prints the same one-liner with a
+one-time pairing code, so the computer is installed and connected in one step
+(`aivin remote start --code <code>`).
+
+Releasing: `npm run build:binary` (Bun, all 8 builds into `dist/`), then on the host behind
+Cloudflare `npm run get:publish && npm run get:up` (nginx `deploy/get/`, versioned folders +
+`latest.txt`). Pushing a `v*` tag also builds and attaches everything to a GitHub Release
+(`.github/workflows/release.yml`).
+
 ## Quick start
 
 ```bash

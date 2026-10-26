@@ -42,8 +42,15 @@ export function saveDeviceCredentials(creds) {
   try { fs.chmodSync(DEVICE_CREDENTIALS_FILE, 0o600); } catch { /* Windows: quyền theo ACL hồ sơ người dùng */ }
 }
 
-export function clearDeviceCredentials() {
+/**
+ * Xoá token đã lưu. `onlyToken`: chỉ xoá khi tệp còn đúng token đó — daemon cũ (token vừa hết hiệu lực vì máy được ghép lại, vd chạy
+ * lại bộ cài trong lúc bản cũ còn nhận việc) không được xoá token MỚI mà daemon mới vừa ghi (chạy thật 26/10/2026: lần khởi động sau mất
+ * kết nối).
+ */
+export function clearDeviceCredentials(onlyToken) {
+  if (onlyToken && loadDeviceCredentials()?.device_token !== onlyToken) return false;
   try { fs.unlinkSync(DEVICE_CREDENTIALS_FILE); } catch { /* không có thì thôi */ }
+  return true;
 }
 
 /** Tenant trong token thiết bị `<client>-dk-<bí mật>`. */
@@ -65,7 +72,7 @@ function errorText(error) {
  * Ghép máy với tài khoản đang đăng nhập (API key): BE cấp token THIẾT BỊ riêng, chỉ lưu băm. Ghép lại = token cũ hết hiệu lực.
  */
 export async function pairDevice({ serverUrl, apiKey, roots, name, profile }) {
-  if (!apiKey) throw new Error('Chưa đăng nhập. Chạy `aivin login` trước rồi ghép máy.');
+  if (!apiKey) throw new Error('Chưa đăng nhập. Tạo mã kết nối trên Aivin (ô chat → Trình duyệt ▾ → Thêm máy tính này) rồi chạy `aivin remote start --code <mã>`, hoặc `aivin login` trước.');
   const deviceId = getOrCreateDeviceId();
   let res;
   try {
@@ -77,6 +84,30 @@ export async function pairDevice({ serverUrl, apiKey, roots, name, profile }) {
   } catch (error) {
     throw new Error(`Không ghép được máy với ${serverUrl}: ${errorText(error)}`, { cause: error });
   }
+  return savePairResult(res, { serverUrl, deviceId, roots, name });
+}
+
+/**
+ * Ghép máy bằng mã kết nối tạo trên giao diện Aivin (nút "Thêm máy tính này") — không cần `aivin login`: mã mang sẵn tài khoản, dùng
+ * một lần, có hạn. Gõ thường / thiếu gạch đều được (BE chuẩn hoá).
+ */
+export async function pairDeviceWithCode({ serverUrl, code, roots, name, profile }) {
+  const deviceId = getOrCreateDeviceId();
+  let res;
+  try {
+    res = await axios.post(`${serverUrl}${DEVICE_API_PREFIX}/devices/pair-with-code`, {
+      code: String(code).trim(),
+      device_id: deviceId,
+      name: name || os.hostname(),
+      profile,
+    });
+  } catch (error) {
+    throw new Error(`Không ghép được máy bằng mã ${code}: ${errorText(error)}`, { cause: error });
+  }
+  return savePairResult(res, { serverUrl, deviceId, roots, name });
+}
+
+function savePairResult(res, { serverUrl, deviceId, roots, name }) {
   const data = res.data?.data ?? res.data;
   if (!data?.device_token) throw new Error('Máy chủ không trả token thiết bị.');
   const creds = {

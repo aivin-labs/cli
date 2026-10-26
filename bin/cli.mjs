@@ -125,7 +125,10 @@ const __dirname = dirname(__filename);
 // This CLI's own version (`aivin --version`) - distinct from whatever @aivin-labs/sdk version a
 // given plugin project has installed. See lib/scaffold.mjs for how a fresh scaffold's `@aivin-labs/
 // sdk` dependency pin is resolved (from the actually-installed sdk, not from here).
-const CLI_PACKAGE_JSON = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+// Bản tệp chạy đóng gói (scripts/build-binary.mjs) không có package.json trên đĩa — phiên bản được ghi sẵn lúc build.
+const CLI_PACKAGE_JSON = process.env.AIVIN_CLI_BINARY
+  ? { version: process.env.AIVIN_CLI_BINARY, engines: {} }
+  : JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
 
 const CLI_VERSION = CLI_PACKAGE_JSON.version;
 
@@ -1020,6 +1023,8 @@ remoteCommand
   .option('--dir <path>', 'Folder the agent may work in (default: the folder saved at pairing, else the current folder)')
   .option('--name <name>', 'Name shown for this computer (default: hostname)')
   .option('--repair', 'Pair again (new device token; the old one stops working)')
+  .option('--code <code>', 'Pair with a one-time code from Aivin (chat box → Browser ▾ → Add this computer) - no `aivin login` needed')
+  .option('--server <url>', 'Aivin server the code belongs to (Aivin prints it in the command when needed)')
   .option('--quiet', 'No interactive logs')
   .action(async (options) => {
     try {
@@ -1668,6 +1673,8 @@ export {
 // string-equal the resolved URL and silently skip program.parse() entirely (global `aivin` would
 // do nothing at all). Resolve argv[1] through the same symlink before comparing.
 function resolveIsMain() {
+  // Tệp chạy đóng gói: chính nó là chương trình, không có chuyện bị import.
+  if (process.env.AIVIN_CLI_BINARY) return true;
   if (!process.argv[1]) return false;
   try {
     return import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href;

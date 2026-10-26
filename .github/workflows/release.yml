@@ -1,0 +1,117 @@
+# Release the single-file `aivin` binaries + installers to GitHub Releases on every version tag (v1.2.3).
+#
+# Users install with (Aivin prints these with a pairing code in chat box -> Browser menu -> Add this computer):
+#   Windows:      irm https://get.aivin.vn/install.ps1 | iex
+#   macOS/Linux:  curl -fsSL https://get.aivin.vn/install.sh | sh
+#
+# get.aivin.vn (deploy/get, `npm run get:publish` on the host behind Cloudflare) is the primary download site. This
+# GitHub Release is the mirror: installers accept AIVIN_DOWNLOAD_BASE=https://github.com/aivin-labs/cli/releases/latest/download.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build, e.g. v1.1.0'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Tag must match package.json version
+        run: |
+          PKG="v$(node -p "require('./package.json').version")"
+          [ "$PKG" = "$TAG" ] || { echo "Tag $TAG does not match package.json $PKG"; exit 1; }
+      - run: npm test
+
+  build-linux-windows:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Bun (devDependency) cross-compiles every target from one runner.
+      - run: npx bun scripts/build-binary.mjs windows-x64 windows-arm64 linux-x64 linux-arm64 linux-x64-musl linux-arm64-musl
+      - name: Smoke test
+        run: ./dist/aivin-linux-x64 --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-linux-windows
+          path: dist/*.gz
+
+  build-macos:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx bun scripts/build-binary.mjs darwin-x64 darwin-arm64
+      # Apple Silicon refuses to run unsigned binaries - ad-hoc sign at minimum. A Developer ID signature +
+      # notarization (needs an Apple Developer account) is still required to avoid Gatekeeper prompts for
+      # files downloaded by a browser; `curl | sh` downloads are not quarantined, so the installer works as is.
+      - name: Ad-hoc codesign
+        run: |
+          for f in dist/aivin-darwin-x64 dist/aivin-darwin-arm64; do codesign --force --sign - "$f"; gzip -9 -c "$f" > "$f.gz"; done
+      - name: Smoke test
+        run: ./dist/aivin-darwin-arm64 --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-macos
+          path: dist/*.gz
+
+  release:
+    needs: [build-linux-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Collect assets + checksums
+        run: |
+          mkdir -p release
+          cp artifacts/* release/
+          cp scripts/install.ps1 scripts/install.sh release/
+          # Checksums over the final (signed) files - computed here, after every build job finished.
+          (cd release && sha256sum aivin-*.gz > SHA256SUMS && cat SHA256SUMS)
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* --title "$TAG" --generate-notes
+          fi

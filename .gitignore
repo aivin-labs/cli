@@ -11,3 +11,7 @@ logs/
 .env
 .env.*
 !.env.example.dev
+
+# Tệp chạy đóng gói (scripts/build-binary.mjs) — phát hành qua GitHub Releases, không commit
+dist/
+deploy/get/site/

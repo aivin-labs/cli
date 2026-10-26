@@ -38,6 +38,42 @@ test('lưới an toàn chỉ chặn lệnh thảm hoạ', () => {
   assert.doesNotThrow(() => remote.assertCommandAllowed('rm -rf ./dist && npm test'));
 });
 
+test('thư mục cấu hình Aivin không bao giờ truy cập từ xa — kể cả khi gốc được phép bao trọn nó', async () => {
+  const { isProtectedPath, resolveInRoots, assertCommandAllowed } = await import('../bin/lib/remote/sandbox.mjs');
+  const home = process.env.AIVIN_REMOTE_HOME;
+  const parent = path.dirname(home);
+  assert.throws(() => resolveInRoots([parent], path.join(home, 'device-credentials.json')), /credentials/);
+  assert.throws(() => resolveInRoots([home], ''), /credentials/);
+  assert.ok(isProtectedPath(path.join(os.homedir(), '.aivin', 'credentials')));
+  assert.ok(!isProtectedPath(path.join(parent, 'my.aivin-project')));
+  for (const cmd of [
+    'type %USERPROFILE%\\.aivin\\credentials', 'cat ~/.aivin/device-credentials.json', 'Get-ChildItem $HOME/.aivin',
+    'cd .aivin', `type "${home}\\device-id.json"`,
+  ]) assert.throws(() => assertCommandAllowed(cmd), /credentials folder/, cmd);
+  assert.doesNotThrow(() => assertCommandAllowed('npm run build && cat my.aivin-notes.txt'));
+});
+
+test('daemon cũ chỉ xoá token của chính nó — không xoá token mới vừa ghép bởi cửa sổ khác', async () => {
+  const { saveDeviceCredentials, loadDeviceCredentials, clearDeviceCredentials } = await import('../bin/lib/remote/credentials.mjs');
+  saveDeviceCredentials({ server_url: 'http://x', device_id: 'dev-test-1', device_token: 'wes-dk-new', roots: [] });
+  assert.equal(clearDeviceCredentials('wes-dk-old'), false);
+  assert.equal(loadDeviceCredentials()?.device_token, 'wes-dk-new');
+  assert.equal(clearDeviceCredentials('wes-dk-new'), true);
+  assert.equal(loadDeviceCredentials(), null);
+});
+
+test('chọn máy chủ: --server > mã kết nối (mặc định) > máy đã ghép > đăng nhập CLI > mặc định', () => {
+  const saved = { server_url: 'https://saved.example' };
+  const env = { AIVIN_BASE_URL: 'https://login.example', API_KEY: 'k' };
+  assert.equal(remote.resolveServerUrl({ server: 'https://x.example/', code: 'A' }, saved, env), 'https://x.example');
+  assert.equal(remote.resolveServerUrl({ code: 'ABCD-EFGH' }, saved, env), 'https://api.aivin.cloud');
+  // Máy ghép bằng mã với máy chủ A, CLI đang đăng nhập máy chủ B → vẫn nối A, không lặng lẽ ghép lại sang B.
+  assert.equal(remote.resolveServerUrl({}, saved, env), 'https://saved.example');
+  assert.equal(remote.resolveServerUrl({ repair: true }, saved, env), 'https://login.example');
+  assert.equal(remote.resolveServerUrl({}, null, env), 'https://login.example');
+  assert.equal(remote.resolveServerUrl({}, null, {}), 'https://api.aivin.cloud');
+});
+
 test('tách từ đa ngôn ngữ: bỏ dấu, camelCase, chữ Hán thành cặp', () => {
   assert.deepEqual(tokenize('Đăng nhập userLogin'), ['dang', 'nhap', 'user', 'login']);
   assert.ok(tokenize('東京都庁').includes('東京'));

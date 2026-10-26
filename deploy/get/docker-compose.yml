@@ -1,0 +1,14 @@
+# get.aivin.vn origin (staging): nginx serving ./site, published by `npm run get:publish`.
+# Cloudflare Tunnel routes get.aivin.vn -> http://localhost:5540 (C:\ProgramData\cloudflared\config.yml on the staging host).
+#
+#   docker compose -f deploy/get/docker-compose.yml up -d
+services:
+  get:
+    image: nginx:1.27-alpine
+    container_name: aivin-get
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5540:80"
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro

@@ -8,6 +8,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const CLI_PATH = path.resolve(__dirname, '..', '..', 'cli.mjs');
 
+/** Lệnh chạy CLI: tệp chạy đóng gói (bộ cài install.ps1 / install.sh) là chính nó; bản npm là `node cli.mjs`. */
+export function cliLaunchCommand() {
+  return process.env.AIVIN_CLI_BINARY ? [process.execPath] : [process.execPath, CLI_PATH];
+}
+
 export const REMOTE_DAEMON_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-daemon.json');
 
 /**
@@ -41,7 +46,8 @@ export function getAllAutoStartFilePaths() {
 export function enableAutoStart(options = {}) {
   const rootDir = path.resolve(options.dir || process.cwd());
   const filePath = getAutoStartFilePath();
-  const nodeExec = process.execPath;
+  const launch = cliLaunchCommand();
+  const nodeExec = launch[0];
   const logOut = path.join(REMOTE_CONFIG_DIR, 'remote-service.log');
 
   fs.mkdirSync(REMOTE_CONFIG_DIR, { recursive: true });
@@ -51,7 +57,7 @@ export function enableAutoStart(options = {}) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const vbsContent = [
       'Set WshShell = CreateObject("WScript.Shell")',
-      `WshShell.Run """${nodeExec}"" ""${CLI_PATH}"" remote start --quiet --dir ""${rootDir}""", 0, False`,
+      `WshShell.Run "${launch.map((part) => `""${part}""`).join(' ')} remote start --quiet --dir ""${rootDir}""", 0, False`,
     ].join('\r\n') + '\r\n';
     fs.writeFileSync(filePath, vbsContent, 'utf8');
   } else if (process.platform === 'darwin') {
@@ -65,8 +71,7 @@ export function enableAutoStart(options = {}) {
     <string>com.aivin.remote</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${nodeExec}</string>
-        <string>${CLI_PATH}</string>
+${launch.map((part) => `        <string>${part}</string>`).join('\n')}
         <string>remote</string>
         <string>start</string>
         <string>--quiet</string>
@@ -94,7 +99,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart="${nodeExec}" "${CLI_PATH}" remote start --quiet --dir "${rootDir}"
+ExecStart=${launch.map((part) => `"${part}"`).join(' ')} remote start --quiet --dir "${rootDir}"
 Restart=always
 RestartSec=10
 WorkingDirectory=${rootDir}
@@ -112,7 +117,7 @@ WantedBy=default.target
     const desktopContent = `[Desktop Entry]
 Type=Application
 Name=AIVIN Remote Control
-Exec="${nodeExec}" "${CLI_PATH}" remote start --quiet --dir "${rootDir}"
+Exec=${launch.map((part) => `"${part}"`).join(' ')} remote start --quiet --dir "${rootDir}"
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true

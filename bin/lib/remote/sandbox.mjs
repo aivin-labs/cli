@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { DeviceErrorCode, KILL_SWITCH_FILE, REMOTE_CONFIG_DIR } from './constants.mjs';
 
@@ -41,7 +42,23 @@ export function resolveInRoots(roots, target = '') {
   const real = realpathNearest(candidate);
   const allowed = roots.some((root) => isInside(realpathNearest(root), real));
   if (!allowed) throw new DeviceToolError(DeviceErrorCode.ROOT_DENIED, `Path is outside the allowed folders: ${raw}`);
+  if (isProtectedPath(real)) throw new DeviceToolError(DeviceErrorCode.PROTECTED_PATH, `Path holds Aivin credentials and is never accessible remotely: ${raw}`);
   return candidate;
+}
+
+/**
+ * Thư mục cấu hình Aivin (`~/.aivin` + `AIVIN_REMOTE_HOME`): token thiết bị, API key của CLI, hồ sơ trình duyệt `aivin browser` (cookie
+ * đăng nhập). Chặn kể cả khi người dùng cho phép cả thư mục nhà (`--dir ~`) — lộ ra là chiếm được tài khoản / phiên web của chủ máy.
+ */
+const PROTECTED_DIRS = [...new Set([REMOTE_CONFIG_DIR, path.join(os.homedir(), '.aivin')].map((d) => path.resolve(d)))];
+
+let protectedReal;
+
+export function isProtectedPath(absolute) {
+  // realpath thư mục bảo vệ tính một lần — chỉ mục tệp gọi hàm này cho từng tệp.
+  protectedReal ??= PROTECTED_DIRS.map(realpathNearest);
+  const real = realpathNearest(absolute);
+  return protectedReal.some((dir) => isInside(dir, real));
 }
 
 /** Đường hiển thị: tương đối với gốc chứa nó (gọn cho Planner), không thì tuyệt đối. */
@@ -79,9 +96,25 @@ const CATASTROPHIC_COMMANDS = [
   /\bdiskpart\b/i,
 ];
 
+/** Lệnh nhắc tới thư mục cấu hình Aivin (`.aivin` như một đoạn đường dẫn, hoặc đường tuyệt đối của `AIVIN_REMOTE_HOME`). */
+const AIVIN_DIR_SEGMENT = /(?:^|[\\/\s'"`~=:(;,|&])\.aivin(?=[\\/\s'"`);,|&]|$)/i;
+
+function mentionsProtectedDir(command) {
+  if (AIVIN_DIR_SEGMENT.test(command)) return true;
+  const lower = command.toLowerCase().replace(/\\/g, '/');
+  return PROTECTED_DIRS.some((dir) => lower.includes(dir.toLowerCase().replace(/\\/g, '/')));
+}
+
+/**
+ * Lệnh nhắc tới thư mục bảo vệ bị chặn. Khớp chuỗi nên lách được (ghép chuỗi, mã hoá) — chỉ là sàn chống lỗi Planner / prompt injection
+ * thông thường; cách ly thật cần sandbox của hệ điều hành (xem docs/official/device-agent/policy-approval.md ở repo be).
+ */
 export function assertCommandAllowed(command) {
   if (CATASTROPHIC_COMMANDS.some((re) => re.test(command))) {
     throw new DeviceToolError(DeviceErrorCode.BLOCKED_COMMAND, 'Command blocked by the device safety floor (destroys the whole system)');
+  }
+  if (mentionsProtectedDir(command)) {
+    throw new DeviceToolError(DeviceErrorCode.PROTECTED_PATH, 'Command touches the Aivin credentials folder (.aivin), which is never accessible remotely');
   }
 }
 

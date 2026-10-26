@@ -9,7 +9,8 @@ import { createRequire } from 'module';
 // package.json, resolved via its "./package.json" export) - not this CLI's own version, which is
 // versioned independently since the cli/sdk package split. This is what a fresh `aivin create`/
 // `aivin init` scaffold pins its own `@aivin-labs/sdk` dependency to.
-const SDK_VERSION = JSON.parse(
+// Tệp chạy đóng gói không có node_modules trên đĩa — phiên bản SDK được ghi sẵn lúc build (scripts/build-binary.mjs).
+const SDK_VERSION = process.env.AIVIN_CLI_SDK_VERSION || JSON.parse(
   fs.readFileSync(createRequire(import.meta.url).resolve('@aivin-labs/sdk/package.json'), 'utf8'),
 ).version;
 
