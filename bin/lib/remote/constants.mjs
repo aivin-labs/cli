@@ -35,7 +35,12 @@ export const DeviceEvent = Object.freeze({
   REVOKED: 'device:revoked',
   /** Một tiến trình KHÁC vừa nối bằng cùng token máy (`{ by_instance }`) — tiến trình này dừng hẳn, không nối lại tranh chỗ. */
   REPLACED: 'device:replaced',
+  /** CLI → BE: tính vector bge-m3 cho các đoạn mô tả tệp (`{ texts }` → ack `{ ok, vectors }`, int8 base64). */
+  EMBED: 'device:embed',
 });
+
+/** Năng lực BE báo trong ack của `device:hello` (`features`). */
+export const ServerFeature = Object.freeze({ EMBED: 'embed' });
 
 /** Nhóm giới hạn song song trên máy — mỗi công cụ thuộc một nhóm. */
 export const ToolGroup = Object.freeze({

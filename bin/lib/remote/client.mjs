@@ -5,11 +5,11 @@ import chalk from 'chalk';
 import { io } from 'socket.io-client';
 import { DEFAULT_AIVIN_BASE_URL } from '../context.mjs';
 import { logActivity } from './activityLog.mjs';
-import { DEVICE_NAMESPACE, DeviceAccess, DeviceErrorCode, DeviceEvent, MAX_RESULT_BYTES, PROTOCOL_VERSION } from './constants.mjs';
+import { DEVICE_NAMESPACE, DeviceAccess, DeviceErrorCode, DeviceEvent, MAX_RESULT_BYTES, PROTOCOL_VERSION, ServerFeature } from './constants.mjs';
 import { clearDeviceCredentials, listDevices, loadDeviceCredentials, pairDevice, pairDeviceWithCode, saveDeviceCredentials } from './credentials.mjs';
 import { ensureMemoryLoaded, memoryStats, stopWatchingMemory, watchMemoryDir } from './deviceMemory.mjs';
 import { buildCatalog, buildDeviceProfile } from './deviceProfile.mjs';
-import { createFileIndex } from './fileIndexer.mjs';
+import { createFileIndex, indexRootsFor } from './fileIndexer.mjs';
 import { createScheduler } from './scheduler.mjs';
 import { acquireDaemonLock } from './daemonLock.mjs';
 import { randomUUID } from 'crypto';
@@ -20,6 +20,8 @@ const HEARTBEAT_MS = 20_000;
 const STREAM_FLUSH_MS = 150;
 const STREAM_FLUSH_BYTES = 16 * 1024;
 const ACK_TIMEOUT_MS = 10_000;
+/** Một lô tính vector (32 đoạn) trên BE — bge-m3 bận thì chờ lâu hơn ack thường. */
+const EMBED_TIMEOUT_MS = 60_000;
 
 /** Gom đoạn stdout/stderr của một lời gọi, đẩy lên theo nhịp (không bắn mỗi dòng một gói). */
 function createStreamer(socket, callId) {
@@ -118,7 +120,7 @@ export async function startRemoteClient(options = {}) {
   if (options.code) say(chalk.green(`✅ Đã kết nối máy "${creds.name}" với tài khoản Aivin của bạn — quay lại Aivin để chọn máy này.`));
   ensureMemoryLoaded();
   watchMemoryDir();
-  const fileIndex = createFileIndex(scanRoots);
+  const fileIndex = createFileIndex(indexRootsFor(roots, fullAccess));
   const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex };
   const tools = buildTools(env);
   const byName = toolMap(tools);
@@ -163,10 +165,18 @@ export async function startRemoteClient(options = {}) {
     say(chalk.gray('🛑 Đã dừng nhận việc từ xa.'));
   };
 
+  const embedTexts = async (texts) => {
+    if (!socket.connected) return null;
+    const res = await socket.timeout(EMBED_TIMEOUT_MS).emitWithAck(DeviceEvent.EMBED, { texts });
+    return res?.ok ? res.vectors : null;
+  };
+
   const announce = async () => {
     try {
       const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash });
       if (hello?.need_catalog) await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CATALOG, { catalog_hash: hash, tools: catalog });
+      // BE mới tính vector cho tệp tài liệu (tìm theo nghĩa); BE cũ không báo → chỉ tìm theo từ khoá.
+      if (Array.isArray(hello?.features) && hello.features.includes(ServerFeature.EMBED)) fileIndex.setEmbedder(embedTexts);
       say(chalk.green('✅ Đã kết nối — sẵn sàng nhận việc.'));
       logActivity({ type: 'connected', serverUrl, deviceId: creds.device_id });
     } catch (e) {

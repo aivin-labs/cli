@@ -6,6 +6,7 @@ import { spawn } from 'child_process';
 import { DeviceErrorCode, IGNORED_DIRS, MemoryKind, ToolGroup } from './constants.mjs';
 import { DeviceToolError, assertCommandAllowed, displayPath, resolveInRoots, scrubEnv } from './sandbox.mjs';
 import { deleteMemoryItems, getMemoryItem, listMemoryItems, putMemoryItems, searchMemory } from './deviceMemory.mjs';
+import { extractDocText, isDocFile } from './docText.mjs';
 
 /**
  * Công cụ trên máy, chia gói theo năng lực phát hiện được (git chỉ có khi máy cài git, tìm nội dung dùng ripgrep nếu có…). Mỗi công cụ
@@ -138,7 +139,34 @@ async function fsList(args, ctx, env) {
 
 function fsFind(args, _ctx, env) {
   if (!env.fileIndex) throw new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, 'File index not ready');
-  return { results: env.fileIndex.search(requireArg(args.query, 'query'), Math.min(Number(args.limit) || 15, 100)), stats: env.fileIndex.stats() };
+  // `vector`: BE tự gắn vector bge-m3 của câu hỏi (Planner chỉ viết query) → gộp xếp hạng ngữ nghĩa.
+  return { results: env.fileIndex.search(requireArg(args.query, 'query'), Math.min(Number(args.limit) || 15, 100), args.vector), stats: env.fileIndex.stats() };
+}
+
+const PREVIEW_MAX_PATHS = 10;
+const PREVIEW_CHARS = 800;
+
+/** Xem trước nhiều tệp một lần: dung lượng, ngày sửa, đoạn chữ đầu (đọc cả docx/xlsx/pptx) — để chọn đúng tệp giữa các ứng viên. */
+async function fsPreview(args, ctx, env) {
+  const paths = (Array.isArray(args.paths) ? args.paths : []).slice(0, PREVIEW_MAX_PATHS);
+  if (!paths.length) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Missing argument: paths');
+  const chars = Math.min(Number(args.maxChars) || PREVIEW_CHARS, 4000);
+  const files = await Promise.all(paths.map(async (p) => {
+    try {
+      const abs = resolveInRoots(env.roots, p);
+      const stat = await fs.promises.stat(abs).catch(() => null);
+      if (!stat || !stat.isFile()) return { path: p, exists: !!stat, dir: stat?.isDirectory() || undefined };
+      const base = { path: displayPath(env.roots, abs), exists: true, size: stat.size, modified: stat.mtime.toISOString().slice(0, 10) };
+      if (isDocFile(abs)) return { ...base, preview: await extractDocText(abs, stat.size, chars) };
+      if (await looksBinary(abs)) return { ...base, binary: true };
+      const { lines } = await readLines(abs, 1, 40, ctx.signal);
+      const text = lines.join('\n');
+      return { ...base, preview: text.length > chars ? `${text.slice(0, chars)}…` : text };
+    } catch (e) {
+      return { path: p, error: e.message };
+    }
+  }));
+  return { files };
 }
 
 function runProcess(cmd, argv, { cwd, signal, onOutput, env, maxOutput = MAX_EXEC_OUTPUT, shell = false }) {
@@ -299,7 +327,7 @@ function contextRecall(args, _ctx, env) {
   return {
     memory: searchMemory({ query, vector: args.vector, kinds: memoryKinds, limit }),
     procedures: searchMemory({ query, vector: args.vector, kinds: [MemoryKind.PROCEDURE], limit: 3 }),
-    files: env.fileIndex ? env.fileIndex.search(query, 10) : [],
+    files: env.fileIndex ? env.fileIndex.search(query, 10, args.vector) : [],
     projects: env.projects || [],
   };
 }
@@ -320,8 +348,11 @@ export function buildTools(env) {
       description: 'List a folder; recursive up to maxDepth (default 3), skipping node_modules/.git/build folders.',
       input_schema: schema({ path: str('folder, default the root'), recursive: bool('walk subfolders'), maxDepth: num('max depth when recursive'), maxEntries: num('max entries, default 500') }) },
     { name: 'fs.find', group: ToolGroup.FS_READ, read_only: true, handler: fsFind,
-      description: 'Instant search over the on-device file index by file name, path words and identifiers near the top of files (functions, classes, keys). Use to locate files before reading.',
-      input_schema: schema({ query: str('words to look for'), limit: num('max results, default 15') }, ['query']) },
+      description: 'Instant search over the on-device file index: file names, path words, identifiers near the top of files and the opening text of documents (docx/xlsx/pptx/txt), ranked by words AND meaning. Describe the file in natural words ("office lease contract 2026"); results include size, modified date and a preview. Use to locate files before reading.',
+      input_schema: schema({ query: str('what the file is about, in natural words'), limit: num('max results, default 15') }, ['query']) },
+    { name: 'fs.preview', group: ToolGroup.FS_READ, read_only: true, handler: fsPreview,
+      description: 'Preview up to 10 files at once: size, modified date and their opening text (also inside docx/xlsx/pptx). Use to tell close candidates apart before choosing one.',
+      input_schema: schema({ paths: { type: 'array', items: { type: 'string' }, description: 'file paths' }, maxChars: num('preview length per file, default 800') }, ['paths']) },
     { name: 'fs.grep', group: ToolGroup.FS_READ, read_only: true, handler: fsGrep,
       description: 'Search file contents for a text (or regex) under a folder; uses ripgrep when installed.',
       input_schema: schema({ query: str('text or regex'), path: str('folder, default the root'), regex: bool('treat query as a regex'), glob: str('file glob filter, e.g. *.ts'), maxResults: num('default 50') }, ['query']) },

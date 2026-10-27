@@ -55,6 +55,7 @@ import {
   listAgentsCmd,
 } from './lib/workspace.mjs';
 import { runMission, runBrowserMission } from './lib/mission.mjs';
+import { DeviceAccess } from './lib/remote/constants.mjs';
 import {
   createAutomationJob,
   listTasks,
@@ -96,6 +97,7 @@ import {
   deleteMemoryItems,
   clearDeviceMemory,
   createFileIndex,
+  indexRootsFor,
   runRemoteMission,
   MemoryKind,
 } from './lib/remoteControl.mjs';
@@ -1232,8 +1234,8 @@ remoteCommand
   .description('Rebuild the file index of the allowed folders now')
   .action(async () => {
     try {
-      const roots = loadDeviceCredentials()?.roots || [process.cwd()];
-      const index = createFileIndex(roots);
+      const creds = loadDeviceCredentials();
+      const index = createFileIndex(indexRootsFor(creds?.roots || [process.cwd()], creds?.access === DeviceAccess.FULL));
       const stats = await index.build();
       index.close();
       console.log(chalk.green(`✅ Chỉ mục: ${stats.files} tệp (${stats.updated} cập nhật, ${stats.removed} bỏ) trong ${stats.ms} ms`));
