@@ -130,3 +130,20 @@ test('chỉ mục: tệp như chứa bí mật chỉ giữ tên', () => {
   assert.equal(looksSecret('C:/a/tokenizer.ts'), false);
   assert.equal(looksSecret('C:/a/ke-hoach.docx', 'kế hoạch quý 4'), false);
 });
+
+test('fs.write append: tệp chưa kết thúc bằng xuống dòng thì chèn một xuống dòng theo kiểu của tệp', async () => {
+  const { call, p } = setup();
+  fs.writeFileSync(p('lf.log'), 'dòng 1');
+  const r = await call('fs.write', { path: 'lf.log', content: 'dòng 2', append: true });
+  assert.equal(fs.readFileSync(p('lf.log'), 'utf8'), 'dòng 1\ndòng 2');
+  assert.equal(r.line_break_added, true);
+  fs.writeFileSync(p('crlf.log'), 'a\r\nb');
+  await call('fs.write', { path: 'crlf.log', content: 'c', append: true });
+  assert.equal(fs.readFileSync(p('crlf.log'), 'utf8'), 'a\r\nb\r\nc');
+  fs.writeFileSync(p('ok.log'), 'x\n');
+  const ok = await call('fs.write', { path: 'ok.log', content: 'y', append: true });
+  assert.equal(fs.readFileSync(p('ok.log'), 'utf8'), 'x\ny');
+  assert.equal(ok.line_break_added, undefined);
+  await call('fs.write', { path: 'new.log', content: 'z', append: true });
+  assert.equal(fs.readFileSync(p('new.log'), 'utf8'), 'z');
+});

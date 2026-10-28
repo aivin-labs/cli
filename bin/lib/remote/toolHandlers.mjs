@@ -345,7 +345,11 @@ async function fsWrite(args, _ctx, env) {
   const abs = resolveInRoots(env.roots, requireArg(args.path, 'path'));
   const exists = fs.existsSync(abs);
   if (exists && args.overwrite === false && !args.append) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `File exists and overwrite is false: ${args.path}`);
-  const data = args.encoding === 'base64' ? Buffer.from(String(args.content ?? ''), 'base64') : String(args.content ?? '');
+  let data = args.encoding === 'base64' ? Buffer.from(String(args.content ?? ''), 'base64') : String(args.content ?? '');
+  // Nối chữ vào tệp chưa kết thúc bằng xuống dòng → chèn một xuống dòng theo kiểu của tệp (chạy thật 28/10/2026: dòng tóm tắt dính vào
+  // cuối dòng cũ của summary.log). Nội dung nhị phân giữ nguyên.
+  const lineBreak = args.append && exists && typeof data === 'string' && data && !/^\r?\n/.test(data) ? await missingLineBreak(abs) : '';
+  if (lineBreak) data = lineBreak + data;
   // Ghi đè / nối thêm vào tệp có sẵn → lưu bản cũ trước (hoàn tác được); tệp mới → ghi lại để hoàn tác thì bỏ đi.
   const undo = undoOf(args, env, 'write');
   if (undo) await undo.ensureDir(path.dirname(abs));
@@ -357,8 +361,26 @@ async function fsWrite(args, _ctx, env) {
   undo?.commit();
   return {
     path: displayPath(env.roots, abs), bytes: Buffer.byteLength(data), created: !exists, appended: !!args.append || undefined,
+    ...(lineBreak ? { line_break_added: true } : {}),
     ...(exists && undo ? { previous_version_kept: !!backup } : {}),
   };
+}
+
+/** Tệp không rỗng và byte cuối không phải xuống dòng → kiểu xuống dòng của tệp (CRLF nếu tệp đã dùng CRLF), ngược lại ''. */
+async function missingLineBreak(abs) {
+  const handle = await fs.promises.open(abs, 'r');
+  try {
+    const { size } = await handle.stat();
+    if (!size) return '';
+    const head = Buffer.alloc(Math.min(size, 4096));
+    await handle.read(head, 0, head.length, 0);
+    const last = Buffer.alloc(1);
+    await handle.read(last, 0, 1, size - 1);
+    if (last[0] === 0x0a) return '';
+    return head.includes('\r\n') ? '\r\n' : '\n';
+  } finally {
+    await handle.close();
+  }
 }
 
 async function fsEdit(args, _ctx, env) {
