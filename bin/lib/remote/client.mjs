@@ -154,6 +154,8 @@ export async function startRemoteClient(options = {}) {
     ...(browser ? { browser } : {}), ...(guiProfile ? { gui: guiProfile } : {}), ...(officeApps.length ? { apps: officeApps } : {}),
     // Theo dõi kích hoạt việc (CLI ≥ 1.0.9) — máy tính tổ chức không có.
     ...(multiUser ? {} : { watch: true }),
+    // Tệp lớn qua HTTP thẳng (fs.upload / fs.download, công cụ BE-only nên BE biết qua cờ này) — máy tính tổ chức không có.
+    ...(multiUser ? {} : { direct_transfer: true }),
   };
   let creds;
   try {
@@ -186,7 +188,9 @@ export async function startRemoteClient(options = {}) {
     roots, say: (m) => say(chalk.cyan(m)),
     emit: (payload) => { if (socket?.connected) socket.emit(DeviceEvent.EVENT, payload); },
   });
-  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: winHost, apps: officeApps } : null, undo, processes, schedules, watches };
+  // Tệp lớn đi HTTP thẳng với vé của BE (fs.upload / fs.download) — máy tính tổ chức không có (gửi HTTP chạy bằng tài khoản của daemon).
+  const transfer = multiUser ? null : { serverUrl, deviceToken: creds.device_token };
+  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: winHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer };
   const host = multiUser ? createMultiUserHost({ baseEnv: env, say: (m) => say(chalk.gray(m)) }) : null;
   host?.start();
   const tools = buildTools(env);

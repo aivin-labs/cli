@@ -18,13 +18,14 @@ import { measurePath } from './undoStore.mjs';
 import { buildProcessTools, shellCommand } from './processes.mjs';
 import { buildScheduleTools } from './schedule.mjs';
 import { buildWatchTools } from './deviceWatches.mjs';
+import { buildTransferTools } from './httpTransfer.mjs';
 
 /**
  * Công cụ trên máy, chia gói theo năng lực phát hiện được (git chỉ có khi máy cài git, tìm nội dung dùng ripgrep nếu có…). Mỗi công cụ
  * tự khai: schema tham số, chỉ đọc / có tác dụng phụ / không hoàn tác, nhóm song song, khoá đường dẫn khi ghi. Công cụ `internal` chỉ BE
  * gọi trực tiếp (tra ngữ cảnh, lưu ghi nhớ) — không đưa vào danh mục của Planner.
  *
- * `env` = { roots, binaries, fileIndex, projects, runAs?, memory?, browserTunnels?, gui?, office?, undo? }. `undo` (kho hoàn tác, undoStore.mjs)
+ * `env` = { roots, binaries, fileIndex, projects, runAs?, memory?, browserTunnels?, gui?, office?, undo?, transfer? }. `undo` (kho hoàn tác, undoStore.mjs)
  * vắng (máy tính tổ chức — công cụ tệp chạy dưới tài khoản thành viên) thì ghi / xoá như cũ, không lấy lại được. `ctx` = { signal, onOutput, timeoutMs }. Máy tính tổ chức
  * (`--multi-user`): mỗi lời gọi một `env` riêng của thành viên — `runAs` (tài khoản Linux chạy lệnh), `memory` (bộ nhớ của vùng), xem
  * multiUser.mjs.
@@ -682,6 +683,8 @@ export function buildTools(env) {
   if (env.processes) tools.push(...buildProcessTools(env.processes));
   // Lịch chạy định kỳ (Task Scheduler / crontab) — máy cá nhân; máy tính tổ chức không đặt lịch cho thành viên.
   if (env.schedules) tools.push(...buildScheduleTools(env.schedules));
+  // Tệp lớn hơn trần socket: HTTP thẳng với vé của BE (chỉ BE gọi).
+  if (env.transfer) tools.push(...buildTransferTools(env.transfer));
   // Theo dõi trên máy kích hoạt việc của Aivin (tệp mới, dòng log) — BE đặt danh sách.
   if (env.watches) tools.push(...buildWatchTools(env.watches));
   // Máy tính tổ chức không lập chỉ mục tệp (nhiều người chung một máy) — Planner tìm bằng fs.list / fs.grep trong thư mục của mình.

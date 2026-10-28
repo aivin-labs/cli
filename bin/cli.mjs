@@ -1261,6 +1261,7 @@ remoteCommand
   .description('Give a job to the Device Agent on your computer (the listener must be running there)')
   .option('--device <name>', 'Which paired computer (default: your online one)')
   .option('--cwd <path>', 'Folder the job is about')
+  .option('--file <id...>', 'Aivin workspace file id(s) the job may save onto the computer')
   .option('--workspace <id>', 'Workspace id (default: your personal workspace)')
   .option('--agent <id>', 'Agent to act as (default: the workspace default agent)')
   .option('--no-watch', 'Do not stream progress')

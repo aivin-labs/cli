@@ -174,7 +174,7 @@ export function createMultiUserHost({ baseEnv, say = () => {} }) {
     rootsOf: (account) => [account.home, SHARED_DIR],
     envOf: (account) => ({ ...accountEnv(account, scrubEnv()), AIVIN_REMOTE_HOME: REMOTE_CONFIG_DIR }),
   });
-  const quota = createDiskQuota();
+  const quota = createDiskQuota({ say });
 
   function start() {
     prepare();
@@ -232,8 +232,30 @@ export function withProcessCap(cmd, argv, { platform = process.platform, exists 
 }
 
 /** Công cụ bị chặn khi hết dung lượng — đọc, liệt kê, xoá vẫn chạy để người dùng tự dọn chỗ. */
-export const QUOTA_GUARDED_TOOLS = new Set(['fs.write', 'fs.edit', 'fs.move', 'shell.exec']);
+export const QUOTA_GUARDED_TOOLS = new Set(['fs.write', 'fs.edit', 'fs.move', 'fs.move_many', 'fs.undo', 'shell.exec', 'proc.start']);
 const DISK_MEASURE_MS = 60_000;
+const DISK_RESERVE_MB = 64;
+const DISK_WARN_RATIO = 0.9;
+
+/**
+ * Cơ chế dung lượng service-manager đã dựng cho máy (env `AIVIN_DISK_MODE`, khớp service OrgComputerDiskMechanism):
+ * - `loop_ext4`: /home + /shared nằm trên một đĩa ext4 cỡ theo gói — nhân Linux chặn cứng (ENOSPC). CLI chỉ đo nhẹ bằng statfs để báo lỗi
+ *   dễ hiểu trước khi lệnh gặp ENOSPC.
+ * - `soft` (hoặc không đặt): volume thường không giới hạn — CLI đo bằng du và chặn công cụ ghi khi đầy (tiến trình đang chạy vẫn ghi được
+ *   tới lần đo sau).
+ */
+export const DiskMode = Object.freeze({ LOOP_EXT4: 'loop_ext4', SOFT: 'soft', NONE: 'none' });
+
+const positiveNumber = (raw, fallback) => {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+/** Đĩa riêng (statfs): byte đã dùng + tổng cỡ của filesystem chứa `dir`. */
+export async function measureFsUsage(dir) {
+  const s = await fs.promises.statfs(dir);
+  return { used: (s.blocks - s.bavail) * s.bsize, total: s.blocks * s.bsize };
+}
 
 /** Tổng byte của các thư mục (`du -sx -B1`, mỗi thư mục một dòng). */
 export function measureDiskUsage(dirs) {
@@ -248,24 +270,59 @@ export function measureDiskUsage(dirs) {
 }
 
 /**
- * Hạn mức đĩa mềm của máy tính tổ chức (`AIVIN_ORG_COMPUTER_DISK_GB`, BE đặt): đo nền mỗi phút, dùng số đã đo — lời gọi không chờ du.
- * Không có hạn mức / chưa đo được → không chặn.
+ * Hạn mức đĩa của máy tính tổ chức (`AIVIN_ORG_COMPUTER_DISK_GB` do BE đặt theo gói; cơ chế + nhịp đo do service-manager đặt qua
+ * `AIVIN_DISK_*`, tham số ở service config/org_computer_host.json): đo nền theo nhịp, lời gọi dùng số đã đo (không chờ du).
+ * - soft: hạn = số GB của gói, đo bằng du cả /home + /shared.
+ * - loop_ext4: hạn = min(gói, cỡ đĩa) − phần dự trữ (`AIVIN_DISK_RESERVE_MB`) — chặn công cụ ghi trước khi đĩa đầy hẳn để AI nhận lỗi rõ
+ *   ràng thay vì ENOSPC giữa lệnh. Gói vừa giảm (đĩa không thu nhỏ) → vẫn chặn theo số GB mới.
+ * Không có hạn mức / chưa đo được → không chặn. Vượt `AIVIN_DISK_WARN_RATIO` → ghi cảnh báo (một lần mỗi lần vượt).
  */
-export function createDiskQuota({ dirs = [HOME_BASE, SHARED_DIR], quotaGb = Number(process.env.AIVIN_ORG_COMPUTER_DISK_GB), intervalMs = DISK_MEASURE_MS, measure = measureDiskUsage } = {}) {
-  const limit = Number.isFinite(quotaGb) && quotaGb > 0 ? quotaGb * 1024 ** 3 : 0;
+export function createDiskQuota({
+  dirs = [HOME_BASE, SHARED_DIR],
+  env = process.env,
+  quotaGb = Number(env.AIVIN_ORG_COMPUTER_DISK_GB),
+  mode = env.AIVIN_DISK_MODE === DiskMode.LOOP_EXT4 ? DiskMode.LOOP_EXT4 : DiskMode.SOFT,
+  intervalMs = positiveNumber(env.AIVIN_DISK_MEASURE_MS, DISK_MEASURE_MS),
+  reserveMb = positiveNumber(env.AIVIN_DISK_RESERVE_MB, DISK_RESERVE_MB),
+  warnRatio = Math.min(positiveNumber(env.AIVIN_DISK_WARN_RATIO, DISK_WARN_RATIO), 1),
+  measure = measureDiskUsage,
+  statfs = measureFsUsage,
+  say = () => {},
+} = {}) {
+  const hard = mode === DiskMode.LOOP_EXT4;
+  const planLimit = Number.isFinite(quotaGb) && quotaGb > 0 ? quotaGb * 1024 ** 3 : 0;
+  let limit = hard ? 0 : planLimit;
   let used = null;
   let running = false;
   let timer = null;
+  let warned = false;
+
+  async function measureOnce() {
+    if (!hard) return measure(dirs);
+    const fsUsage = await statfs(dirs[0]);
+    limit = Math.max(0, Math.min(planLimit || Infinity, fsUsage.total) - reserveMb * 1024 ** 2);
+    return fsUsage.used;
+  }
+
+  function noteLevel() {
+    if (!limit || used === null) return;
+    const ratio = used / limit;
+    if (ratio >= warnRatio && !warned) {
+      warned = true;
+      say(`   Ổ đĩa máy dùng chung đã dùng ${(used / 1024 ** 3).toFixed(1)} / ${(limit / 1024 ** 3).toFixed(1)} GB (${Math.round(ratio * 100)}%)${ratio >= 1 ? ' — ĐẦY: chặn ghi / chạy lệnh tới khi dọn bớt' : ''}`);
+    } else if (ratio < warnRatio) warned = false;
+  }
 
   async function refresh() {
-    if (!limit || running) return used;
+    if ((!hard && !limit) || running) return used;
     running = true;
-    try { used = await measure(dirs); } catch { /* giữ số đo trước */ } finally { running = false; }
+    try { used = await measureOnce(); noteLevel(); } catch { /* giữ số đo trước */ } finally { running = false; }
     return used;
   }
 
   function start() {
-    if (!limit || timer) return;
+    if ((!hard && !limit) || timer) return;
+    say(`   Hạn mức đĩa: ${hard ? `CỨNG (đĩa ext4 riêng của máy, đo statfs mỗi ${Math.round(intervalMs / 1000)} s)` : `mềm ${quotaGb} GB (đo du mỗi ${Math.round(intervalMs / 1000)} s, chặn ghi khi đầy)`}`);
     void refresh();
     timer = setInterval(() => void refresh(), intervalMs);
     timer.unref?.();
@@ -279,8 +336,9 @@ export function createDiskQuota({ dirs = [HOME_BASE, SHARED_DIR], quotaGb = Numb
   function assertAllowed(toolName) {
     if (!limit || used === null || used < limit || !QUOTA_GUARDED_TOOLS.has(toolName)) return;
     const gb = (used / 1024 ** 3).toFixed(1);
-    throw new DeviceToolError(DeviceErrorCode.QUOTA_EXCEEDED, `Disk quota of this shared computer is full (${gb} GB used of ${quotaGb} GB) — delete files to free space, then retry`);
+    const of = (limit / 1024 ** 3).toFixed(1);
+    throw new DeviceToolError(DeviceErrorCode.QUOTA_EXCEEDED, `Disk of this shared computer is full (${gb} GB used of ${hard ? of : quotaGb} GB) — delete files to free space, then retry`);
   }
 
-  return { start, stop, refresh, assertAllowed, usage: () => ({ used, limit }) };
+  return { start, stop, refresh, assertAllowed, mode, usage: () => ({ used, limit }) };
 }
