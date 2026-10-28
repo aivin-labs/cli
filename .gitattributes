@@ -1,0 +1,2 @@
+# Script chạy trong Linux (entrypoint container, bộ cài get.aivin.vn) phải giữ LF — autocrlf trên Windows đổi thành CRLF là hỏng shebang.
+*.sh text eol=lf
