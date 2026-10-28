@@ -37,10 +37,14 @@ export const DeviceEvent = Object.freeze({
   REPLACED: 'device:replaced',
   /** CLI → BE: tính vector bge-m3 cho các đoạn mô tả tệp (`{ texts }` → ack `{ ok, vectors }`, int8 base64). */
   EMBED: 'device:embed',
+  /** CLI → BE: sự kiện của một theo dõi (tệp mới / dòng log khớp) → BE chạy Automation Job gắn với nó. */
+  EVENT: 'device:event',
+  /** CLI → BE (vừa nối): xin danh sách theo dõi của máy (ack `{ watches }`). */
+  WATCHES: 'device:watches',
 });
 
 /** Năng lực BE báo trong ack của `device:hello` (`features`). */
-export const ServerFeature = Object.freeze({ EMBED: 'embed' });
+export const ServerFeature = Object.freeze({ EMBED: 'embed', WATCH: 'watch' });
 
 /** Nhóm giới hạn song song trên máy — mỗi công cụ thuộc một nhóm. */
 export const ToolGroup = Object.freeze({
@@ -50,6 +54,14 @@ export const ToolGroup = Object.freeze({
   SYSTEM: 'system',
   MEMORY: 'memory',
   GIT: 'git',
+  /** Đường hầm trình duyệt cho AI Browser (mỗi nhiệm vụ / việc con một đường hầm). */
+  BROWSER: 'browser',
+  /** Điều khiển giao diện (chuột / bàn phím / cây trợ năng) — một màn hình chỉ một luồng thao tác. */
+  GUI: 'gui',
+  /** Đầu nối Office qua COM (Excel / Word / Outlook) — chung tiến trình host với GUI, chạy lần lượt. */
+  OFFICE: 'office',
+  /** Tiến trình nền (proc.*) — proc.wait_for giữ chỗ lâu nên trần rộng hơn nhóm chạy lệnh. */
+  PROC: 'proc',
 });
 
 /** Số lời gọi chạy cùng lúc tối đa mỗi nhóm (chỉnh qua biến môi trường AIVIN_REMOTE_LIMIT_<NHÓM>). */
@@ -60,6 +72,24 @@ export const DEFAULT_GROUP_LIMITS = Object.freeze({
   [ToolGroup.SYSTEM]: 4,
   [ToolGroup.MEMORY]: 8,
   [ToolGroup.GIT]: 4,
+  [ToolGroup.BROWSER]: 8,
+  [ToolGroup.GUI]: 1,
+  [ToolGroup.OFFICE]: 1,
+  [ToolGroup.PROC]: 16,
+});
+
+/**
+ * Máy tính tổ chức (`--multi-user`): trần song song MỖI thành viên trong từng nhóm, cộng với trần chung ở trên — một người không chiếm
+ * hết chỗ của cả tổ chức. Chỉnh qua AIVIN_REMOTE_SCOPE_LIMIT_<NHÓM>. Nhóm không có ở đây chỉ chịu trần chung.
+ */
+export const DEFAULT_SCOPE_LIMITS = Object.freeze({
+  [ToolGroup.FS_READ]: 6,
+  [ToolGroup.FS_WRITE]: 2,
+  [ToolGroup.EXEC]: 2,
+  [ToolGroup.GIT]: 2,
+  [ToolGroup.MEMORY]: 4,
+  [ToolGroup.SYSTEM]: 2,
+  [ToolGroup.PROC]: 4,
 });
 
 export const DeviceErrorCode = Object.freeze({
@@ -75,6 +105,22 @@ export const DeviceErrorCode = Object.freeze({
   OUTPUT_TOO_LARGE: 'OUTPUT_TOO_LARGE',
   MEMORY_UNAVAILABLE: 'MEMORY_UNAVAILABLE',
   EXECUTION_FAILED: 'EXECUTION_FAILED',
+  /** Máy không có Chrome / Edge cho AI Browser. */
+  BROWSER_NOT_FOUND: 'BROWSER_NOT_FOUND',
+  /** Máy tính tổ chức đã dùng hết dung lượng đĩa được cấp — chỉ còn đọc / xoá để dọn chỗ. */
+  QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
+  /** Tầng giao diện: máy không hỗ trợ / tiến trình trợ giúp không chạy được. */
+  GUI_UNAVAILABLE: 'GUI_UNAVAILABLE',
+  /** node_id của lần observe cũ hoặc phần tử đã biến mất — observe lại. */
+  GUI_STALE_NODE: 'GUI_STALE_NODE',
+  /** Người dùng đang dùng chuột / bàn phím — AI dừng, hỏi trước khi làm tiếp. */
+  GUI_USER_ACTIVE: 'GUI_USER_ACTIVE',
+  /** Ứng dụng không được điều khiển (quản lý mật khẩu, hộp nâng quyền, terminal khi không toàn quyền…). */
+  GUI_BLOCKED_APP: 'GUI_BLOCKED_APP',
+  /** Gõ vào ô mật khẩu — người dùng tự gõ. */
+  GUI_PASSWORD_FIELD: 'GUI_PASSWORD_FIELD',
+  /** Màn hình đang khoá / hộp bảo mật đang hiện. */
+  GUI_LOCKED: 'GUI_LOCKED',
 });
 
 export const MemoryKind = Object.freeze({

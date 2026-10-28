@@ -26,6 +26,14 @@ function realpathNearest(target) {
   return path.join(real, ...rest);
 }
 
+/**
+ * Đường dẫn mạng / thiết bị (`\\host\share`, `//host/share`, `\\?\`, `\\.\`): chạm vào (kể cả `existsSync`) là Windows tự gửi thông tin xác thực
+ * NTLM ra máy ngoài — chặn theo CHUỖI trước mọi lời gọi fs (rà 28/10/2026).
+ */
+export function isNetworkPath(raw) {
+  return /^[\\/]{2}/.test(String(raw || '').trim());
+}
+
 function isInside(parent, child) {
   const rel = path.relative(parent, child);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
@@ -33,17 +41,37 @@ function isInside(parent, child) {
 
 /**
  * Đường dẫn → đường tuyệt đối NẰM TRONG một thư mục gốc được phép. So bằng realpath (cả gốc lẫn đích), nên symlink / junction trỏ ra
- * ngoài gốc bị chặn. Đường tương đối tính từ gốc đầu tiên.
+ * ngoài gốc bị chặn. Đường tương đối tính từ gốc đầu tiên. Trả về CHÍNH đường realpath đã kiểm (không phải đường chưa giải): thao tác
+ * sau đó không đi lại qua symlink mà tiến trình khác có thể tráo giữa lúc kiểm và lúc dùng.
  */
 export function resolveInRoots(roots, target = '') {
   if (!roots?.length) throw new DeviceToolError(DeviceErrorCode.ROOT_DENIED, 'No allowed root directory on this device');
   const raw = String(target || '');
+  if (isNetworkPath(raw)) throw new DeviceToolError(DeviceErrorCode.ROOT_DENIED, `Network / device paths are not allowed: ${raw}`);
   const candidate = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(roots[0], raw);
   const real = realpathNearest(candidate);
   const allowed = roots.some((root) => isInside(realpathNearest(root), real));
   if (!allowed) throw new DeviceToolError(DeviceErrorCode.ROOT_DENIED, `Path is outside the allowed folders: ${raw}`);
   if (isProtectedPath(real)) throw new DeviceToolError(DeviceErrorCode.PROTECTED_PATH, `Path holds Aivin credentials and is never accessible remotely: ${raw}`);
-  return candidate;
+  return real;
+}
+
+/**
+ * Như resolveInRoots nhưng KHÔNG đi theo thành phần cuối (cho xoá / chuyển): thư mục cha giải realpath + kiểm trong gốc, tên cuối giữ
+ * nguyên — xoá một symlink là xoá chính symlink đó, không xoá thư mục nó trỏ tới.
+ */
+export function resolveEntryInRoots(roots, target = '') {
+  const real = resolveInRoots(roots, target);
+  const raw = String(target || '');
+  const candidate = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(roots[0], raw);
+  const parent = path.dirname(candidate);
+  if (parent === candidate || isRootPath(roots, real)) return real;
+  return path.join(resolveInRoots(roots, parent), path.basename(candidate));
+}
+
+/** Đường (đã giải) có phải chính một thư mục gốc không — so cả dạng gốc lẫn realpath của gốc. */
+export function isRootPath(roots, absolute) {
+  return (roots || []).some((r) => path.resolve(r) === absolute || realpathNearest(r) === absolute);
 }
 
 /**
@@ -61,13 +89,39 @@ export function isProtectedPath(absolute) {
   return protectedReal.some((dir) => isInside(dir, real));
 }
 
+/** Thư mục BAO TRỌN một thư mục bảo vệ — xoá / chuyển nó là xoá / chuyển luôn token. */
+export function containsProtectedPath(absolute) {
+  protectedReal ??= PROTECTED_DIRS.map(realpathNearest);
+  const real = realpathNearest(absolute);
+  return protectedReal.some((dir) => isInside(real, dir));
+}
+
+/**
+ * Tên thư mục cần loại khỏi ripgrep khi tìm dưới `base`: luôn `.aivin`, cộng tên thư mục `AIVIN_REMOTE_HOME` nếu nó nằm trong `base`
+ * (chỉ khi đó — loại theo tên ở mọi nơi sẽ bỏ sót cả thư mục trùng tên của người dùng).
+ */
+export function protectedDirNamesUnder(base) {
+  protectedReal ??= PROTECTED_DIRS.map(realpathNearest);
+  const real = realpathNearest(base);
+  const names = new Set(['.aivin']);
+  for (const dir of protectedReal) if (dir !== real && isInside(real, dir)) names.add(path.basename(dir));
+  return [...names];
+}
+
 /**
  * Đường hiển thị: tương đối với gốc ĐẦU TIÊN (gọn cho Planner), ngoài nó thì tuyệt đối. Chỉ gốc đầu: đường tương đối luôn được hiểu
  * theo gốc đầu (resolveInRoots) — rút gọn theo gốc khác (vd ổ D: khi toàn quyền) thì Planner dùng lại sẽ trỏ nhầm sang thư mục nhà.
  */
+const rootRealCache = new Map();
+
 export function displayPath(roots, absolute) {
   const first = roots?.[0];
-  if (first && isInside(path.resolve(first), absolute)) return path.relative(path.resolve(first), absolute) || '.';
+  if (!first) return absolute;
+  // resolveInRoots trả realpath → so với realpath của gốc trước (gốc là junction / symlink), rồi mới tới dạng gốc.
+  if (!rootRealCache.has(first)) rootRealCache.set(first, realpathNearest(first));
+  for (const base of [rootRealCache.get(first), path.resolve(first)]) {
+    if (isInside(base, absolute)) return path.relative(base, absolute) || '.';
+  }
   return absolute;
 }
 
@@ -82,13 +136,35 @@ export function fullAccessRoots() {
   return [home, ...drives];
 }
 
-const SECRET_ENV = /(^API_KEY$|^AIVIN_|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|CREDENTIAL|COOKIE|SESSION_KEY|ACCESS_KEY|_API_KEY$)/i;
+const SECRET_ENV = /(^API_KEY$|^AIVIN_|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|CREDENTIAL|COOKIE|SESSION_KEY|ACCESS_KEY|_API_KEY$|CONNECTION_?STRING|CONN_?STR|DATABASE_URL)/i;
+/**
+ * Đoạn tên (tách theo `_`) mang bí mật: `DB_PASS`, `STRIPE_KEY`, `GH_PAT`, `X_SIGNING_KEY`, `SSH_AUTH_SOCK`, `SENTRY_DSN`… So nguyên
+ * đoạn, không so chuỗi con — `PATH` không dính `PAT`, `KEYBOARD_LAYOUT` không dính `KEY`.
+ */
+const SECRET_SEGMENTS = new Set([
+  'KEY', 'KEYS', 'APIKEY', 'ACCESSKEY', 'PASS', 'PASSWD', 'PASSWORD', 'PASSPHRASE', 'ASKPASS', 'PAT', 'TOKEN', 'TOKENS', 'SECRET', 'SECRETS',
+  'AUTH', 'DSN', 'CREDENTIAL', 'CREDENTIALS', 'CREDS', 'COOKIE', 'COOKIES', 'SESSION', 'SIGNING', 'PRIVATE',
+]);
+/** Biến vô hại có đoạn trùng danh sách trên — vẫn giữ (thư mục hiện tại, D-Bus cho thông báo, loại phiên đồ hoạ). */
+const SAFE_ENV = new Set(['PWD', 'OLDPWD', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_SESSION_TYPE', 'XDG_SESSION_CLASS', 'XDG_SESSION_DESKTOP']);
+/** Giá trị là URL kèm mật khẩu (`postgres://u:p@host/db`) — bỏ bất kể tên biến. */
+const URL_WITH_PASSWORD = /^[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i;
 
-/** Biến môi trường cho lệnh chạy từ xa: bỏ mọi biến mang bí mật (API key của CLI, token, mật khẩu…). */
+export function isSecretEnv(key, value = '') {
+  const name = String(key).toUpperCase();
+  if (SAFE_ENV.has(name)) return false;
+  if (SECRET_ENV.test(name)) return true;
+  const segments = name.split('_').filter(Boolean);
+  // `PWD` đứng một mình là thư mục hiện tại; là một đoạn của tên dài hơn (`DB_PWD`) thì là mật khẩu.
+  if (segments.some((seg) => SECRET_SEGMENTS.has(seg) || (seg === 'PWD' && segments.length > 1))) return true;
+  return URL_WITH_PASSWORD.test(String(value ?? ''));
+}
+
+/** Biến môi trường cho lệnh chạy từ xa: bỏ mọi biến mang bí mật (API key của CLI, token, mật khẩu, chuỗi kết nối…). */
 export function scrubEnv(env = process.env) {
   const out = {};
   for (const [key, value] of Object.entries(env)) {
-    if (!SECRET_ENV.test(key)) out[key] = value;
+    if (!isSecretEnv(key, value)) out[key] = value;
   }
   return out;
 }

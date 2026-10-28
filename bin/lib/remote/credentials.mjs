@@ -53,6 +53,18 @@ export function clearDeviceCredentials(onlyToken) {
   return true;
 }
 
+/**
+ * Máy tính tổ chức: BE cấp token thiết bị lúc tạo container và đặt vào env (`AIVIN_DEVICE_TOKEN` / `AIVIN_DEVICE_ID` / `AIVIN_SERVER`) — không
+ * ghép máy, không ghi tệp token. Thiếu biến → `null`.
+ */
+export function credentialsFromEnv(env = process.env) {
+  const token = String(env.AIVIN_DEVICE_TOKEN || '').trim();
+  const deviceId = String(env.AIVIN_DEVICE_ID || '').trim();
+  const serverUrl = String(env.AIVIN_SERVER || '').trim().replace(/\/+$/, '');
+  if (!token || !deviceId || !serverUrl) return null;
+  return { device_token: token, device_id: deviceId, name: String(env.AIVIN_DEVICE_NAME || deviceId), server_url: serverUrl };
+}
+
 /** Tenant trong token thiết bị `<client>-dk-<bí mật>`. */
 export function deviceTokenClient(token) {
   const at = String(token || '').lastIndexOf('-dk-');

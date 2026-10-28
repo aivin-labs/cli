@@ -230,7 +230,7 @@ export function browserViewerHtml({ serverUrl, apiKey, tenantClient }) {
 
   doneBtn.addEventListener('click', () => {
     if (!sessionKey) return;
-    socket.emit('browser:resolve', { clientId: sessionKey, option: 'approve' });
+    socket.emit('browser:resolve', { clientId: sessionKey, option: 'approve', castToken });
   });
 
   function toPageCoords(e) {

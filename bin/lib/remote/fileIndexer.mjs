@@ -19,7 +19,7 @@ import { createTextIndex, decodeInt8, int8Cosine } from './textIndex.mjs';
 
 const SNAPSHOT_FILE = path.join(REMOTE_CONFIG_DIR, 'file-index.json.gz');
 const VECTORS_FILE = path.join(REMOTE_CONFIG_DIR, 'file-vectors.json.gz');
-const SNAPSHOT_VERSION = 2;
+const SNAPSHOT_VERSION = 3;
 const MAX_FILES = 200_000;
 const HEAD_BYTES = 16 * 1024;
 const MAX_HEAD_FILE_BYTES = 2 * 1024 * 1024;
@@ -48,6 +48,19 @@ const INDEX_SKIP_DIRS = new Set([
 ]);
 /** Thư mục người dùng quét trước (ngay dưới gốc) — tài liệu thật thường nằm ở đây. */
 const PRIORITY_DIRS = ['Desktop', 'Documents', 'Downloads', 'OneDrive', 'Pictures', 'Dropbox', 'Google Drive'];
+/** Bộ theo dõi thư mục hỏng (gốc bị xoá, rút ổ ngoài, Linux hết inotify) → quét lại tăng dần theo nhịp này thay vì để chỉ mục cũ mãi. */
+const RESCAN_MS = 10 * 60_000;
+
+/**
+ * Tệp nhìn như chứa bí mật (tên hoặc đoạn đầu): không giữ đoạn chữ / định danh trong chỉ mục, không gửi đi tính vector, không đưa vào gợi
+ * ý của Planner — "mat-khau.txt" tên bình thường mà nội dung là mật khẩu (rà 28/10/2026). Vẫn tìm được theo TÊN tệp.
+ */
+const SECRET_NAME_RE = /(passw|mat[-_ ]?khau|mật[-_ ]?khẩu|secret|credential|(^|[^a-z])tokens?([^a-z]|$)|private[-_ ]?key|recovery[-_ ]?code|seed[-_ ]?phrase|(^|[^a-z0-9])(2fa|otp)([^a-z]|$)|\.env$|id_(rsa|ed25519|ecdsa|dsa)|\.(pem|key|p12|pfx|kdbx|ovpn)$)/i;
+const SECRET_TEXT_RE = /(-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(password|passwd|pwd|mật khẩu|mat khau|api[_-]?key|secret|token)\s*[:=]\s*\S{4,}|\bAKIA[0-9A-Z]{16}\b|\bgh[pousr]_[A-Za-z0-9]{30,}\b|\bsk-[A-Za-z0-9_-]{20,}\b|\bxox[abpr]-[A-Za-z0-9-]{10,})/i;
+
+export function looksSecret(abs, text = '') {
+  return SECRET_NAME_RE.test(path.basename(abs)) || (!!text && SECRET_TEXT_RE.test(text));
+}
 
 const skipDir = (name) => IGNORED_DIRS.has(name) || INDEX_SKIP_DIRS.has(name);
 
@@ -127,6 +140,7 @@ export function createFileIndex(roots) {
   const vectors = new Map(); // abs → { key, b64, vec: Int8Array }
   const index = createTextIndex();
   const watchers = [];
+  let rescanTimer = null;
   let snapshotTimer;
   let vectorTimer;
   let lastBuild = null;
@@ -203,7 +217,10 @@ export function createFileIndex(roots) {
     const prev = entries.get(abs);
     if (prev && prev.mtime === mtime && prev.size === stat.size) return 'same';
     const preview = isDocFile(abs) ? await extractDocText(abs, stat.size) : '';
-    setEntry(abs, { mtime, size: stat.size, tokens: await headTokens(abs, stat.size), ...(preview ? { preview } : {}) });
+    const tokens = await headTokens(abs, stat.size);
+    // Tệp như chứa bí mật: chỉ giữ tên (tìm theo tên vẫn được), bỏ đoạn chữ + định danh.
+    if (looksSecret(abs, `${preview}\n${tokens}`)) setEntry(abs, { mtime, size: stat.size, tokens: '', secret: true });
+    else setEntry(abs, { mtime, size: stat.size, tokens, ...(preview ? { preview } : {}) });
     vectors.delete(abs);
     return 'updated';
   }
@@ -240,6 +257,12 @@ export function createFileIndex(roots) {
       scheduleSnapshot();
       scheduleVectorize(5_000);
     };
+    const fallBackToRescan = () => {
+      // Bộ theo dõi hỏng: đóng, chuyển sang quét lại định kỳ (tăng dần — chỉ đọc tệp có mtime / size đổi).
+      if (rescanTimer) return;
+      rescanTimer = setInterval(() => void build().catch(() => undefined), RESCAN_MS);
+      rescanTimer.unref?.();
+    };
     for (const root of resolvedRoots) {
       try {
         const w = fs.watch(root, { recursive: true }, (_event, name) => {
@@ -251,9 +274,14 @@ export function createFileIndex(roots) {
           clearTimeout(timer);
           timer = setTimeout(() => void flush(), WATCH_DEBOUNCE_MS);
         });
+        // Không có listener 'error' thì lỗi của bộ theo dõi (gốc bị xoá, rút ổ ngoài, hết inotify) ném ra ngoài và làm sập daemon.
+        w.on('error', () => {
+          try { w.close(); } catch { /* đã đóng */ }
+          fallBackToRescan();
+        });
         w.unref?.();
         watchers.push(w);
-      } catch { /* không theo dõi được (hệ thống tệp mạng…) — chỉ mục cập nhật ở lần quét sau */ }
+      } catch { fallBackToRescan(); /* không theo dõi được (hệ thống tệp mạng…) */ }
     }
   }
 
@@ -262,7 +290,7 @@ export function createFileIndex(roots) {
 
   /** Tệp tài liệu cần (tính lại) vector: thư mục người dùng trước, mới sửa trước; giữ trong trần MAX_VECTOR_FILES. */
   function vectorQueue() {
-    const docs = [...entries.entries()].filter(([abs]) => isDocFile(abs))
+    const docs = [...entries.entries()].filter(([abs, e]) => isDocFile(abs) && !e.secret)
       .sort(([a, ea], [b, eb]) => (Number(isPriority(b)) - Number(isPriority(a))) || (eb.mtime - ea.mtime))
       .slice(0, MAX_VECTOR_FILES);
     const keep = new Set(docs.map(([abs]) => abs));
@@ -317,6 +345,7 @@ export function createFileIndex(roots) {
   }
 
   function close() {
+    if (rescanTimer) { clearInterval(rescanTimer); rescanTimer = null; }
     watchers.splice(0).forEach((w) => w.close());
     clearTimeout(snapshotTimer);
     clearTimeout(vectorTimer);

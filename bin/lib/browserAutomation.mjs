@@ -514,7 +514,7 @@ export async function runBrowserMissionLocal(mission, options) {
       if (interrupted) return;
       interrupted = true;
       console.log(chalk.yellow('\n\n⏹  Stopping... (requesting cancellation - may take a moment, one agentic step at a time)'));
-      requestBrowserCancel(serverUrl, authHeaders).catch((e) =>
+      requestBrowserCancel(serverUrl, authHeaders, { sessionId }).catch((e) =>
         console.log(chalk.red(`   ⚠️  Cancellation request failed to send (${e.message}) - the mission may keep running.`)),
       );
       tunnel.close();
@@ -539,7 +539,7 @@ export async function runBrowserMissionLocal(mission, options) {
       authHeaders,
     );
     const watchPromise = options.watch !== false
-      ? watchBrowserMission(serverUrl, apiKey, sessionId, tenantClient, { openViewerOnHIL: false })
+      ? watchBrowserMission(serverUrl, apiKey, sessionId, tenantClient, { openViewerOnHIL: false, sessionId })
       : Promise.resolve(undefined);
 
     try {
@@ -577,8 +577,15 @@ export async function runBrowserMissionLocal(mission, options) {
 
 /** REST twin of `sdk.browser.cancel()` - the CLI has no gRPC client, only axios. See
  *  AIBrowserController.cancel's comment for the exact semantics (cooperative, own-tenant-only). */
-export async function requestBrowserCancel(serverUrl, authHeaders) {
-  await axios.post(`${serverUrl}/plugins/ai-browser/cancel`, {}, authHeaders);
+export async function requestBrowserCancel(serverUrl, authHeaders, { sessionId, threadId } = {}) {
+  await axios.post(
+    `${serverUrl}/plugins/ai-browser/cancel`,
+    {
+      ...(sessionId ? { session_id: sessionId } : {}),
+      ...(threadId ? { thread_id: threadId } : {}),
+    },
+    authHeaders,
+  );
 }
 
 export async function runBrowserMissionRemote(mission, options) {
@@ -632,7 +639,7 @@ export async function runBrowserMissionRemote(mission, options) {
     if (interrupted) return;
     interrupted = true;
     console.log(chalk.yellow('\n\n⏹  Stopping... (requesting cancellation - may take a moment, one agentic step at a time)'));
-    requestBrowserCancel(serverUrl, authHeaders).catch((e) =>
+    requestBrowserCancel(serverUrl, authHeaders, { threadId }).catch((e) =>
       console.log(chalk.red(`   ⚠️  Cancellation request failed to send (${e.message}) - the mission may keep running.`)),
     );
   };
@@ -640,7 +647,7 @@ export async function runBrowserMissionRemote(mission, options) {
 
   try {
     if (options.watch !== false && threadId) {
-      await watchBrowserMission(serverUrl, apiKey, threadId, tenantClient);
+      await watchBrowserMission(serverUrl, apiKey, threadId, tenantClient, { threadId });
     }
   } finally {
     process.off('SIGINT', onSigint);

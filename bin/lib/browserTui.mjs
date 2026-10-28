@@ -29,12 +29,13 @@ function LogLine({ item }) {
   return h(Text, { color: item.color, dimColor: item.dim }, item.text);
 }
 
-function MissionTuiApp({ serverUrl, apiKey, threadId, tenantClient, idleTimeoutMs, openViewerOnHIL, onSettle }) {
+function MissionTuiApp({ serverUrl, apiKey, threadId, tenantClient, idleTimeoutMs, openViewerOnHIL, onSettle, sessionId }) {
   const [lines, setLines] = useState([]);
   const [inputValue, setInputValue] = useState('');
   // Khác `paused=false` (mission đang tự chạy, Enter -> steer) - khi có giá trị, Enter gửi
   // browser:resolve nhắm đúng session HIL đang treo thay vì đi qua kênh steer.
   const [pausedSessionKey, setPausedSessionKey] = useState(null);
+  const castTokenRef = useRef(undefined);
   const [sending, setSending] = useState(false);
   const [done, setDone] = useState(false);
 
@@ -91,11 +92,17 @@ function MissionTuiApp({ serverUrl, apiKey, threadId, tenantClient, idleTimeoutM
     socket.on('browser:cast-start', (payload) => {
       if (!payload?.clientId) return;
       setPausedSessionKey(payload.clientId);
+      castTokenRef.current = payload.castToken;
       socket.emit('join-room', { name: 'aivin-cli-tui', rooms: [`aibrowser:${payload.clientId}`] });
     });
-    socket.on('browser:resolved', () => setPausedSessionKey(null));
+    socket.on('browser:resolved', () => {
+      setPausedSessionKey(null);
+      castTokenRef.current = undefined;
+    });
     socket.on('browser:cast-error', (payload) => {
       appendLine(`⚠️ ${payload?.reason || 'Mất kết nối phiên trình duyệt'}`, 'yellow');
+      setPausedSessionKey(null);
+      castTokenRef.current = undefined;
     });
 
     for (const eventName of MISSION_LOG_EVENTS) {
@@ -177,17 +184,26 @@ function MissionTuiApp({ serverUrl, apiKey, threadId, tenantClient, idleTimeoutM
         // trên trang thật rồi", không phải "gõ câu trả lời ở đây thay việc thao tác". Enter ở đây
         // tương đương bấm nút "✅ Xong" trên viewer/banner cũ; gõ đúng "cancel" mới có nghĩa khác
         // (huỷ HIL). Bất kỳ text nào khác chỉ có tác dụng như 1 cú Enter trống.
-        socketRef.current?.emit('browser:resolve', { clientId: pausedSessionKey, option: message });
+        socketRef.current?.emit('browser:resolve', {
+          clientId: pausedSessionKey,
+          option: message,
+          castToken: castTokenRef.current,
+        });
         appendLine(`> ${message}  (đã gửi tín hiệu hoàn tất HIL - gõ "cancel" nếu muốn huỷ thay vì tiếp tục)`, 'blue');
         // Tự xoá ngay, không đợi round-trip browser:resolved - phòng trường hợp join-room (join lúc
         // cast-start) chưa kịp có hiệu lực phía server khi broadcast resolved bắn ra, khiến state kẹt
         // ở "vẫn đang pause" và mọi input sau đó bị hiểu nhầm là resolve cho session đã đóng.
         setPausedSessionKey(null);
+        castTokenRef.current = undefined;
       } else {
-        // Mission đang tự chạy - gửi làm hướng dẫn real-time cho vòng plan kế tiếp.
+        // Mission đang tự chạy - gửi làm hướng dẫn real-time cho vòng plan kế tiếp, kèm session_id/thread_id
         await axios.post(
           `${serverUrl}/plugins/ai-browser/steer`,
-          { message },
+          {
+            message,
+            session_id: sessionId || threadId,
+            thread_id: threadId,
+          },
           { headers: { Authorization: `Bearer ${apiKey || 'dev-token'}` } },
         );
         appendLine(`> ${message}  (đã gửi làm hướng dẫn - áp dụng ở bước kế tiếp)`, 'blue');
@@ -218,7 +234,7 @@ function MissionTuiApp({ serverUrl, apiKey, threadId, tenantClient, idleTimeoutM
  * (event terminal / idle timeout / Ctrl+C), cùng logic parse event (log/HIL/notification), chỉ khác
  * cách hiển thị (Ink split-view thay vì console.log tuần tự) và thêm được ô input nhận feedback.
  */
-export function runBrowserMissionTui(serverUrl, apiKey, threadId, tenantClient, { idleTimeoutMs = 120_000, openViewerOnHIL = true } = {}) {
+export function runBrowserMissionTui(serverUrl, apiKey, threadId, tenantClient, { idleTimeoutMs = 120_000, openViewerOnHIL = true, sessionId } = {}) {
   return new Promise((resolve) => {
     let settled = false;
     const onSettle = (reason) => {
@@ -232,7 +248,16 @@ export function runBrowserMissionTui(serverUrl, apiKey, threadId, tenantClient, 
     process.on('SIGINT', onSigint);
 
     const { unmount } = render(
-      h(MissionTuiApp, { serverUrl, apiKey, threadId, tenantClient, idleTimeoutMs, openViewerOnHIL, onSettle }),
+      h(MissionTuiApp, {
+        serverUrl,
+        apiKey,
+        threadId,
+        tenantClient,
+        idleTimeoutMs,
+        openViewerOnHIL,
+        onSettle,
+        sessionId: sessionId || threadId,
+      }),
     );
   });
 }

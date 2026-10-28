@@ -1028,7 +1028,11 @@ remoteCommand
   .option('--full-access', 'Let the agent work anywhere on this computer (all drives; relative paths start at your home folder). Kept across restarts; --dir switches back to one folder')
   .option('--code <code>', 'Pair with a one-time code from Aivin (chat box → Browser ▾ → Add this computer) - no `aivin login` needed')
   .option('--server <url>', 'Aivin server the code belongs to (Aivin prints it in the command when needed)')
+  .option('--no-browser', "Don't let AI Browser use a browser window on this computer (web tasks then run in Aivin's server-side browser)")
+  .option('--no-gui', "Don't let the agent control app windows on this computer with the mouse/keyboard (Windows)")
+  .option('--separate-browser', "Always use Aivin's own browser window, never your everyday Chrome/Edge (even if remote debugging is enabled at chrome://inspect/#remote-debugging)")
   .option('--quiet', 'No interactive logs')
+  .option('--multi-user', "Organization cloud computer (Linux container provisioned by Aivin): token from AIVIN_DEVICE_TOKEN/AIVIN_DEVICE_ID/AIVIN_SERVER, every org member works in their own Linux account + home folder")
   .action(async (options) => {
     try {
       await startRemoteClient(options);

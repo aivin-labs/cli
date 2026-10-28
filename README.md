@@ -116,6 +116,18 @@ In Aivin, **chat box → Browser menu → Add this computer** prints the same on
 one-time pairing code, so the computer is installed and connected in one step
 (`aivin remote start --code <code>`).
 
+When the chat has a computer selected, AI Browser work on websites runs in a Chrome/Edge window
+on that computer. If you enabled **"Allow remote debugging for this browser instance"** in your
+everyday browser (`chrome://inspect/#remote-debugging`, Edge: `edge://inspect` → Remote debugging),
+the AI works in THAT browser with all your existing logins: click "Allow" once when it asks; the AI
+opens its own tabs in the background and can only watch (never drive, close or read cookies of) the
+tabs you opened. Otherwise it uses Aivin's own window (profile `~/.aivin/browser-profile`, shared with
+`aivin browser` — log in once per site). `--separate-browser` always uses Aivin's own window.
+Downloads land in `~/Downloads/Aivin`; when the AI needs you (login, 2FA, approval) you get an OS
+notification. `aivin remote start --no-browser` turns this off.
+Every tunnel goes through a CDP filter on this computer: no `file://` / `chrome://` pages, no picking local files, downloads only into
+`~/Downloads/Aivin` (executables are cancelled). `aivin remote pause` now also cancels running commands and closes AI browser tabs.
+
 Releasing: `npm run build:binary` (Bun, all 8 builds into `dist/`), then on the host behind
 Cloudflare `npm run get:publish && npm run get:up` (nginx `deploy/get/`, versioned folders +
 `latest.txt`). Pushing a `v*` tag also builds and attaches everything to a GitHub Release

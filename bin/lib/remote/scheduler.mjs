@@ -28,15 +28,28 @@ function groupLimit(group) {
  * Bộ điều phối lời gọi trên máy: mỗi nhóm công cụ một semaphore (đọc tệp 16, chạy lệnh 3…), thao tác ghi khoá theo từng đường dẫn
  * (hai lệnh ghi cùng tệp chạy lần lượt, khác tệp chạy song song), mỗi lời gọi một AbortController (huỷ / hết giờ → dừng cả cây tiến
  * trình con).
+ *
+ * `scopeLimits` (máy tính tổ chức): thêm trần theo từng thành viên (`call.user_scope`) trong mỗi nhóm. Lấy chỗ của vùng TRƯỚC rồi mới
+ * tới chỗ chung — lời gọi đang chờ trần của riêng mình không giữ chỗ chung của người khác. Không truyền → như máy một người.
  */
-export function createScheduler() {
+export function createScheduler({ scopeLimits = null } = {}) {
   const semaphores = new Map();
+  const scopeSemaphores = new Map();
   const pathLocks = new Map();
   const inflight = new Map();
 
   const semaphoreOf = (group) => {
     if (!semaphores.has(group)) semaphores.set(group, createSemaphore(groupLimit(group)));
     return semaphores.get(group);
+  };
+
+  const scopeSemaphoreOf = (scope, group) => {
+    const fromEnv = Number(process.env[`AIVIN_REMOTE_SCOPE_LIMIT_${String(group).toUpperCase()}`]);
+    const limit = Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : scopeLimits?.[group];
+    if (!limit || typeof scope !== 'string' || !scope) return null;
+    const key = `${scope}\u0000${group}`;
+    if (!scopeSemaphores.has(key)) scopeSemaphores.set(key, createSemaphore(limit));
+    return scopeSemaphores.get(key);
   };
 
   async function withPathLocks(keys, fn) {
@@ -64,6 +77,7 @@ export function createScheduler() {
     const startedAt = Date.now();
     const timeoutMs = Math.max(1000, Number(call.timeout_ms) || 60_000);
     const timer = setTimeout(() => controller.abort(new DeviceToolError(DeviceErrorCode.CALL_TIMEOUT, `Timed out after ${timeoutMs} ms`)), timeoutMs);
+    const releaseScope = scopeLimits ? await scopeSemaphoreOf(call.user_scope, spec.group)?.acquire() : null;
     const release = await semaphoreOf(spec.group).acquire();
     try {
       if (controller.signal.aborted) throw controller.signal.reason;
@@ -82,6 +96,7 @@ export function createScheduler() {
     } finally {
       clearTimeout(timer);
       release();
+      releaseScope?.();
       inflight.delete(call.call_id);
     }
   }
@@ -92,9 +107,17 @@ export function createScheduler() {
     }
   }
 
+  /** Huỷ mọi lời gọi đang chạy; chờ tối đa `waitMs` cho chúng dọn xong (giết cây tiến trình con) — dùng khi tạm dừng / dừng / bị thu hồi. */
+  async function cancelAll(message = 'Cancelled on this device', { waitMs = 5000 } = {}) {
+    for (const controller of inflight.values()) controller.abort(new DeviceToolError(DeviceErrorCode.CANCELLED, message));
+    const deadline = Date.now() + waitMs;
+    while (inflight.size && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  }
+
   return {
     run,
     cancel,
+    cancelAll,
     stats: () => Object.fromEntries([...semaphores.entries()].map(([g, s]) => [g, s.stats()])),
     inflightCount: () => inflight.size,
   };

@@ -16,14 +16,26 @@ function isAlive(pid) {
   }
 }
 
-/** PID đang giữ khoá (còn sống, khác tiến trình này) — `null` nếu không ai giữ. */
+/** Khoá không được làm mới quá lâu → tiến trình giữ khoá đã chết (PID trong tệp có thể đã bị Windows cấp cho tiến trình khác). */
+export const LOCK_STALE_MS = 90_000;
+export const LOCK_BEAT_MS = 30_000;
+
+/** PID đang giữ khoá (còn sống, khác tiến trình này, khoá còn được làm mới) — `null` nếu không ai giữ. */
 export function lockHolder(lockFile = DAEMON_LOCK_FILE) {
   try {
-    const pid = Number(JSON.parse(fs.readFileSync(lockFile, 'utf8'))?.pid);
-    return pid !== process.pid && isAlive(pid) ? pid : null;
+    const data = JSON.parse(fs.readFileSync(lockFile, 'utf8')) || {};
+    const pid = Number(data.pid);
+    const beatAt = Date.parse(data.beat_at || data.started_at || '');
+    const fresh = !Number.isFinite(beatAt) || Date.now() - beatAt < LOCK_STALE_MS;
+    return pid !== process.pid && isAlive(pid) && fresh ? pid : null;
   } catch {
     return null;
   }
+}
+
+function writeLock(lockFile, flag) {
+  const now = new Date().toISOString();
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, started_at: now, beat_at: now }), { flag });
 }
 
 /**
@@ -36,10 +48,30 @@ export function acquireDaemonLock({ takeOver = false, lockFile = DAEMON_LOCK_FIL
     throw new Error(`Máy này đang nhận việc ở một cửa sổ khác (PID ${holder}). Dùng cửa sổ đó, hoặc đóng nó rồi chạy lại — muốn ghép lại thì thêm --code <mã>.`);
   }
   fs.mkdirSync(REMOTE_CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
-  return () => {
+  // Tạo nguyên tử: hai tiến trình khởi động cùng lúc (systemd + .desktop lúc đăng nhập) chỉ một bên tạo được tệp.
+  try {
+    writeLock(lockFile, takeOver ? 'w' : 'wx');
+  } catch (e) {
+    if (e?.code !== 'EEXIST') throw e;
+    const again = lockHolder(lockFile);
+    if (again) throw new Error(`Máy này đang nhận việc ở một cửa sổ khác (PID ${again}). Dùng cửa sổ đó, hoặc đóng nó rồi chạy lại — muốn ghép lại thì thêm --code <mã>.`);
+    writeLock(lockFile, 'w'); // khoá cũ của tiến trình đã chết
+  }
+  const mine = () => {
+    try { return Number(JSON.parse(fs.readFileSync(lockFile, 'utf8'))?.pid) === process.pid; } catch { return false; }
+  };
+  const beat = setInterval(() => {
+    if (!mine()) return;
     try {
-      if (Number(JSON.parse(fs.readFileSync(lockFile, 'utf8'))?.pid) === process.pid) fs.unlinkSync(lockFile);
+      const data = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+      fs.writeFileSync(lockFile, JSON.stringify({ ...data, beat_at: new Date().toISOString() }));
+    } catch { /* tệp khoá bị xoá — lần sau tạo lại */ }
+  }, LOCK_BEAT_MS);
+  beat.unref?.();
+  return () => {
+    clearInterval(beat);
+    try {
+      if (mine()) fs.unlinkSync(lockFile);
     } catch { /* đã bị tiến trình khác lấy / xoá */ }
   };
 }
