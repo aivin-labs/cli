@@ -91,7 +91,11 @@ function watchDeviceMission(api, sessionId, { idleTimeoutMs = 300_000 } = {}) {
         const icon = payload.status === 'error' ? chalk.red('✗') : payload.status === 'success' ? chalk.green('✓') : payload.status === 'warning' ? chalk.yellow('!') : chalk.gray('·');
         if (payload.event_key !== AWAITING_USER_KEY) asking?.abort();
         console.log(`${chalk.gray(`[${new Date(payload.timestamp || Date.now()).toLocaleTimeString()}]`)} ${icon} ${payload.message || payload.event_key || ''}`);
-        if (DONE_KEYS.has(payload.event_key)) return stop(payload.event_key);
+        if (DONE_KEYS.has(payload.event_key)) {
+          // Kết quả của việc (BE gắn `meta.answer` vào dòng xong) — in ra để người dùng không phải mở web xem.
+          if (payload.meta?.answer) console.log(`\n${chalk.green('Kết quả:')}\n${payload.meta.answer}\n`);
+          return stop(payload.event_key);
+        }
         if (payload.event_key === AWAITING_USER_KEY) return void ask(payload);
         bump();
       });
