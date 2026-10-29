@@ -86,7 +86,7 @@ test('hạn mức đĩa: đầy thì chặn ghi / chạy lệnh, vẫn cho đọ
   assert.doesNotThrow(() => none.assertAllowed('fs.write'));
 });
 
-test('đo dung lượng bằng du (Linux)', { skip: process.platform === 'win32' }, async () => {
+test('đo dung lượng bằng du (Linux)', { skip: process.platform !== 'linux' }, async () => {
   const { measureDiskUsage } = await import('../bin/lib/remote/multiUser.mjs');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-du-'));
   fs.writeFileSync(path.join(dir, 'f'), Buffer.alloc(200 * 1024));

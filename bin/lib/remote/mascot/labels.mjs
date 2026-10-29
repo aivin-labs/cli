@@ -1,4 +1,3 @@
-import path from 'path';
 import { ToolGroup } from '../constants.mjs';
 import { MascotVerb, mascotVerb } from './strings.mjs';
 
@@ -52,7 +51,7 @@ const clip = (s, max) => {
 /** Đích chính của bước: tên tệp / thư mục (không cả đường dẫn), lệnh, từ khoá tìm, ứng dụng. */
 export function targetOf(args = {}) {
   const file = args.path || args.file || args.src || args.from || args.source || (Array.isArray(args.paths) ? args.paths[0] : undefined) || args.dir || args.cwd;
-  if (typeof file === 'string' && file) return clip(path.basename(file.replace(/[\\/]+$/, '')) || file, TARGET_MAX);
+  if (typeof file === 'string' && file) return clip(file.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || file, TARGET_MAX);
   const cmd = args.command || args.cmd;
   if (typeof cmd === 'string' && cmd) return clip(cmd, TARGET_MAX);
   const q = args.query || args.pattern || args.name;

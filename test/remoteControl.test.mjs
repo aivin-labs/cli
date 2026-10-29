@@ -10,7 +10,8 @@ const remote = await import('../bin/lib/remoteControl.mjs');
 const { tokenize, createTextIndex, int8Cosine, decodeInt8 } = await import('../bin/lib/remote/textIndex.mjs');
 const { ToolGroup } = await import('../bin/lib/remote/constants.mjs');
 
-const sandboxDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-root-'));
+// realpath: thư mục tạm macOS là symlink (/var → /private/var), Windows CI có tên rút gọn 8.3 (RUNNER~1).
+const sandboxDir = () => fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-root-')));
 const q8 = (vec) => {
   const norm = Math.hypot(...vec) || 1;
   return Buffer.from(Int8Array.from(vec.map((v) => Math.round((v / norm) * 127))).buffer).toString('base64');

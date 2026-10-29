@@ -31,7 +31,7 @@ test('chỉ khai công cụ của ứng dụng máy có; danh mục chung có of
 });
 
 test('đường dẫn ngoài vùng / sai loại tệp / quá nhiều đính kèm bị chặn trước khi gọi Office', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'office-root-'));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'office-root-')));
   const host = fakeHost();
   const tools = Object.fromEntries(buildOfficeTools(host, ['excel', 'word', 'outlook']).map((t) => [t.name, t]));
   const env = { roots: [root] };
