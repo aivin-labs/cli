@@ -1132,6 +1132,34 @@ aivin remote status | test | logs | reindex | enable | disable | reset-id
 - **Memory stays on this computer**: `~/.aivin/memory/<kind>.yaml` (edit by hand if you like) + `vectors.json`; the agent recalls it
   before planning and saves procedures that worked.
 - Env: `AIVIN_REMOTE_HOME` (config folder), `AIVIN_REMOTE_LIMIT_<GROUP>` (parallel limit per tool group: fs_read, fs_write, exec, git, system, memory).
+- **Stays up to date by itself**: the listener checks for a new release about every 6 hours (and right away when the Aivin server
+  asks for a newer minimum version). When started with the computer (`aivin remote enable`), it switches to the new release once the
+  computer has had no remote work for 10 minutes; in a window you started yourself it only tells you to restart. If the new release
+  crashes 3 times before it has run for 10 minutes, the previous release is put back and the bad one is skipped. See `aivin update`.
+
+## `aivin update`
+
+Updates the standalone `aivin` (installed with `install.ps1` / `install.sh`) from the same download site as the installer:
+reads `latest.txt`, checks the release's Ed25519 signature (`SHA256SUMS.sig`, verified against the release keys built into aivin -
+an unsigned or wrongly signed release is refused before its build is even downloaded), downloads that release's build for this
+computer, checks it against the signed `SHA256SUMS`, makes sure the new build starts (`--version`, run without your API key or tokens
+in its environment), then replaces the installed file. The previous file is kept as `aivin.prev` / `aivin.exe.prev` until the new one
+has run fine.
+
+```bash
+aivin update                 # install the latest release
+aivin update --check         # only tell whether a newer release exists
+aivin update --to v1.0.8     # install a specific release (also goes back)
+aivin update --auto off      # stop background updates of `aivin remote start` on this computer (on: turn them back on)
+```
+
+- npm installs are not replaced; you get the `npm i -g @aivin-labs/cli@latest` command instead.
+- The download site comes only from this computer's environment, never from the Aivin server or a file: `AIVIN_DOWNLOAD_ROOT`
+  (e.g. an internal mirror - it does not need to be trusted, the signature still is checked), else `https://get.aivin.vn`. Only
+  `https` is accepted (plain `http` only to this computer itself), redirects included.
+- Releases can be rolled out to a share of running computers first (`rollout.json` on the download site); `aivin update` run by
+  hand ignores that.
+- Turn background updates off for one run with `aivin remote start --no-auto-update`, or with `AIVIN_AUTO_UPDATE=0`.
 
 ## `aivin do <agent_nickname> <mission>`
 

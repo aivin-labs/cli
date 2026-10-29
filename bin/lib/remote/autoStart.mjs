@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { REMOTE_CONFIG_DIR } from './deviceProfile.mjs';
 import { DeviceAccess } from './constants.mjs';
 import { loadDeviceCredentials } from './credentials.mjs';
+import { RESTART_EXIT_CODE } from '../selfUpdate.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -54,24 +55,61 @@ const xmlEscape = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').
 /**
  * Kịch bản VBS giữ daemon chạy nền (cửa sổ ẩn): chạy, chờ thoát; mã 0 → thôi; khác 0 → chờ 10 s (giãn gấp đôi tới 5 phút, chạy ổn > 5 phút
  * thì về lại 10 s) rồi chạy lại. Trước 29/10/2026 tệp Startup chỉ chạy một lần lúc đăng nhập — daemon sập là máy offline tới lần đăng nhập sau.
+ * Mã 75 (đã cài bản mới / đã tự lùi bản) → chạy lại sau 1 s, không giãn nhịp. Đặt AIVIN_SUPERVISOR cho tiến trình con: daemon biết có
+ * trình giữ chạy, tự thoát để chuyển bản được (xem detectSupervisor).
  */
 export function windowsWatchdogScript(argv) {
   const cmd = argv.map((part) => `""${part}""`).join(' ');
   return [
     "' Aivin Device Agent - keeps `aivin remote start` running in the background.",
-    "' Exit code 0 = stopped on purpose (revoked, replaced, already running) -> stop; anything else -> restart with backoff.",
+    "' Exit code 0 = stopped on purpose (revoked, replaced, already running) -> stop; 75 = switch to the newly installed release -> restart now;",
+    "' anything else -> restart with backoff.",
     'Set sh = CreateObject("WScript.Shell")',
+    `sh.Environment("Process").Item("${SUPERVISOR_ENV}") = "${Supervisor.WSCRIPT}"`,
     'delay = 10',
     'Do',
     '  started = Now',
     `  rc = sh.Run("${cmd}", 0, True)`,
     '  If rc = 0 Then Exit Do',
-    '  If DateDiff("s", started, Now) > 300 Then delay = 10',
-    '  WScript.Sleep delay * 1000',
-    '  delay = delay * 2',
-    '  If delay > 300 Then delay = 300',
+    `  If rc = ${RESTART_EXIT_CODE} Then`,
+    '    WScript.Sleep 1000',
+    '  Else',
+    '    If DateDiff("s", started, Now) > 300 Then delay = 10',
+    '    WScript.Sleep delay * 1000',
+    '    delay = delay * 2',
+    '    If delay > 300 Then delay = 300',
+    '  End If',
     'Loop',
   ].join('\r\n') + '\r\n';
+}
+
+/** Biến môi trường trình giữ chạy của Aivin đặt cho daemon. */
+export const SUPERVISOR_ENV = 'AIVIN_SUPERVISOR';
+export const Supervisor = Object.freeze({ WSCRIPT: 'wscript', LAUNCHD: 'launchd', SYSTEMD: 'systemd' });
+
+function parentCommandLine() {
+  try {
+    return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(process.ppid)}").CommandLine`], {
+      encoding: 'utf8', timeout: 8000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Daemon có đang chạy dưới trình giữ chạy của Aivin không (thoát mã 75 thì được mở lại). Dấu AIVIN_SUPERVISOR (tệp tự khởi động từ bản có
+ * tự cập nhật); tệp tự khởi động cũ không có dấu → launchd: nhãn `com.aivin.remote`; Windows: tiến trình cha là wscript chạy đúng
+ * aivin-remote.vbs. systemd cũ không nhận ra được → coi như không có (chỉ nhắc, không tự thoát) — an toàn hơn đoán sai rồi mất máy.
+ * Trước đây `--quiet` bị coi là có trình giữ chạy: ai tự chạy `--quiet` trong terminal / script riêng thì daemon tự thoát rồi máy offline.
+ */
+export function detectSupervisor({ env = process.env, platform = process.platform, quiet = false, readParent = parentCommandLine } = {}) {
+  const marked = String(env[SUPERVISOR_ENV] || '');
+  if (Object.values(Supervisor).includes(marked)) return marked;
+  if (!quiet) return null;
+  if (platform === 'darwin' && env.XPC_SERVICE_NAME === 'com.aivin.remote') return Supervisor.LAUNCHD;
+  if (platform === 'win32' && /\bwscript(\.exe)?\b.*aivin-remote\.vbs/i.test(readParent())) return Supervisor.WSCRIPT;
+  return null;
 }
 
 /**
@@ -209,6 +247,11 @@ ${argv.map((part) => `        <string>${xmlEscape(part)}</string>`).join('\n')}
     </dict>
     <key>ThrottleInterval</key>
     <integer>10</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>${SUPERVISOR_ENV}</key>
+        <string>${Supervisor.LAUNCHD}</string>
+    </dict>
     <key>StandardOutPath</key>
     <string>${xmlEscape(logOut)}</string>
     <key>StandardErrorPath</key>
@@ -230,6 +273,7 @@ Type=simple
 ExecStart=${execLine}
 Restart=on-failure
 RestartSec=10
+Environment=${SUPERVISOR_ENV}=${Supervisor.SYSTEMD}
 WorkingDirectory=${rootDir}
 StandardOutput=append:${logOut}
 StandardError=append:${logOut}

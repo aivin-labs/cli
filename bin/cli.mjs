@@ -59,6 +59,7 @@ import { DeviceAccess } from './lib/remote/constants.mjs';
 import { configureProxy } from './lib/remote/netProxy.mjs';
 import { DAEMON_RUNNING } from './lib/remote/daemonLock.mjs';
 import { runPolicyCommand } from './lib/remote/policyCommand.mjs';
+import { RESTART_EXIT_CODE, UPDATE_ROLLED_BACK, UpdateStatus, cleanupRetired, downloadRoot, installUpdate, isStandaloneBinary, saveUpdateSettings } from './lib/selfUpdate.mjs';
 import {
   createAutomationJob,
   listTasks,
@@ -1013,6 +1014,43 @@ program
     }
   });
 
+program
+  .command('update')
+  .description('Update aivin to the latest release (installs from get.aivin.vn; checks the release signature, the SHA256 and that the new build starts)')
+  .option('--check', 'Only check whether a newer release exists')
+  .option('--to <version>', 'Install this release instead of the latest, e.g. v1.0.9 (also allows going back)')
+  .option('--auto <on|off>', 'Turn background updates of `aivin remote start` on or off for this computer')
+  .option('--proxy <url>', 'HTTP proxy to download through (default: HTTPS_PROXY, else the system proxy setting; "none" = connect directly)')
+  .action(async (options) => {
+    try {
+      if (options.auto !== undefined) {
+        const value = String(options.auto).toLowerCase();
+        if (!['on', 'off'].includes(value)) throw new Error('Dùng: aivin update --auto on|off');
+        saveUpdateSettings({ auto: value === 'on' });
+        console.log(chalk.green(value === 'on' ? '✅ Đã bật tự cập nhật nền.' : '✅ Đã tắt tự cập nhật nền — cập nhật bằng `aivin update` khi cần.'));
+        return;
+      }
+      configureProxy({ explicit: options.proxy });
+      if (isStandaloneBinary()) cleanupRetired();
+      const root = downloadRoot();
+      const res = await installUpdate({ version: options.to, root, check: !!options.check, force: !!options.to });
+      if (res.status === UpdateStatus.UP_TO_DATE) return console.log(chalk.green(`✅ aivin ${res.current} là bản mới nhất.`));
+      if (res.status === UpdateStatus.NOT_BINARY) {
+        return console.log(chalk.yellow(`⬆  Có aivin ${res.latest} (máy này ${res.current}). Bản cài qua npm: npm i -g @aivin-labs/cli@latest`));
+      }
+      if (res.status === UpdateStatus.AVAILABLE) return console.log(chalk.yellow(`⬆  Có aivin ${res.latest} (máy này ${res.current}) — chạy \`aivin update\` để cài.`));
+      if (res.status === UpdateStatus.SKIPPED) {
+        return console.log(chalk.yellow(`⚠️  Máy này đã tự lùi khỏi aivin ${res.latest} (khởi động hỏng). Vẫn muốn cài: aivin update --to ${res.latest}`));
+      }
+      if (res.status === UpdateStatus.BUSY) return console.log(chalk.yellow('⏳ Đang có một lần cập nhật khác chạy trên máy này — thử lại sau ít phút.'));
+      console.log(chalk.green(`✅ Đã cài aivin ${res.latest} (trước đó ${res.current}).`));
+      console.log(chalk.gray('   `aivin remote start` chạy nền (tự khởi động cùng máy) tự chuyển sang bản mới khi máy rảnh; cửa sổ đang mở thì đóng và chạy lại.'));
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
 const remoteCommand = program
   .command('remote')
   .description('Let your Aivin agents work on this computer (Device Agent) - pair, run the listener, manage memory and safety')
@@ -1039,6 +1077,7 @@ remoteCommand
   .option('--quiet', 'No interactive logs')
   .option('--proxy <url>', 'HTTP proxy to reach Aivin through (default: HTTPS_PROXY, else the system proxy setting; "none" = connect directly)')
   .option('--no-keep-awake', "Don't keep this computer from sleeping while the agent is working on it")
+  .option('--no-auto-update', "Don't download new aivin releases in the background this run (to turn it off for good: aivin update --auto off)")
   .option('--multi-user', "Organization cloud computer (Linux container provisioned by Aivin): token from AIVIN_DEVICE_TOKEN/AIVIN_DEVICE_ID/AIVIN_SERVER, every org member works in their own Linux account + home folder")
   .action(async (options) => {
     try {
@@ -1048,6 +1087,11 @@ remoteCommand
       if (error?.code === DAEMON_RUNNING && options.quiet) {
         console.error(chalk.gray(error.message));
         process.exit(0);
+      }
+      // Vừa tự lùi bản: có trình giữ chạy → mã 75, được mở lại ngay bằng bản cũ.
+      if (error?.code === UPDATE_ROLLED_BACK) {
+        console.error(chalk.yellow(`↩  ${error.message}`));
+        process.exit(error.restart ? RESTART_EXIT_CODE : 1);
       }
       remoteFail(error);
     }

@@ -11,7 +11,9 @@
     "format": "prettier --write .",
     "test": "node --test test/*.test.mjs",
     "build:binary": "bun scripts/build-binary.mjs",
+    "sign:release": "node scripts/sign-release.mjs",
     "get:publish": "node scripts/publish-get.mjs",
+    "get:rollout": "node scripts/rollout-get.mjs",
     "get:up": "docker compose -f deploy/get/docker-compose.yml up -d"
   },
   "keywords": [

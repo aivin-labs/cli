@@ -31,6 +31,12 @@ import { createWatchManager } from './deviceWatches.mjs';
 import { createScheduleManager } from './schedule.mjs';
 import { remoteDebuggingPage } from './dailyBrowser.mjs';
 import { HOME_BASE, SHARED_DIR, createMultiUserHost, isMultiUserMode } from './multiUser.mjs';
+import { createAutoUpdater } from './autoUpdate.mjs';
+import {
+  BootAction, MAX_BOOTS_BEFORE_ROLLBACK, RESTART_EXIT_CODE, UPDATE_CONFIRM_AFTER_MS, UPDATE_ROLLED_BACK, checkBootAfterUpdate, cleanupRetired, clearStaleInstalledMarker,
+  confirmUpdate, isStandaloneBinary, noteCleanExit,
+} from '../selfUpdate.mjs';
+import { detectSupervisor } from './autoStart.mjs';
 
 const HEARTBEAT_MS = 20_000;
 const STREAM_FLUSH_MS = 150;
@@ -150,6 +156,23 @@ export async function startRemoteClient(options = {}) {
 
   // Cửa sổ thứ hai cùng thư mục cấu hình → dừng ngay với hướng dẫn (trừ khi ghép lại bằng mã: cửa sổ cũ sẽ tự dừng).
   const releaseLock = acquireDaemonLock({ takeOver: !!options.code });
+  // Tự cập nhật — ngay sau khi giữ khoá (cửa sổ thứ hai bị từ chối không được tính là một lần khởi động): bản vừa cài sập nhiều lần trước
+  // khi chạy ổn thì trả bản cũ trước khi đụng tới gì khác. Máy tính tổ chức: phiên bản do ảnh container quyết, không tự đổi.
+  const selfManaged = !multiUser && isStandaloneBinary();
+  const supervisor = multiUser ? null : detectSupervisor({ quiet });
+  if (selfManaged) {
+    const boot = checkBootAfterUpdate();
+    if (boot.action === BootAction.ROLLED_BACK) {
+      releaseLock();
+      logActivity({ type: 'self_update_rollback', version: boot.version, previous: boot.previous });
+      const err = new Error(`aivin ${boot.version} không chạy ổn sau ${MAX_BOOTS_BEFORE_ROLLBACK} lần khởi động — đã trả về ${boot.previous || 'bản trước'}, sẽ bỏ qua bản này. Chạy lại \`aivin remote start\`.`);
+      err.code = UPDATE_ROLLED_BACK;
+      err.restart = !!supervisor;
+      throw err;
+    }
+    clearStaleInstalledMarker();
+    cleanupRetired();
+  }
   const access = fullAccess ? DeviceAccess.FULL : DeviceAccess.FOLDERS;
   // Chrome / Edge cho AI Browser (CLI ≥ 1.0.8) — có thì BE cho việc trên web chạy ở trình duyệt của máy này.
   const browser = options.browser === false || multiUser ? null : detectLocalBrowser();
@@ -259,6 +282,13 @@ export async function startRemoteClient(options = {}) {
   });
 
   let stopped = false;
+  // Lời gọi đang xử lý (kể cả lúc chờ người bấm xác nhận trên máy) — tự cập nhật chỉ chạy lại daemon khi bằng 0.
+  let activeCalls = 0;
+  let lastActivityAt = Date.now();
+  let updater = null;
+  // Bản vừa tự cập nhật chạy đủ 10 phút không sập → xác nhận, bỏ bản cũ giữ để tự lùi.
+  const confirmTimer = selfManaged ? setTimeout(() => { try { confirmUpdate(); } catch { /* lần sau */ } }, UPDATE_CONFIRM_AFTER_MS) : null;
+  confirmTimer?.unref?.();
   const heartbeat = setInterval(() => {
     if (socket.connected) socket.emit(DeviceEvent.HEARTBEAT, {});
     ledger.prune();
@@ -306,6 +336,9 @@ export async function startRemoteClient(options = {}) {
     stopped = true;
     clearInterval(heartbeat);
     clearInterval(pauseWatch);
+    clearTimeout(confirmTimer);
+    updater?.close();
+    if (selfManaged) noteCleanExit();
     const draining = scheduler.cancelAll('The Aivin agent on this device stopped');
     ledger.persist();
     socket.disconnect();
@@ -328,6 +361,22 @@ export async function startRemoteClient(options = {}) {
     const draining = stop();
     if (options.handleSignals !== false) Promise.resolve(draining).finally(() => process.exit(0));
   };
+
+  // Tự cập nhật (autoUpdate.mjs): tệp chạy đóng gói + bản npm (chỉ nhắc). Máy tính tổ chức: tắt.
+  updater = createAutoUpdater({
+    enabled: !multiUser && options.autoUpdate !== false && process.env.AIVIN_AUTO_UPDATE !== '0',
+    // Chỉ tự thoát để chuyển bản khi chắc có trình giữ chạy mở lại (detectSupervisor) — không thì chỉ nhắc.
+    supervised: !!supervisor && options.handleSignals !== false,
+    deviceId: creds.device_id,
+    isIdle: () => activeCalls === 0 && !processes.hasRunning?.() && !(browserTunnels?.liveCount() > 0),
+    lastActivityAt: () => lastActivityAt,
+    say: (m) => say(chalk.cyan(m)),
+    onRestart: (version) => {
+      logActivity({ type: 'self_update', version });
+      console.log(chalk.cyan(`⬆  Chuyển sang aivin ${version} — khởi động lại.`));
+      Promise.resolve(stop()).finally(() => process.exit(RESTART_EXIT_CODE));
+    },
+  });
 
   const embedTexts = async (texts) => {
     if (!socket.connected) return null;
@@ -366,6 +415,8 @@ export async function startRemoteClient(options = {}) {
         ledger.drop(orphaned);
       }
       if (typeof hello?.rotate_token === 'string' && !envCreds) await rotateToken(hello.rotate_token);
+      // BE cần bản CLI tối thiểu (tính năng mới phía máy) → kiểm cập nhật ngay thay vì chờ tới lượt.
+      if (typeof hello?.cli?.min_version === 'string') updater?.setMinVersion(hello.cli.min_version);
       if (hello?.need_catalog) await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CATALOG, { catalog_hash: hash, tools: catalog });
       // BE mới tính vector cho tệp tài liệu (tìm theo nghĩa); BE cũ không báo → chỉ tìm theo từ khoá.
       if (fileIndex && Array.isArray(hello?.features) && hello.features.includes(ServerFeature.EMBED)) fileIndex.setEmbedder(embedTexts);
@@ -448,6 +499,8 @@ export async function startRemoteClient(options = {}) {
     const streamer = createStreamer(socket, call.call_id);
     let tool;
     let outcome;
+    activeCalls++;
+    lastActivityAt = Date.now();
     keepAwake.hold();
     try {
       ({ tool, outcome } = await runOnce(call, streamer));
@@ -469,6 +522,9 @@ export async function startRemoteClient(options = {}) {
       }
     } catch (e) {
       console.error(chalk.red(`⚠️  Gửi kết quả ${call.tool} lỗi: ${e?.message || e}`));
+    } finally {
+      activeCalls--;
+      lastActivityAt = Date.now();
     }
   };
 
