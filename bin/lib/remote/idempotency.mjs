@@ -97,8 +97,11 @@ const markDeduplicated = (r) => ({
 /**
  * `run(call)` → Promise<{ tool, outcome }>; `isReadOnly(toolName)`. Trả hàm chạy có chống lặp + cờ báo lần trùng (`onDuplicate`). `file`: sổ
  * trên đĩa (bỏ trống = chỉ trong bộ nhớ).
+ *
+ * `deferStart`: chỉ ghi "đã bắt đầu" ra đĩa khi `run` gọi `hooks.started()` (tham số cuối) — lời gọi còn chờ người bấm xác nhận trên máy
+ * thì chưa chạy gì; daemon khởi động lại lúc đó không được báo `INTERRUPTED` ("có thể đã chạy một phần") cho bước chưa hề chạy.
  */
-export function createIdempotentRunner(run, isReadOnly, { onDuplicate, now = () => Date.now(), file } = {}) {
+export function createIdempotentRunner(run, isReadOnly, { onDuplicate, now = () => Date.now(), file, deferStart = false } = {}) {
   const seen = new Map();
   const log = file ? createIdemLog(file, { now }) : null;
   for (const [k, v] of log?.load() || []) {
@@ -118,8 +121,10 @@ export function createIdempotentRunner(run, isReadOnly, { onDuplicate, now = () 
       onDuplicate?.(call);
       return hit.promise.then(markDeduplicated);
     }
-    log?.started(key);
-    const promise = run(call, ...rest);
+    let marked = false;
+    const started = () => { if (!marked) { marked = true; log?.started(key); } };
+    if (!deferStart) started();
+    const promise = run(call, ...rest, ...(deferStart ? [{ started }] : []));
     seen.set(key, { promise, at: t });
     promise.then((r) => {
       if (r.outcome.ok) log?.done(key, r.outcome);

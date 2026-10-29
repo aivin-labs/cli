@@ -51,9 +51,13 @@ function writeRecord(record) {
   return raw;
 }
 
+/** Cất vào kho bí mật hỏng gần đây → không thử lại mỗi lần đọc (mỗi lần thử là một tiến trình PowerShell). */
+const SEAL_RETRY_MS = 24 * 3600_000;
+
 /**
- * Thông tin ghép máy kèm `device_token` đã giải (tokenStore.mjs). Tệp cũ còn token chữ thường mà máy có kho bí mật → chuyển sang kho luôn.
- * Không giải được (tệp chép từ máy / tài khoản khác) → `null` = coi như chưa ghép.
+ * Thông tin ghép máy kèm `device_token` đã giải (tokenStore.mjs). Tệp cũ còn token chữ thường mà máy có kho bí mật → chuyển sang kho
+ * (lần hỏng gần nhất trong `SEAL_RETRY_MS` thì thôi). Không giải được (tệp chép từ máy / tài khoản khác) → `null` = coi như chưa ghép.
+ * `seal_failed: { at, reason }` trên kết quả: token đang nằm chữ thường vì kho bí mật hỏng — daemon in cảnh báo.
  */
 export function loadDeviceCredentials() {
   const rec = readRecord();
@@ -63,16 +67,31 @@ export function loadDeviceCredentials() {
   const token = openToken(data);
   if (!token) return null;
   opened = { raw, token };
-  if (data.device_token && preferredTokenStore() !== TokenStoreKind.FILE) saveDeviceCredentials({ ...data, device_token: token });
+  const retrySeal = !data.seal_failed || Date.now() - Number(data.seal_failed.at || 0) > SEAL_RETRY_MS;
+  if (data.device_token && preferredTokenStore() !== TokenStoreKind.FILE && retrySeal) {
+    saveDeviceCredentials({ ...data, device_token: token });
+    return { ...readRecord()?.data, device_token: token };
+  }
   return { ...data, device_token: token };
 }
 
+/**
+ * Ghi token (kho bí mật của hệ điều hành; hỏng → tệp thường kèm `seal_failed` có lý do để báo người dùng, không lặng lẽ). Trả lý do hỏng
+ * (`null` khi cất được hoặc máy vốn không có kho).
+ */
 export function saveDeviceCredentials(creds) {
-  const { device_token: token, token_store: _s, token_enc: _e, ...rest } = creds;
+  const { device_token: token, token_store: _s, token_enc: _e, seal_failed: _f, ...rest } = creds;
   const sealed = sealToken(token, { account: creds.device_id });
-  const { fallback_reason: _why, ...stored } = sealed;
-  const raw = writeRecord({ ...rest, ...stored });
+  const { fallback_reason: reason, ...stored } = sealed;
+  const raw = writeRecord({ ...rest, ...stored, ...(reason ? { seal_failed: { at: Date.now(), reason } } : {}) });
   opened = { raw, token };
+  return reason || null;
+}
+
+/** Đọc lại token từ tệp + kho bí mật thật (không qua bộ nhớ đệm) — kiểm sau khi ghi token mới. */
+export function readStoredTokenFresh() {
+  const data = readRecord()?.data;
+  return data ? openToken(data) : null;
 }
 
 /**

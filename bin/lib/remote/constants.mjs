@@ -56,6 +56,9 @@ export const DeviceEvent = Object.freeze({
 });
 
 /** Năng lực BE báo trong ack của `device:hello` (`features`). */
+/** Pha của `device:hold`: `waiting` = chờ người bấm xác nhận trên máy, `started` = đã qua hộp, bước bắt đầu chạy (BE phân biệt chưa chạy / chạy dở). */
+export const HoldPhase = Object.freeze({ WAITING: 'waiting', STARTED: 'started' });
+
 export const ServerFeature = Object.freeze({
   EMBED: 'embed',
   WATCH: 'watch',

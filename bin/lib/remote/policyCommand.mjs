@@ -1,14 +1,12 @@
 import chalk from 'chalk';
 import readline from 'readline/promises';
-import { ConfirmMode, REMOTE_POLICY_FILE, loadLocalPolicy, saveLocalPolicy } from './localPolicy.mjs';
+import { CONFIRM_RANK, ConfirmMode, DEFAULT_LOCAL_POLICY, REMOTE_POLICY_FILE, saveLocalPolicy, stricterPolicy, verifyLocalPolicy } from './localPolicy.mjs';
 
 /**
  * `aivin remote policy [hành động] [giá trị]` — chủ máy đặt sàn luật tại máy (localPolicy.mjs). Siết luật chạy ngay; NỚI luật (bớt xác
  * nhận, bật lại công cụ, bỏ chặn lệnh) phải gõ trong terminal thật và trả lời "có": lệnh shell do agent chạy không có terminal, nên agent
  * không tự nới được luật của máy.
  */
-
-const CONFIRM_RANK = { [ConfirmMode.NEVER]: 0, [ConfirmMode.RISKY]: 1, [ConfirmMode.ALWAYS]: 2 };
 
 const CONFIRM_TEXT = {
   [ConfirmMode.RISKY]: 'việc rủi ro (lệnh đổi hệ thống / bảo mật, xoá hẳn, gửi thư, đặt lịch) phải bấm "Cho phép" trên máy',
@@ -38,8 +36,19 @@ async function assertHumanLoosening(what) {
   }
 }
 
+/**
+ * Luật làm gốc để đổi: tệp có chữ ký đúng → nguyên văn. Tệp bị sửa ngoài lệnh này (không ký / ký sai) → không lấy phần NỚI trong đó làm gốc
+ * (không thì lần siết kế tiếp ký luôn phần agent tự nới): lấy bản chặt hơn của mặc định và tệp.
+ */
+function basePolicy() {
+  const { policy, trusted, base } = verifyLocalPolicy();
+  if (trusted) return policy;
+  console.log(chalk.yellow('⚠️  Tệp luật bị sửa ngoài lệnh `aivin remote policy` (chữ ký không khớp) — máy chỉ áp phần siết thêm. Lưu lại bằng lệnh này để ký lại.'));
+  return stricterPolicy(base || { ...DEFAULT_LOCAL_POLICY, deny_tools: [], blocked_commands: [] }, policy);
+}
+
 export async function runPolicyCommand(action, value) {
-  const policy = loadLocalPolicy();
+  const policy = basePolicy();
   if (!action) return show(policy);
   const v = String(value ?? '').trim();
   const next = { ...policy, deny_tools: [...policy.deny_tools], blocked_commands: [...policy.blocked_commands] };

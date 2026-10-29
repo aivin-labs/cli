@@ -11,7 +11,8 @@ import { AIVIN_BRAND, AIVIN_LOGO_PNG_BASE64 } from './brand.mjs';
  * Mặc định là "Từ chối" (Enter / Esc / đóng hộp / hết giờ đều là từ chối).
  */
 
-export const ConfirmResult = Object.freeze({ ALLOW: 'allow', REJECT: 'reject', TIMEOUT: 'timeout', UNAVAILABLE: 'unavailable' });
+/** `CANCELLED`: lời gọi bị huỷ (BE huỷ / hết giờ, tạm dừng, daemon dừng) trong lúc hộp đang chờ hoặc còn xếp hàng — hộp đóng, việc không chạy. */
+export const ConfirmResult = Object.freeze({ ALLOW: 'allow', REJECT: 'reject', TIMEOUT: 'timeout', UNAVAILABLE: 'unavailable', CANCELLED: 'cancelled' });
 
 const TITLE = 'Aivin — xác nhận trên máy này';
 const HEADING = 'Agent Aivin xin chạy một việc trên máy này';
@@ -186,55 +187,80 @@ export function confirmCommand({ request, timeoutSec, platform = process.platfor
   return null;
 }
 
-function runDialog(command, timeoutSec, spawnImpl) {
+function runDialog(command, timeoutSec, spawnImpl, signal) {
   return new Promise((resolve) => {
     let out = '';
     let settled = false;
-    const done = (r) => { if (!settled) { settled = true; clearTimeout(timer); resolve(r); } };
     let child;
+    let timer;
+    const kill = () => { try { child?.kill(); } catch { /* đã thoát */ } };
+    const onAbort = () => { kill(); done(ConfirmResult.CANCELLED); };
+    const done = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(r);
+    };
     try {
       child = spawnImpl(command.cmd, command.args, { env: { ...process.env, ...(command.env || {}) }, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: false });
     } catch {
       return done(ConfirmResult.UNAVAILABLE);
     }
     // Cộng 10 s cho hộp tự hết giờ (đếm ngược / macOS / zenity; PowerShell nạp WinForms mất vài giây) trước khi tự giết.
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* đã thoát */ } done(ConfirmResult.TIMEOUT); }, (timeoutSec + 10) * 1000);
+    timer = setTimeout(() => { kill(); done(ConfirmResult.TIMEOUT); }, (timeoutSec + 10) * 1000);
+    signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout?.on('data', (d) => { out += d; });
     child.on('error', () => done(ConfirmResult.UNAVAILABLE));
     child.on('close', (code) => done(command.parse(out, code)));
   });
 }
 
-function askInTerminal(request, timeoutSec) {
+function askInTerminal(request, timeoutSec, signal) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const timer = setTimeout(() => { rl.close(); resolve(ConfirmResult.TIMEOUT); }, timeoutSec * 1000);
-    rl.question(`\n${plainText(request)}\n   Gõ "c" rồi Enter để ${ALLOW_LABEL.toLowerCase()} (Enter = ${REJECT_LABEL.toLowerCase()}, tự từ chối sau ${timeoutSec} s): `, (answer) => {
+    let settled = false;
+    const done = (r) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       rl.close();
-      resolve(/^\s*(c|co|có|y|yes)\s*$/i.test(answer) ? ConfirmResult.ALLOW : ConfirmResult.REJECT);
+      resolve(r);
+    };
+    const onAbort = () => done(ConfirmResult.CANCELLED);
+    const timer = setTimeout(() => done(ConfirmResult.TIMEOUT), timeoutSec * 1000);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    rl.question(`\n${plainText(request)}\n   Gõ "c" rồi Enter để ${ALLOW_LABEL.toLowerCase()} (Enter = ${REJECT_LABEL.toLowerCase()}, tự từ chối sau ${timeoutSec} s): `, (answer) => {
+      done(/^\s*(c|co|có|y|yes)\s*$/i.test(answer) ? ConfirmResult.ALLOW : ConfirmResult.REJECT);
     });
   });
 }
 
 /**
- * Bộ hỏi xác nhận: mỗi lúc một hộp (lời gọi song song xếp hàng). `ask({ reason, purpose?, detail, timeoutSec })` → `ConfirmResult`.
- * `reason`: vì sao cần hỏi (do máy tự xét), `purpose`: mục đích agent ghi (từ BE — chỉ để tham khảo), `detail`: lệnh / đối tượng thật.
- * `tty`: daemon đang chạy trong terminal tương tác (dự phòng khi không hiện được hộp).
+ * Bộ hỏi xác nhận: mỗi lúc một hộp (lời gọi song song xếp hàng). `ask({ reason, purpose?, detail, timeoutSec, signal?, onStart? })` →
+ * `ConfirmResult`. `reason`: vì sao cần hỏi (do máy tự xét), `purpose`: mục đích agent ghi (từ BE — chỉ để tham khảo), `detail`: lệnh /
+ * đối tượng thật. `signal` huỷ → hộp đang mở đóng lại / hộp còn xếp hàng không hiện, trả `CANCELLED`. `onStart(queuedMs)`: gọi đúng lúc
+ * hộp này tới lượt hiện (đã xếp hàng bấy nhiêu ms) — để xin BE lùi hạn thêm phần đã chờ. `tty`: daemon đang chạy trong terminal tương tác
+ * (dự phòng khi không hiện được hộp).
  */
 export function createLocalConfirmer({ platform = process.platform, spawnImpl = spawn, tty = !!(process.stdin.isTTY && process.stdout.isTTY), env = process.env } = {}) {
   let queue = Promise.resolve();
-  const askOnce = async ({ timeoutSec, ...request }) => {
+  const askOnce = async ({ timeoutSec, signal, onStart, queuedAt, ...request }) => {
+    if (signal?.aborted) return ConfirmResult.CANCELLED;
+    onStart?.(Date.now() - queuedAt);
     const command = confirmCommand({ request, timeoutSec, platform, env });
     if (command) {
-      const result = await runDialog(command, timeoutSec, spawnImpl);
+      const result = await runDialog(command, timeoutSec, spawnImpl, signal);
       if (result !== ConfirmResult.UNAVAILABLE) return result;
     }
-    return tty ? askInTerminal(request, timeoutSec) : ConfirmResult.UNAVAILABLE;
+    if (signal?.aborted) return ConfirmResult.CANCELLED;
+    return tty ? askInTerminal(request, timeoutSec, signal) : ConfirmResult.UNAVAILABLE;
   };
   return {
     ask(req) {
-      const p = queue.then(() => askOnce(req));
+      const queuedAt = Date.now();
+      const p = queue.then(() => askOnce({ ...req, queuedAt }));
       queue = p.catch(() => undefined);
       return p;
     },

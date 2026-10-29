@@ -1,13 +1,20 @@
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { DeviceErrorCode, REMOTE_CONFIG_DIR } from './constants.mjs';
 import { DeviceToolError } from './sandbox.mjs';
+import { openToken, sealToken } from './tokenStore.mjs';
 
 /**
  * Sàn luật TẠI MÁY (29/10/2026). Trước đây máy tin BE gần như tuyệt đối: ngoài thư mục được phép + công tắc ngắt + vài lệnh thảm hoạ, mọi
  * quyết định duyệt nằm ở BE — BE / tài khoản admin bị chiếm hoặc agent bị prompt injection là chạy được lệnh trên mọi máy đã ghép (máy
- * toàn quyền còn không hỏi). Tệp `~/.aivin/remote-policy.json` do CHỦ MÁY đặt (`aivin remote policy …`); thư mục `.aivin` bị chặn với mọi
- * công cụ từ xa nên AI / BE không sửa được.
+ * toàn quyền còn không hỏi). Tệp `~/.aivin/remote-policy.json` do CHỦ MÁY đặt (`aivin remote policy …`).
+ *
+ * Chống agent tự nới luật (29/10/2026): thư mục `.aivin` chỉ được che bằng khớp chuỗi với lệnh shell — ghép chuỗi / chạy tệp script là ghi
+ * đè được tệp luật. Nên tệp luật mang chữ ký HMAC bằng khoá cất trong kho bí mật của hệ điều hành (tokenStore.mjs), chỉ `aivin remote policy`
+ * ký. Daemon (`createPolicyGuard`) chỉ nhận bản có chữ ký đúng; bản không ký / ký sai chỉ được SIẾT thêm so với bản đúng gần nhất, không
+ * được nới. Không chống được mã độc cùng tài khoản biết cách gọi DPAPI / Keychain để ký lại — cách ly thật cần tài khoản hệ điều hành riêng
+ * (policy-approval.md mục 8 ở repo be).
  *
  * - `deny_tools`: công cụ tắt hẳn trên máy này (không vào danh mục, gọi tới bị từ chối).
  * - `blocked_commands`: regex chặn thêm cho lệnh shell / tiến trình nền / lịch.
@@ -21,8 +28,18 @@ export const ConfirmMode = Object.freeze({ NEVER: 'never', RISKY: 'risky', ALWAY
 
 export const DEFAULT_LOCAL_POLICY = Object.freeze({ confirm: ConfirmMode.RISKY, deny_tools: [], blocked_commands: [], confirm_timeout_sec: 120 });
 
-/** Công cụ mang lệnh để chạy → tham số chứa lệnh. */
-const COMMAND_ARG = Object.freeze({ 'shell.exec': 'command', 'proc.start': 'command', 'proc.write': 'text', 'sys.schedule': 'command' });
+/** Mức chặt của chế độ xác nhận — số lớn hơn là chặt hơn. */
+export const CONFIRM_RANK = Object.freeze({ [ConfirmMode.NEVER]: 0, [ConfirmMode.RISKY]: 1, [ConfirmMode.ALWAYS]: 2 });
+
+/** Khoá ký tệp luật (bản mã của kho bí mật hệ điều hành, như token máy). */
+export const REMOTE_POLICY_KEY_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-policy.key.json');
+const POLICY_KEY_ACCOUNT = 'remote-policy-key';
+
+/**
+ * Công cụ mang lệnh để chạy → tham số chứa lệnh. `gui.act`: chữ gõ vào cửa sổ (hộp Run, terminal đang mở) cũng là một cách chạy lệnh —
+ * xét cùng mẫu lệnh rủi ro / luật chặn của chủ máy.
+ */
+const COMMAND_ARG = Object.freeze({ 'shell.exec': 'command', 'proc.start': 'command', 'proc.write': 'text', 'sys.schedule': 'command', 'gui.act': 'text' });
 
 /** Công cụ luôn xét là rủi ro: gửi ra ngoài thay người dùng, cài việc chạy định kỳ (cách bám trụ kinh điển của mã độc). */
 const ALWAYS_RISKY_TOOLS = new Set(['office.outlook.send', 'sys.schedule']);
@@ -63,7 +80,7 @@ function normalize(raw) {
   };
 }
 
-/** Đọc luật của máy (không có tệp → mặc định). Đọc lại mỗi lần gọi: chủ máy sửa bằng lệnh CLI ở cửa sổ khác thì có hiệu lực ngay. */
+/** Đọc luật trong tệp (không có tệp → mặc định), KHÔNG xét chữ ký — để hiện cho chủ máy. Daemon đọc qua `createPolicyGuard`. */
 export function loadLocalPolicy(file = REMOTE_POLICY_FILE) {
   try {
     return normalize(JSON.parse(fs.readFileSync(file, 'utf8')));
@@ -72,11 +89,123 @@ export function loadLocalPolicy(file = REMOTE_POLICY_FILE) {
   }
 }
 
-export function saveLocalPolicy(policy, file = REMOTE_POLICY_FILE) {
+/** Khoá đã giải theo bản mã trong tệp khoá — giải DPAPI tốn một tiến trình con, daemon đọc luật ở mỗi lời gọi. */
+const keyCache = new Map();
+
+function readKeyRecord(keyFile) {
+  try { return JSON.parse(fs.readFileSync(keyFile, 'utf8')); } catch { return null; }
+}
+
+function writeKeyRecord(keyFile, record) {
+  fs.mkdirSync(path.dirname(keyFile), { recursive: true });
+  fs.writeFileSync(keyFile, JSON.stringify(record, null, 2) + '\n', { mode: 0o600 });
+}
+
+/** Khoá ký luật; `create` → chưa có thì sinh + cất vào kho bí mật. `null` khi không có / không giải được. */
+function policyKey(keyFile, { create = false } = {}) {
+  const record = readKeyRecord(keyFile);
+  const fingerprint = record ? `${record.token_store || ''}:${record.token_enc || record.device_token || ''}` : null;
+  if (fingerprint && keyCache.get(keyFile)?.fingerprint === fingerprint) return keyCache.get(keyFile).key;
+  let key = record ? openToken(record) : null;
+  let fp = fingerprint;
+  if (!key && create) {
+    key = randomBytes(32).toString('hex');
+    const { fallback_reason: _why, ...sealed } = sealToken(key, { account: POLICY_KEY_ACCOUNT });
+    writeKeyRecord(keyFile, { device_id: POLICY_KEY_ACCOUNT, ...sealed });
+    fp = `${sealed.token_store || ''}:${sealed.token_enc || sealed.device_token || ''}`;
+  }
+  if (key) keyCache.set(keyFile, { fingerprint: fp, key });
+  return key;
+}
+
+const signPolicy = (clean, key) => createHmac('sha256', key).update(JSON.stringify(normalize(clean))).digest('hex');
+
+function sealMatches(clean, seal, key) {
+  if (typeof seal !== 'string' || !key) return false;
+  const expected = Buffer.from(signPolicy(clean, key), 'hex');
+  const actual = Buffer.from(seal, 'hex');
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+/**
+ * Lưu luật + ký (chỉ `aivin remote policy` gọi). Bản có chữ ký được chép thêm vào tệp khoá (`policy`): tệp luật bị ghi đè trước khi daemon kịp
+ * đọc bản đúng (hoặc daemon khởi động lại sau đó) thì vẫn có bản đúng làm gốc — chạy thật 29/10/2026: chỉ nhớ trong RAM là agent bật lại
+ * được công cụ chủ máy vừa tắt.
+ */
+export function saveLocalPolicy(policy, file = REMOTE_POLICY_FILE, { keyFile = REMOTE_POLICY_KEY_FILE } = {}) {
   const clean = normalize(policy);
+  const key = policyKey(keyFile, { create: true });
+  const signed = { ...clean, ...(key ? { seal: signPolicy(clean, key) } : {}) };
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(clean, null, 2) + '\n', { mode: 0o600 });
+  fs.writeFileSync(file, JSON.stringify(signed, null, 2) + '\n', { mode: 0o600 });
+  const record = key ? readKeyRecord(keyFile) : null;
+  if (record) writeKeyRecord(keyFile, { ...record, policy: signed });
   return clean;
+}
+
+/** Bản có chữ ký đúng chép trong tệp khoá — `null` khi không có / sai chữ ký. */
+function signedBackup(keyFile, key) {
+  const saved = readKeyRecord(keyFile)?.policy;
+  if (!saved || !key) return null;
+  const policy = normalize(saved);
+  return sealMatches(policy, saved.seal, key) ? policy : null;
+}
+
+/**
+ * Luật trong tệp + có đúng chữ ký không + `base`: bản có chữ ký gần nhất (chép trong tệp khoá) để làm gốc khi tệp không đúng. Chưa từng đặt
+ * luật (không có tệp lẫn khoá) → mặc định, coi là đúng. Có khoá mà mất tệp luật → bị xoá ngoài lệnh policy: không đúng.
+ */
+export function verifyLocalPolicy(file = REMOTE_POLICY_FILE, { keyFile = REMOTE_POLICY_KEY_FILE } = {}) {
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    const keyExists = fs.existsSync(keyFile);
+    return { policy: normalize(null), trusted: e?.code === 'ENOENT' && !keyExists, base: keyExists ? signedBackup(keyFile, policyKey(keyFile)) : null };
+  }
+  const policy = normalize(raw);
+  const key = policyKey(keyFile);
+  if (sealMatches(policy, raw?.seal, key)) return { policy, trusted: true, base: null };
+  return { policy, trusted: false, base: signedBackup(keyFile, key) };
+}
+
+/** Bản chặt hơn của hai luật: xác nhận mức cao hơn, cộng dồn công cụ tắt / lệnh chặn; giờ chờ giữ theo bản đúng. */
+export function stricterPolicy(trusted, other) {
+  return {
+    confirm: CONFIRM_RANK[other.confirm] > CONFIRM_RANK[trusted.confirm] ? other.confirm : trusted.confirm,
+    deny_tools: [...new Set([...trusted.deny_tools, ...other.deny_tools])],
+    blocked_commands: [...new Set([...trusted.blocked_commands, ...other.blocked_commands])],
+    confirm_timeout_sec: trusted.confirm_timeout_sec,
+  };
+}
+
+/**
+ * Luật daemon dùng (đọc lại mỗi lời gọi — chủ máy đổi ở cửa sổ khác thì có hiệu lực ngay). Tệp có chữ ký đúng → dùng và nhớ làm bản đúng;
+ * tệp bị sửa ngoài `aivin remote policy` → chặt hơn của (bản có chữ ký gần nhất — chép trong tệp khoá, không có thì bản đúng daemon đã thấy,
+ * tệp): siết thì nhận, nới thì bỏ. `onTamper(policy)` báo một lần mỗi lần nội dung tệp đổi.
+ */
+export function createPolicyGuard({ file = REMOTE_POLICY_FILE, keyFile = REMOTE_POLICY_KEY_FILE, onTamper } = {}) {
+  const first = verifyLocalPolicy(file, { keyFile });
+  let lastTrusted = first.trusted ? first.policy : first.base || normalize(null);
+  let reported = null;
+  return {
+    read() {
+      const { policy, trusted, base } = verifyLocalPolicy(file, { keyFile });
+      if (trusted) {
+        lastTrusted = policy;
+        reported = null;
+        return policy;
+      }
+      if (base) lastTrusted = base;
+      const effective = stricterPolicy(lastTrusted, policy);
+      const fingerprint = JSON.stringify(policy);
+      if (reported !== fingerprint) {
+        reported = fingerprint;
+        onTamper?.(effective);
+      }
+      return effective;
+    },
+  };
 }
 
 const commandOf = (toolName, args) => (COMMAND_ARG[toolName] ? String(args?.[COMMAND_ARG[toolName]] ?? '') : '');

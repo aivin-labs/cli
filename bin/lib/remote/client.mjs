@@ -5,13 +5,13 @@ import chalk from 'chalk';
 import { io } from 'socket.io-client';
 import { DEFAULT_AIVIN_BASE_URL } from '../context.mjs';
 import { logActivity } from './activityLog.mjs';
-import { DEFAULT_SCOPE_LIMITS, DEVICE_NAMESPACE, DeviceAccess, DeviceErrorCode, DeviceEvent, MAX_RESULT_BYTES, PROTOCOL_VERSION, REMOTE_IDEM_FILE, REMOTE_OUTBOX_FILE, ServerFeature } from './constants.mjs';
+import { DEFAULT_SCOPE_LIMITS, DEVICE_NAMESPACE, DeviceAccess, DeviceErrorCode, DeviceEvent, HoldPhase, MAX_RESULT_BYTES, PROTOCOL_VERSION, REMOTE_IDEM_FILE, REMOTE_OUTBOX_FILE, ServerFeature } from './constants.mjs';
 import { CallState, createCallLedger } from './callLedger.mjs';
 import { configureProxy, proxyAgentFor } from './netProxy.mjs';
 import { createKeepAwake } from './keepAwake.mjs';
-import { describeCall, evaluateLocalPolicy, loadLocalPolicy } from './localPolicy.mjs';
+import { createPolicyGuard, describeCall, evaluateLocalPolicy } from './localPolicy.mjs';
 import { ConfirmResult, createLocalConfirmer } from './localConfirm.mjs';
-import { clearDeviceCredentials, credentialsFromEnv, listDevices, loadDeviceCredentials, pairDevice, pairDeviceWithCode, saveDeviceCredentials } from './credentials.mjs';
+import { clearDeviceCredentials, credentialsFromEnv, listDevices, loadDeviceCredentials, pairDevice, pairDeviceWithCode, readStoredTokenFresh, saveDeviceCredentials } from './credentials.mjs';
 import { ensureMemoryLoaded, memoryStats, stopWatchingMemory, watchMemoryDir } from './deviceMemory.mjs';
 import { buildCatalog, buildDeviceProfile } from './deviceProfile.mjs';
 import { createFileIndex, indexRootsFor } from './fileIndexer.mjs';
@@ -180,6 +180,13 @@ export async function startRemoteClient(options = {}) {
   const guiProfile = detectGui({ disabled: options.gui === false, multiUser });
   // Excel / Word / Outlook có trên máy → công cụ office.* qua COM (tự phát hiện, người dùng không cấu hình gì).
   const officeApps = detectOfficeApps({ multiUser });
+  // Sàn luật tại máy: chỉ nhận bản `aivin remote policy` đã ký; tệp bị sửa ngoài lệnh đó (agent ghi đè qua shell) chỉ được siết thêm.
+  const policyGuard = createPolicyGuard({
+    onTamper: (effective) => {
+      say(chalk.yellow(`⚠️  Tệp luật tại máy bị sửa ngoài lệnh \`aivin remote policy\` — chỉ áp phần siết thêm (xác nhận: ${effective.confirm}).`));
+      logActivity({ type: 'local_policy_tampered', confirm: effective.confirm });
+    },
+  });
   const profile = {
     ...buildDeviceProfile(scanRoots), roots: roots.map((r) => path.resolve(r)), access,
     ...(browser ? { browser } : {}), ...(guiProfile ? { gui: guiProfile } : {}), ...(officeApps.length ? { apps: officeApps } : {}),
@@ -242,7 +249,7 @@ export async function startRemoteClient(options = {}) {
   const tools = buildTools(env);
   const byName = toolMap(tools);
   // Công cụ chủ máy tắt (`aivin remote policy deny`) không vào danh mục — Planner không lập kế hoạch với nó (gọi tới vẫn bị chặn ở sàn luật).
-  const deniedTools = new Set(loadLocalPolicy().deny_tools);
+  const deniedTools = new Set(policyGuard.read().deny_tools);
   const { catalog, hash } = buildCatalog(tools.filter((t) => !deniedTools.has(t.name)));
   const confirmer = multiUser ? null : createLocalConfirmer();
   // Nhiều người dùng: thêm trần song song theo từng thành viên — một người không chiếm hết chỗ của cả tổ chức.
@@ -252,6 +259,7 @@ export async function startRemoteClient(options = {}) {
   say(chalk.gray(`   Máy:        ${creds.name} (${creds.device_id})`));
   say(chalk.gray(fullAccess ? `   Quyền:      TOÀN QUYỀN máy (${roots.slice(1).join(' ')}) — trừ thư mục cấu hình Aivin` : `   Thư mục:    ${roots.join(' | ')}`));
   say(chalk.gray(`   Máy chủ:    ${serverUrl}`));
+  if (creds.seal_failed) say(chalk.yellow(`   ⚠️  Token máy đang nằm trong tệp thường (kho bí mật của hệ điều hành lỗi: ${creds.seal_failed.reason}) — chép thư mục .aivin là mang theo được quyền điều khiển máy`));
   if (proxy.url) say(chalk.gray(`   Proxy:      ${proxy.url} (${proxy.source === 'system' ? 'cài đặt của hệ điều hành' : proxy.source === 'env' ? 'HTTPS_PROXY' : '--proxy'})`));
   else if (proxy.pac) say(chalk.yellow(`   Proxy:      máy dùng tệp PAC (${proxy.pac}) — Aivin chưa đọc được, nếu không nối được hãy thêm --proxy http://<máy>:<cổng>`));
   say(chalk.gray(`   Công cụ:    ${catalog.length} (${profile.binaries.join(', ') || 'không phát hiện chương trình nào'})`));
@@ -302,6 +310,7 @@ export async function startRemoteClient(options = {}) {
     if (paused && !pausedSeen) {
       say(chalk.yellow('⏸  Đã tạm dừng — huỷ việc đang chạy và đóng trình duyệt AI đang dùng.'));
       void scheduler.cancelAll('Remote control was paused on this device');
+      cancelGating([...gating.keys()]);
       browserTunnels?.closeAll();
       winHost?.close();
       processes.stopAll();
@@ -340,6 +349,7 @@ export async function startRemoteClient(options = {}) {
     updater?.close();
     if (selfManaged) noteCleanExit();
     const draining = scheduler.cancelAll('The Aivin agent on this device stopped');
+    cancelGating([...gating.keys()]);
     ledger.persist();
     socket.disconnect();
     browserTunnels?.closeAll();
@@ -389,18 +399,25 @@ export async function startRemoteClient(options = {}) {
    * không báo, token cũ vẫn dùng được. Lần nối lại sau dùng token mới (socket.io đọc lại `auth` mỗi lần nối).
    */
   const rotateToken = async (token) => {
+    const previous = creds.device_token;
     try {
-      saveDeviceCredentials({ ...creds, device_token: token });
-      if (loadDeviceCredentials()?.device_token !== token) throw new Error('saved token does not read back');
+      const fallback = saveDeviceCredentials({ ...creds, device_token: token });
+      if (fallback) say(chalk.yellow(`   ⚠️  Kho bí mật của máy lỗi (${fallback}) — token mới nằm trong tệp thường`));
+      // Đọc lại thật từ tệp + kho bí mật (không qua bộ nhớ đệm): ghi hỏng mà vẫn báo BE là lần khởi động sau máy bị khoá ngoài.
+      if (readStoredTokenFresh() !== token) throw new Error('saved token does not read back');
     } catch (e) {
+      try { saveDeviceCredentials({ ...creds, device_token: previous }); } catch { /* giữ nguyên tệp */ }
       say(chalk.yellow(`   ⚠️  Không lưu được token mới (${e.message}) — tiếp tục dùng token cũ`));
       return;
     }
     creds.device_token = token;
     socket.auth = { ...socket.auth, device_token: token };
-    await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.ROTATED, {}).catch(() => null);
-    logActivity({ type: 'token_rotated', deviceId: creds.device_id });
-    say(chalk.gray('   🔑 Đã đổi token máy định kỳ (token cũ hết hiệu lực)'));
+    // Gửi kèm chính token mới: BE chỉ chốt khi băm của nó đúng token đang chờ (chứng minh máy này nhận được token đó).
+    const ack = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.ROTATED, { token }).catch(() => null);
+    logActivity({ type: 'token_rotated', deviceId: creds.device_id, confirmed: ack?.ok === true });
+    say(chalk.gray(ack?.ok
+      ? '   🔑 Đã đổi token máy định kỳ (token cũ hết hiệu lực)'
+      : '   🔑 Đã lưu token mới — máy chủ chưa xác nhận, sẽ chốt ở lần nối lại'));
   };
 
   const announce = async () => {
@@ -412,6 +429,7 @@ export async function startRemoteClient(options = {}) {
       if (orphaned.length) {
         say(chalk.gray(`   ↯ Huỷ ${orphaned.length} việc máy chủ không còn chờ (đã huỷ / hết giờ lúc mất kết nối)`));
         scheduler.cancel(orphaned);
+        cancelGating(orphaned);
         ledger.drop(orphaned);
       }
       if (typeof hello?.rotate_token === 'string' && !envCreds) await rotateToken(hello.rotate_token);
@@ -440,27 +458,49 @@ export async function startRemoteClient(options = {}) {
    * Sàn luật tại máy: công cụ / lệnh chủ máy cấm → ném lỗi; việc cần xác nhận → hộp "Cho phép / Từ chối" trên máy (BE được báo giữ chỗ để
    * không tính hết giờ trong lúc chờ). Máy tính tổ chức: chỉ áp phần cấm (không có người ngồi trước máy để bấm).
    */
+  // Lời gọi đang chờ người bấm xác nhận (chưa vào scheduler nên `scheduler.cancel` không chạm tới): huỷ từ BE / việc mồ côi / tạm dừng /
+  // dừng daemon phải đóng hộp ở đây — trước đây hộp vẫn chờ, người bấm "Cho phép" muộn là lệnh chạy dù BE đã thôi chờ (29/10/2026).
+  const gating = new Map();
+  const cancelGating = (callIds) => {
+    for (const id of callIds) gating.get(id)?.abort();
+  };
+
   const localGate = async (call, tool) => {
     if (tool.internal) return;
-    const policy = loadLocalPolicy();
+    const policy = policyGuard.read();
     const verdict = evaluateLocalPolicy(policy, tool, call.args || {});
     if (verdict.action !== 'confirm' || !confirmer) return;
     const timeoutSec = policy.confirm_timeout_sec;
-    if (socket.connected) socket.emit(DeviceEvent.HOLD, { call_id: call.call_id, extra_ms: (timeoutSec + 15) * 1000 });
+    const hold = (extraMs, phase = HoldPhase.WAITING) => { if (socket.connected) socket.emit(DeviceEvent.HOLD, { call_id: call.call_id, extra_ms: extraMs, phase }); };
+    hold((timeoutSec + 15) * 1000);
     say(chalk.magenta(`  ✋ ${call.tool}: chờ bạn bấm xác nhận trên máy (${verdict.reason}, tối đa ${timeoutSec} s)`));
     const purpose = typeof call.purpose === 'string' ? call.purpose.slice(0, 200) : undefined;
-    const result = await confirmer.ask({ reason: verdict.reason, purpose, detail: describeCall(tool, call.args || {}), timeoutSec });
+    const controller = new AbortController();
+    gating.set(call.call_id, controller);
+    let result;
+    try {
+      result = await confirmer.ask({
+        reason: verdict.reason, purpose, detail: describeCall(tool, call.args || {}), timeoutSec, signal: controller.signal,
+        // Hộp xếp hàng sau hộp khác: phần đã chờ chưa nằm trong lần xin lùi hạn đầu → xin thêm đúng phần đó.
+        onStart: (queuedMs) => { if (queuedMs > 1000) hold(queuedMs); },
+      });
+    } finally {
+      gating.delete(call.call_id);
+    }
     logActivity({ type: 'local_confirm', tool: call.tool, id: call.call_id, result });
-    if (result === ConfirmResult.ALLOW) return;
+    // Bấm "Cho phép" đúng lúc chủ máy vừa tạm dừng → không chạy.
+    if (result === ConfirmResult.ALLOW && isRemotePaused()) throw new DeviceToolError(DeviceErrorCode.KILL_SWITCH, 'Remote control is paused on this device');
+    if (result === ConfirmResult.ALLOW) return hold(0, HoldPhase.STARTED);
     const fail = {
       [ConfirmResult.REJECT]: [DeviceErrorCode.LOCAL_REJECTED, 'The person at this computer rejected this step'],
       [ConfirmResult.TIMEOUT]: [DeviceErrorCode.LOCAL_CONFIRM_TIMEOUT, `Nobody confirmed this step on the computer within ${timeoutSec} s — it needs a click at the computer (the owner requires it for risky steps)`],
       [ConfirmResult.UNAVAILABLE]: [DeviceErrorCode.LOCAL_CONFIRM_UNAVAILABLE, 'This step needs a confirmation at the computer, but no confirmation box could be shown there'],
+      [ConfirmResult.CANCELLED]: [DeviceErrorCode.CANCELLED, 'Cancelled while waiting for a confirmation at the computer — the step did not run'],
     }[result];
     throw new DeviceToolError(fail[0], fail[1]);
   };
 
-  const runCall = async (call, streamer) => {
+  const runCall = async (call, streamer, hooks) => {
     const tool = byName.get(call.tool);
     if (isRemotePaused()) return { tool, outcome: { ok: false, error: 'Remote control is paused on this device', error_code: DeviceErrorCode.KILL_SWITCH, duration_ms: 0 } };
     if (!tool) return { tool, outcome: { ok: false, error: `Unknown tool: ${call.tool}`, error_code: DeviceErrorCode.TOOL_UNKNOWN, duration_ms: 0 } };
@@ -475,6 +515,7 @@ export async function startRemoteClient(options = {}) {
     } catch (e) {
       return { tool, outcome: { ok: false, error: e.message, error_code: e.code || DeviceErrorCode.INVALID_ARGS, duration_ms: 0 } };
     }
+    hooks?.started?.();
     // Máy tính tổ chức: công cụ tệp chạy trong tiến trình của thành viên, không chạy bằng root (xem memberFsPool.mjs).
     const handler = host?.runsInWorker(call.tool)
       ? (args, ctx) => host.runFs(call.user_scope, call.tool, args, ctx)
@@ -491,6 +532,7 @@ export async function startRemoteClient(options = {}) {
   // Chống làm trùng khi BE gửi lại lô bước dở (xem idempotency.mjs).
   const runOnce = createIdempotentRunner(runCall, (name) => !!byName.get(name)?.read_only, {
     file: options.idemFile || REMOTE_IDEM_FILE,
+    deferStart: true,
     onDuplicate: (call) => say(chalk.gray(`  ↺ ${callLabel(call)}: đã làm ở lần gửi trước — trả lại kết quả cũ`)),
   });
 
@@ -552,6 +594,12 @@ export async function startRemoteClient(options = {}) {
   }));
   socket.on('connect', () => { serverKicks = 0; });
   socket.on('connect_error', guarded('connect_error', (err) => {
+    // Token cũ của máy (đã bị thay ở một lần xoay token mà máy này không làm) → có thể token bị chép: dừng + hướng dẫn ghép lại.
+    if (err?.message === 'DEVICE_TOKEN_RETIRED') {
+      console.log(chalk.red('❌ Token của máy này đã được đổi bởi một kết nối khác. Nếu không phải bạn, token có thể đã bị chép — chạy `aivin remote start --repair` để ghép lại (bản chép mất hiệu lực).'));
+      stopForGood();
+      return;
+    }
     if (err?.message === 'DEVICE_UNAUTHORIZED') {
       const replaced = !clearDeviceCredentials(creds.device_token);
       console.log(chalk.red(replaced
@@ -564,7 +612,7 @@ export async function startRemoteClient(options = {}) {
   }));
   socket.on(DeviceEvent.REPLACED, guarded(DeviceEvent.REPLACED, (payload) => {
     if (!payload?.by_instance || payload.by_instance === instance) return;
-    console.log(chalk.red('❌ Máy này vừa được mở nhận việc ở một cửa sổ hoặc máy khác — cửa sổ này dừng để hai bên không tranh nhau.'));
+    console.log(chalk.red('❌ Máy này vừa được mở nhận việc ở một cửa sổ hoặc máy khác — cửa sổ này dừng để hai bên không tranh nhau. Nếu không phải bạn, token có thể đã bị chép: chạy `aivin remote start --repair` để ghép lại.'));
     stopForGood();
   }));
   socket.on(DeviceEvent.REVOKED, guarded(DeviceEvent.REVOKED, () => {
@@ -586,7 +634,10 @@ export async function startRemoteClient(options = {}) {
     });
   }));
   socket.on(DeviceEvent.CANCEL, guarded(DeviceEvent.CANCEL, (payload) => {
-    if (Array.isArray(payload?.call_ids)) scheduler.cancel(payload.call_ids.filter((id) => typeof id === 'string'));
+    if (!Array.isArray(payload?.call_ids)) return;
+    const ids = payload.call_ids.filter((id) => typeof id === 'string');
+    scheduler.cancel(ids);
+    cancelGating(ids);
   }));
 
   // Lưới cuối: promise bị từ chối mà không ai bắt → ghi log, KHÔNG thoát (daemon phục vụ cả tổ chức, chết là mất mọi lời gọi đang chạy).
