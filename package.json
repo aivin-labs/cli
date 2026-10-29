@@ -11,6 +11,7 @@
     "format": "prettier --write .",
     "test": "node --test test/*.test.mjs",
     "build:binary": "bun scripts/build-binary.mjs",
+    "release:fetch": "node scripts/release-fetch.mjs",
     "sign:release": "node scripts/sign-release.mjs",
     "get:publish": "node scripts/publish-get.mjs",
     "get:rollout": "node scripts/rollout-get.mjs",

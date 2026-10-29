@@ -34,9 +34,9 @@ test('fs.list đệ quy và fs.grep (không ripgrep) không đi vào thư mục 
   assert.ok(!grep.matches.some((m) => /aivin-config|needle-dk/.test(`${m.path} ${m.text}`)), 'không lộ token qua tìm nội dung');
 });
 
-test('ripgrep: loại .aivin và tên thư mục AIVIN_REMOTE_HOME khi nó nằm trong vùng tìm', () => {
-  assert.deepEqual(protectedDirNamesUnder(base).sort(), ['.aivin', 'aivin-config']);
-  assert.deepEqual(protectedDirNamesUnder(sandboxDir()), ['.aivin']);
+test('ripgrep: loại .aivin, .aivin-release (khoá ký bản phát hành) và tên thư mục AIVIN_REMOTE_HOME khi nó nằm trong vùng tìm', () => {
+  assert.deepEqual(protectedDirNamesUnder(base).sort(), ['.aivin', '.aivin-release', 'aivin-config']);
+  assert.deepEqual(protectedDirNamesUnder(sandboxDir()), ['.aivin', '.aivin-release']);
 });
 
 test('fs.move: không đổi tên / ghi đè thư mục gốc; xoá / chuyển thư mục chứa token bị chặn', async () => {

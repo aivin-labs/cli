@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { REMOTE_CONFIG_DIR } from './deviceProfile.mjs';
 import { DeviceAccess } from './constants.mjs';
 import { loadDeviceCredentials } from './credentials.mjs';
-import { RESTART_EXIT_CODE } from '../selfUpdate.mjs';
+import { RESTART_EXIT_CODE, UPDATE_PENDING_FILE, UPDATE_ROLLBACK_FILE } from '../selfUpdate.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,6 +20,19 @@ const CLI_PATH = path.resolve(__dirname, '..', '..', 'cli.mjs');
 export const WINDOWS_TASK_NAME = 'Aivin Remote';
 export const WINDOWS_WATCHDOG_FILE = path.join(REMOTE_CONFIG_DIR, 'aivin-remote.vbs');
 const WINDOWS_TASK_XML_FILE = path.join(REMOTE_CONFIG_DIR, 'aivin-remote-task.xml');
+/** macOS / Linux: launchd / systemd chạy kịch bản này (một lần mỗi lần khởi động) thay vì chạy thẳng tệp chạy — để tự lùi bản ngoài tệp chạy. */
+export const POSIX_RUN_SCRIPT_FILE = path.join(REMOTE_CONFIG_DIR, 'aivin-remote-run.sh');
+const FAST_FAIL_FILE = path.join(REMOTE_CONFIG_DIR, 'update-fastfail.txt');
+/** Tự lùi bản ở trình giữ chạy: bản chờ xác nhận thoát lỗi trong chừng này giây, liên tiếp chừng này lần → trả `.prev` về. */
+export const SUPERVISOR_ROLLBACK = Object.freeze({ fastExitSec: 30, failures: 3 });
+
+/**
+ * Thông tin để trình giữ chạy tự lùi bản — chỉ cho tệp chạy đóng gói (bản npm không có `.prev`). Tự lùi ở NGOÀI tệp chạy bắt được cả bản mới
+ * sập ngay lúc nạp mã (trước khi checkBootAfterUpdate trong tệp chạy kịp chạy).
+ */
+function supervisorRollbackPaths(launch) {
+  return process.env.AIVIN_CLI_BINARY ? { exe: launch[0], pendingFile: UPDATE_PENDING_FILE, rollbackFile: UPDATE_ROLLBACK_FILE, fastFailFile: FAST_FAIL_FILE } : null;
+}
 
 /** Lệnh chạy CLI: tệp chạy đóng gói (bộ cài install.ps1 / install.sh) là chính nó; bản npm là `node cli.mjs`. */
 export function cliLaunchCommand() {
@@ -44,6 +57,7 @@ export function getAutoStartFilePath() {
 export function getAllAutoStartFilePaths() {
   const paths = [getAutoStartFilePath()];
   if (process.platform === 'win32') paths.push(WINDOWS_WATCHDOG_FILE, WINDOWS_TASK_XML_FILE);
+  else paths.push(POSIX_RUN_SCRIPT_FILE);
   if (process.platform === 'linux') {
     paths.push(path.join(os.homedir(), '.config', 'autostart', 'aivin-remote.desktop'));
   }
@@ -57,20 +71,56 @@ const xmlEscape = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').
  * thì về lại 10 s) rồi chạy lại. Trước 29/10/2026 tệp Startup chỉ chạy một lần lúc đăng nhập — daemon sập là máy offline tới lần đăng nhập sau.
  * Mã 75 (đã cài bản mới / đã tự lùi bản) → chạy lại sau 1 s, không giãn nhịp. Đặt AIVIN_SUPERVISOR cho tiến trình con: daemon biết có
  * trình giữ chạy, tự thoát để chuyển bản được (xem detectSupervisor).
+ * `rollback` (tệp chạy đóng gói): bản còn chờ xác nhận (có update-pending.txt) thoát lỗi trong < 30 s, 3 lần liền, mà còn `.prev` → đổi bản
+ * hỏng sang `.trash`, trả `.prev` về, ghi phiên bản vào update-rollback.txt (bản cũ đọc ở lần chạy sau, đưa vào danh sách bỏ qua).
  */
-export function windowsWatchdogScript(argv) {
+export function windowsWatchdogScript(argv, { rollback = null } = {}) {
   const cmd = argv.map((part) => `""${part}""`).join(' ');
+  const vbsStr = (s) => `"${String(s).replace(/"/g, '""')}"`;
+  const { fastExitSec, failures } = SUPERVISOR_ROLLBACK;
   return [
     "' Aivin Device Agent - keeps `aivin remote start` running in the background.",
     "' Exit code 0 = stopped on purpose (revoked, replaced, already running) -> stop; 75 = switch to the newly installed release -> restart now;",
-    "' anything else -> restart with backoff.",
+    "' anything else -> restart with backoff. A new release that keeps crashing right away is replaced by the previous one.",
     'Set sh = CreateObject("WScript.Shell")',
     `sh.Environment("Process").Item("${SUPERVISOR_ENV}") = "${Supervisor.WSCRIPT}"`,
+    ...(rollback ? [
+      'Set fso = CreateObject("Scripting.FileSystemObject")',
+      `exe = ${vbsStr(rollback.exe)}`,
+      `pending = ${vbsStr(rollback.pendingFile)}`,
+      `rollback = ${vbsStr(rollback.rollbackFile)}`,
+      'fast = 0',
+    ] : []),
     'delay = 10',
     'Do',
     '  started = Now',
     `  rc = sh.Run("${cmd}", 0, True)`,
     '  If rc = 0 Then Exit Do',
+    ...(rollback ? [
+      `  If rc <> ${RESTART_EXIT_CODE} And DateDiff("s", started, Now) < ${fastExitSec} And fso.FileExists(pending) And fso.FileExists(exe & ".prev") Then`,
+      '    fast = fast + 1',
+      '  Else',
+      '    fast = 0',
+      '  End If',
+      `  If fast >= ${failures} Then`,
+      '    fast = 0',
+      '    On Error Resume Next',
+      '    Set t = fso.OpenTextFile(pending, 1)',
+      '    ver = t.ReadLine',
+      '    t.Close',
+      '    fso.MoveFile exe, exe & "-" & CLng(Timer * 100) & ".trash"',
+      '    If Err.Number = 0 Then fso.MoveFile exe & ".prev", exe',
+      '    If Err.Number = 0 Then',
+      '      Set t = fso.CreateTextFile(rollback, True)',
+      '      t.WriteLine ver',
+      '      t.Close',
+      '      fso.DeleteFile pending, True',
+      '    End If',
+      '    Err.Clear',
+      '    On Error GoTo 0',
+      `    rc = ${RESTART_EXIT_CODE}`,
+      '  End If',
+    ] : []),
     `  If rc = ${RESTART_EXIT_CODE} Then`,
     '    WScript.Sleep 1000',
     '  Else',
@@ -81,6 +131,53 @@ export function windowsWatchdogScript(argv) {
     '  End If',
     'Loop',
   ].join('\r\n') + '\r\n';
+}
+
+/**
+ * macOS / Linux: kịch bản sh launchd / systemd chạy mỗi lần khởi động (chúng tự chạy lại khi mã thoát khác 0). Đặt AIVIN_SUPERVISOR, chạy
+ * daemon một lần, rồi — với tệp chạy đóng gói — tự lùi bản như VBS (đếm lần sập nhanh liên tiếp trong tệp, vì mỗi lần là một tiến trình mới).
+ */
+export function posixRunScript(argv, { supervisor, rollback = null }) {
+  const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+  const { fastExitSec, failures } = SUPERVISOR_ROLLBACK;
+  return [
+    '#!/bin/sh',
+    '# Aivin Device Agent - runs `aivin remote start` once; launchd / systemd restart it on a non-zero exit (75 = switch release).',
+    '# A new release that crashes right away, several times in a row, while still unconfirmed is replaced by the previous one.',
+    `${SUPERVISOR_ENV}=${q(supervisor)}`,
+    `export ${SUPERVISOR_ENV}`,
+    ...(rollback ? [
+      `BIN=${q(rollback.exe)}`,
+      `PENDING=${q(rollback.pendingFile)}`,
+      `ROLLBACK=${q(rollback.rollbackFile)}`,
+      `FAST=${q(rollback.fastFailFile)}`,
+      'started=$(date +%s)',
+    ] : []),
+    argv.map(q).join(' '),
+    'rc=$?',
+    ...(rollback ? [
+      'elapsed=$(( $(date +%s) - started ))',
+      `if [ "$rc" -ne 0 ] && [ "$rc" -ne ${RESTART_EXIT_CODE} ] && [ "$elapsed" -lt ${fastExitSec} ] && [ -f "$PENDING" ] && [ -f "$BIN.prev" ]; then`,
+      '  n=$(( $(cat "$FAST" 2>/dev/null || echo 0) + 1 ))',
+      `  if [ "$n" -ge ${failures} ]; then`,
+      '    if mv -f "$BIN.prev" "$BIN"; then head -n 1 "$PENDING" > "$ROLLBACK"; rm -f "$PENDING"; fi',
+      '    rm -f "$FAST"',
+      `    exit ${RESTART_EXIT_CODE}`,
+      '  fi',
+      '  echo "$n" > "$FAST"',
+      'else',
+      '  rm -f "$FAST"',
+      'fi',
+    ] : []),
+    'exit "$rc"',
+  ].join('\n') + '\n';
+}
+
+function writePosixRunScript(argv, supervisor, launch) {
+  fs.mkdirSync(path.dirname(POSIX_RUN_SCRIPT_FILE), { recursive: true });
+  fs.writeFileSync(POSIX_RUN_SCRIPT_FILE, posixRunScript(argv, { supervisor, rollback: supervisorRollbackPaths(launch) }), { mode: 0o755 });
+  fs.chmodSync(POSIX_RUN_SCRIPT_FILE, 0o755);
+  return ['/bin/sh', POSIX_RUN_SCRIPT_FILE];
 }
 
 /** Biến môi trường trình giữ chạy của Aivin đặt cho daemon. */
@@ -191,8 +288,9 @@ function windowsTaskExists() {
 }
 
 /** Windows: tác vụ Task Scheduler chạy kịch bản giữ chạy; máy chặn tạo tác vụ (chính sách công ty) → chép kịch bản vào thư mục Startup. */
-function enableWindows(argv) {
-  writeUtf16(WINDOWS_WATCHDOG_FILE, windowsWatchdogScript(argv));
+function enableWindows(argv, launch) {
+  const script = windowsWatchdogScript(argv, { rollback: supervisorRollbackPaths(launch) });
+  writeUtf16(WINDOWS_WATCHDOG_FILE, script);
   const startupFile = getAutoStartFilePath();
   try {
     writeUtf16(WINDOWS_TASK_XML_FILE, windowsTaskXml({ userId: windowsUserId(), watchdogFile: WINDOWS_WATCHDOG_FILE }));
@@ -200,7 +298,7 @@ function enableWindows(argv) {
     fs.rmSync(startupFile, { force: true });
     return { filePath: `Task Scheduler: ${WINDOWS_TASK_NAME}`, method: 'task' };
   } catch (e) {
-    writeUtf16(startupFile, windowsWatchdogScript(argv));
+    writeUtf16(startupFile, script);
     return { filePath: startupFile, method: 'startup', warning: `Không tạo được tác vụ Task Scheduler (${String(e?.stderr || e?.message || e).trim()}) — dùng thư mục Startup` };
   } finally {
     fs.rmSync(WINDOWS_TASK_XML_FILE, { force: true });
@@ -223,11 +321,12 @@ export function enableAutoStart(options = {}) {
   fs.mkdirSync(REMOTE_CONFIG_DIR, { recursive: true });
 
   if (process.platform === 'win32') {
-    extra = enableWindows(argv);
+    extra = enableWindows(argv, launch);
     filePath = extra.filePath;
   } else if (process.platform === 'darwin') {
-    // macOS: LaunchAgent, chỉ chạy lại khi thoát bất thường (mã khác 0).
+    // macOS: LaunchAgent chạy kịch bản sh (tự lùi bản ngoài tệp chạy), chỉ chạy lại khi thoát bất thường (mã khác 0).
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const runArgv = writePosixRunScript(argv, Supervisor.LAUNCHD, launch);
     const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -236,7 +335,7 @@ export function enableAutoStart(options = {}) {
     <string>com.aivin.remote</string>
     <key>ProgramArguments</key>
     <array>
-${argv.map((part) => `        <string>${xmlEscape(part)}</string>`).join('\n')}
+${runArgv.map((part) => `        <string>${xmlEscape(part)}</string>`).join('\n')}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -261,16 +360,18 @@ ${argv.map((part) => `        <string>${xmlEscape(part)}</string>`).join('\n')}
 `;
     fs.writeFileSync(filePath, plistContent, 'utf8');
   } else {
-    // Linux: dịch vụ người dùng systemd (chạy lại khi thoát bất thường) + tệp XDG autostart cho máy không bật systemd user session.
+    // Linux: dịch vụ người dùng systemd chạy kịch bản sh (chạy lại khi thoát bất thường, tự lùi bản) + tệp XDG autostart cho máy không bật
+    // systemd user session (chạy thẳng, không có trình giữ chạy → không tự chuyển bản).
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const execLine = argv.map((part) => `"${part}"`).join(' ');
+    const runLine = writePosixRunScript(argv, Supervisor.SYSTEMD, launch).map((part) => `"${part}"`).join(' ');
     const serviceContent = `[Unit]
 Description=AIVIN Remote Control Daemon
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${execLine}
+ExecStart=${runLine}
 Restart=on-failure
 RestartSec=10
 Environment=${SUPERVISOR_ENV}=${Supervisor.SYSTEMD}

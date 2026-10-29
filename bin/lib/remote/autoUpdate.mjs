@@ -1,4 +1,7 @@
-import { UpdateStatus, compareVersions, currentCliVersion, installUpdate, installedNewerThanRunning, loadUpdateSettings, parseVersion, tagOf } from '../selfUpdate.mjs';
+import {
+  UpdateStatus, compareVersions, currentCliVersion, installUpdate, installedNewerThanRunning, loadUpdateSettings, parseVersion, recordCheck, tagOf,
+  versionList,
+} from '../selfUpdate.mjs';
 
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
@@ -12,15 +15,18 @@ const MINUTE = 60_000;
  *   thoát mã 75, trình giữ chạy mở lại bằng bản mới. 10 phút: khoảng nghỉ giữa các bước của một nhiệm vụ (lượt Planner, chờ người duyệt trên
  *   web) không bị coi là rảnh;
  * - không có trình giữ chạy (cửa sổ chạy tay, script riêng): báo một lần "đóng, chạy lại" — không tự thoát.
- * `setMinVersion` (BE báo trong ack của HELLO): bản đang chạy cũ hơn → kiểm trong vài phút (rải ngẫu nhiên: BE khởi động lại thì mọi máy
- * cùng nối lại), bỏ qua đợt phát hành.
+ * `setServerHints` (BE báo trong ack của HELLO — chỉ là gợi ý, không chọn được nguồn / tệp):
+ * - `min_version`: bản đang chạy cũ hơn → kiểm trong vài phút (rải ngẫu nhiên: BE khởi động lại thì mọi máy cùng nối lại), bỏ qua đợt;
+ * - `latest_version`: bản mới nhất BE biết (đặt lúc phát hành) — trang tải báo thấp hơn = trang tải bị chặn / tráo / cache cũ ("đóng băng"
+ *   máy ở bản có lỗ hổng) → cảnh báo một lần + báo lại trong hồ sơ máy;
+ * - `hold_versions`: bản đang bị hoãn (nhiều máy tự lùi khỏi) → không cài, đã tải rồi thì không chuyển sang.
  * Tắt: `aivin update --auto off`, `--no-auto-update`, hoặc AIVIN_AUTO_UPDATE=0 — khi tắt chỉ nhắc, không tải gì.
  */
 export function createAutoUpdater({
   enabled = true, supervised = false, isIdle = () => true, lastActivityAt = () => 0, onRestart = () => {}, say = () => {}, deviceId,
   checkEveryMs = 6 * HOUR, firstCheckMs = 2 * MINUTE + Math.floor(Math.random() * 3 * MINUTE), tickMs = 30_000, idleGraceMs = 10 * MINUTE,
   retryMs = HOUR, urgentGapMs = 10 * MINUTE, urgentJitterMs = 5 * MINUTE,
-  install = installUpdate, settings = loadUpdateSettings, installedNewer = installedNewerThanRunning, current = currentCliVersion(),
+  install = installUpdate, settings = loadUpdateSettings, installedNewer = installedNewerThanRunning, record = recordCheck, current = currentCliVersion(),
   now = Date.now, random = Math.random,
 } = {}) {
   let nextCheckAt = now() + firstCheckMs;
@@ -29,6 +35,8 @@ export function createAutoUpdater({
   let lastBusyAt = now();
   let restarting = false;
   let minVersion = null;
+  let serverLatest = null;
+  let holdVersions = [];
   let urgent = false;
   let lastUrgentAt = -Infinity;
   const notices = new Set();
@@ -40,6 +48,14 @@ export function createAutoUpdater({
   const jitter = (ms) => Math.round(ms * (0.8 + random() * 0.4));
   const restartHint = 'đóng cửa sổ này và chạy lại `aivin remote start` để dùng bản mới';
 
+  const noteSiteBehind = (siteLatest) => {
+    const behind = !!serverLatest && compareVersions(siteLatest, serverLatest) < 0;
+    if (behind) {
+      noticeOnce(`behind:${siteLatest}:${serverLatest}`, `⚠️  Trang tải báo bản mới nhất là ${siteLatest} nhưng máy chủ Aivin biết đã có ${serverLatest} — trang tải có thể đang bị chặn hoặc lỗi; máy này có thể đang kẹt ở bản cũ.`);
+    }
+    return behind;
+  };
+
   const check = async () => {
     if (!settings().auto) {
       nextCheckAt = now() + checkEveryMs;
@@ -47,8 +63,9 @@ export function createAutoUpdater({
       return;
     }
     try {
-      const res = await install({ deviceId, urgent: urgent && !!minVersion && compareVersions(current, minVersion) < 0 });
+      const res = await install({ deviceId, urgent: urgent && !!minVersion && compareVersions(current, minVersion) < 0, holdVersions });
       nextCheckAt = now() + jitter(checkEveryMs);
+      record({ siteLatest: res.latest, siteBehind: noteSiteBehind(res.latest) });
       if (res.status === UpdateStatus.INSTALLED) {
         ready = res.latest;
         notices.add(`ready:${ready}`);
@@ -57,9 +74,12 @@ export function createAutoUpdater({
         noticeOnce(`npm:${res.latest}`, `⬆  Có aivin ${res.latest} (máy này ${res.current}) — cập nhật: npm i -g @aivin-labs/cli@latest`);
       } else if (res.status === UpdateStatus.SKIPPED) {
         noticeOnce(`skip:${res.latest}`, `   (bỏ qua aivin ${res.latest}: máy này đã tự lùi khỏi bản đó vì khởi động hỏng — cài lại: aivin update --to ${res.latest})`);
+      } else if (res.status === UpdateStatus.HELD) {
+        noticeOnce(`held:${res.latest}`, `   (aivin ${res.latest} đang được máy chủ tạm hoãn — giữ bản ${res.current})`);
       }
     } catch (e) {
       nextCheckAt = now() + retryMs;
+      record({ error: e?.message || String(e) });
       noticeOnce(`err:${e?.message}`, `   (chưa cập nhật được: ${e?.message || e} — thử lại sau)`);
     }
   };
@@ -69,6 +89,7 @@ export function createAutoUpdater({
     if (!isIdle()) lastBusyAt = now();
     ready = ready || installedNewer();
     if (ready) {
+      if (holdVersions.includes(tagOf(ready))) return;
       if (!supervised) return noticeOnce(`ready:${ready}`, `⬆  Đã cài aivin ${ready} — ${restartHint}.`);
       if (!isIdle() || now() - Math.max(lastBusyAt, Number(lastActivityAt()) || 0) < idleGraceMs) return;
       restarting = true;
@@ -82,18 +103,27 @@ export function createAutoUpdater({
   const timer = enabled ? setInterval(() => { void tick(); }, tickMs) : null;
   timer?.unref?.();
 
+  /** BE yêu cầu bản tối thiểu: máy cũ hơn → kiểm trong `urgentJitterMs` (tối đa một lần / `urgentGapMs`), bỏ qua đợt phát hành. */
+  const setMinVersion = (version) => {
+    if (!enabled || !parseVersion(version) || compareVersions(current, version) >= 0) return;
+    minVersion = version;
+    urgent = true;
+    if (now() - lastUrgentAt < urgentGapMs) return;
+    lastUrgentAt = now();
+    nextCheckAt = Math.min(nextCheckAt, now() + Math.floor(random() * urgentJitterMs));
+  };
+
   return {
     tick,
-    /** BE yêu cầu bản tối thiểu: máy cũ hơn → kiểm trong `urgentJitterMs` (tối đa một lần / `urgentGapMs`), bỏ qua đợt phát hành. */
-    setMinVersion(version) {
-      if (!enabled || !parseVersion(version) || compareVersions(current, version) >= 0) return;
-      minVersion = version;
-      urgent = true;
-      if (now() - lastUrgentAt < urgentGapMs) return;
-      lastUrgentAt = now();
-      nextCheckAt = Math.min(nextCheckAt, now() + Math.floor(random() * urgentJitterMs));
+    setMinVersion,
+    /** Gợi ý từ ack của `device:hello` (`hello.cli`) — xem đầu tệp. */
+    setServerHints(hints) {
+      if (!hints || typeof hints !== 'object') return;
+      holdVersions = versionList(hints.hold_versions);
+      serverLatest = parseVersion(hints.latest_version) ? tagOf(hints.latest_version) : null;
+      if (typeof hints.min_version === 'string') setMinVersion(hints.min_version);
     },
     close() { if (timer) clearInterval(timer); },
-    state: () => ({ ready, nextCheckAt, minVersion, checking: !!checking }),
+    state: () => ({ ready, nextCheckAt, minVersion, serverLatest, holdVersions, checking: !!checking }),
   };
 }

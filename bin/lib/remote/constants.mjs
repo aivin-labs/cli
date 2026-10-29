@@ -53,6 +53,8 @@ export const DeviceEvent = Object.freeze({
   ROTATED: 'device:rotated',
   /** CLI → BE (vừa nối): xin danh sách theo dõi của máy (ack `{ watches }`). */
   WATCHES: 'device:watches',
+  /** CLI → BE (29/10/2026): sắp thoát để chuyển sang bản CLI vừa tự cập nhật — `{ reason, version, expect_back_ms }`; máy sẽ nối lại ngay. */
+  RESTARTING: 'device:restarting',
 });
 
 /** Năng lực BE báo trong ack của `device:hello` (`features`). */

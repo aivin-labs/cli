@@ -77,8 +77,10 @@ export function isRootPath(roots, absolute) {
 /**
  * Thư mục cấu hình Aivin (`~/.aivin` + `AIVIN_REMOTE_HOME`): token thiết bị, API key của CLI, hồ sơ trình duyệt `aivin browser` (cookie
  * đăng nhập). Chặn kể cả khi người dùng cho phép cả thư mục nhà (`--dir ~`) — lộ ra là chiếm được tài khoản / phiên web của chủ máy.
+ * `~/.aivin-release` (29/10/2026): chỗ mặc định giữ khoá ký bản phát hành CLI (scripts/release-key.mjs) — máy của người phát hành mà ghép
+ * toàn quyền thì agent bị lừa đọc được khoá là ký được bản độc cho mọi máy đã cài.
  */
-const PROTECTED_DIRS = [...new Set([REMOTE_CONFIG_DIR, path.join(os.homedir(), '.aivin')].map((d) => path.resolve(d)))];
+const PROTECTED_DIRS = [...new Set([REMOTE_CONFIG_DIR, path.join(os.homedir(), '.aivin'), path.join(os.homedir(), '.aivin-release')].map((d) => path.resolve(d)))];
 
 let protectedReal;
 
@@ -103,7 +105,7 @@ export function containsProtectedPath(absolute) {
 export function protectedDirNamesUnder(base) {
   protectedReal ??= PROTECTED_DIRS.map(realpathNearest);
   const real = realpathNearest(base);
-  const names = new Set(['.aivin']);
+  const names = new Set(['.aivin', '.aivin-release']);
   for (const dir of protectedReal) if (dir !== real && isInside(real, dir)) names.add(path.basename(dir));
   return [...names];
 }
@@ -185,8 +187,8 @@ const CATASTROPHIC_COMMANDS = [
   /\bdiskpart\b/i,
 ];
 
-/** Lệnh nhắc tới thư mục cấu hình Aivin (`.aivin` như một đoạn đường dẫn, hoặc đường tuyệt đối của `AIVIN_REMOTE_HOME`). */
-const AIVIN_DIR_SEGMENT = /(?:^|[\\/\s'"`~=:(;,|&])\.aivin(?=[\\/\s'"`);,|&]|$)/i;
+/** Lệnh nhắc tới thư mục cấu hình Aivin / khoá ký (`.aivin`, `.aivin-release` như một đoạn đường dẫn, hoặc đường tuyệt đối của `AIVIN_REMOTE_HOME`). */
+const AIVIN_DIR_SEGMENT = /(?:^|[\\/\s'"`~=:(;,|&])\.aivin(?:-release)?(?=[\\/\s'"`);,|&]|$)/i;
 
 function mentionsProtectedDir(command) {
   if (AIVIN_DIR_SEGMENT.test(command)) return true;

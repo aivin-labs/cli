@@ -6,6 +6,10 @@
 #
 # get.aivin.vn (deploy/get, `npm run get:publish` on the host behind Cloudflare) is the primary download site. This
 # GitHub Release is the mirror: installers accept AIVIN_DOWNLOAD_BASE=https://github.com/aivin-labs/cli/releases/latest/download.
+#
+# These CI builds (clean `npm ci` from the lockfile) are also what gets signed for self-update - the release signing key never
+# enters CI: on the signing machine, `npm run release:fetch -- <tag>` pulls them into dist/, then `npm run sign:release` and
+# `npm run get:publish`. This GitHub Release carries no SHA256SUMS.sig, so installed CLIs never self-update from it.
 name: release
 
 on:
@@ -24,8 +28,14 @@ env:
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
+  # Self-update swaps the running binary differently per OS (Windows renames the locked .exe, macOS/Linux rename atomically) and the
+  # supervisor scripts differ (VBS vs sh) - run the suite on all three, not only Linux.
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,6 +46,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Tag must match package.json version
+        shell: bash
         run: |
           PKG="v$(node -p "require('./package.json').version")"
           [ "$PKG" = "$TAG" ] || { echo "Tag $TAG does not match package.json $PKG"; exit 1; }

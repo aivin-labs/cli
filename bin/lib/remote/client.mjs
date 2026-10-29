@@ -34,7 +34,7 @@ import { HOME_BASE, SHARED_DIR, createMultiUserHost, isMultiUserMode } from './m
 import { createAutoUpdater } from './autoUpdate.mjs';
 import {
   BootAction, MAX_BOOTS_BEFORE_ROLLBACK, RESTART_EXIT_CODE, UPDATE_CONFIRM_AFTER_MS, UPDATE_ROLLED_BACK, checkBootAfterUpdate, cleanupRetired, clearStaleInstalledMarker,
-  confirmUpdate, isStandaloneBinary, noteCleanExit,
+  confirmUpdate, ingestSupervisorRollback, isStandaloneBinary, noteCleanExit, updateProfile,
 } from '../selfUpdate.mjs';
 import { detectSupervisor } from './autoStart.mjs';
 
@@ -48,6 +48,9 @@ const EMBED_TIMEOUT_MS = 60_000;
 const PAUSE_POLL_MS = 2000;
 /** Chờ BE xác nhận đã nhận một kết quả (BE có `resume`) — quá hạn thì giữ kết quả trên đĩa, gửi lại khi nối lại. */
 const RESULT_ACK_TIMEOUT_MS = 15_000;
+/** Tự cập nhật: báo BE "sắp khởi động lại để chuyển bản" (chờ ack tối đa bấy nhiêu), và máy dự kiến quay lại trong bấy nhiêu. */
+const RESTARTING_ACK_TIMEOUT_MS = 2_000;
+const RESTART_EXPECT_BACK_MS = 30_000;
 
 /** Gom đoạn stdout/stderr của một lời gọi, đẩy lên theo nhịp (không bắn mỗi dòng một gói). */
 function createStreamer(socket, callId) {
@@ -160,7 +163,14 @@ export async function startRemoteClient(options = {}) {
   // khi chạy ổn thì trả bản cũ trước khi đụng tới gì khác. Máy tính tổ chức: phiên bản do ảnh container quyết, không tự đổi.
   const selfManaged = !multiUser && isStandaloneBinary();
   const supervisor = multiUser ? null : detectSupervisor({ quiet });
+  const autoUpdateEnabled = !multiUser && options.autoUpdate !== false && process.env.AIVIN_AUTO_UPDATE !== '0';
   if (selfManaged) {
+    // Trình giữ chạy (VBS / kịch bản sh) đã tự lùi bản mới vì nó sập ngay khi khởi động → bản này (bản cũ) ghi nhận, bỏ qua bản lỗi.
+    const supervisorRollback = ingestSupervisorRollback();
+    if (supervisorRollback) {
+      logActivity({ type: 'self_update_rollback', version: supervisorRollback, by: 'supervisor' });
+      say(chalk.yellow(`↩  aivin ${supervisorRollback} sập ngay khi khởi động — đã trả về bản này và sẽ bỏ qua ${supervisorRollback}.`));
+    }
     const boot = checkBootAfterUpdate();
     if (boot.action === BootAction.ROLLED_BACK) {
       releaseLock();
@@ -195,7 +205,9 @@ export async function startRemoteClient(options = {}) {
     // Tệp lớn qua HTTP thẳng (fs.upload / fs.download, công cụ BE-only nên BE biết qua cờ này) — máy tính tổ chức không có.
     ...(multiUser ? {} : { direct_transfer: true }),
     // Sàn luật tại máy (localPolicy.mjs): BE biết việc nào sẽ phải chờ người bấm trên máy — máy tính tổ chức không có người ngồi trước máy.
-    ...(multiUser ? {} : { local_confirm: loadLocalPolicy().confirm }),
+    ...(multiUser ? {} : { local_confirm: policyGuard.read().confirm }),
+    // Tình trạng tự cập nhật (BE gom lại thấy cả đội máy, tự hoãn bản nhiều máy phải lùi) — làm mới mỗi lần chào lại máy chủ.
+    ...(multiUser ? {} : { update: updateProfile({ enabled: autoUpdateEnabled }) }),
   };
   let creds;
   try {
@@ -374,16 +386,20 @@ export async function startRemoteClient(options = {}) {
 
   // Tự cập nhật (autoUpdate.mjs): tệp chạy đóng gói + bản npm (chỉ nhắc). Máy tính tổ chức: tắt.
   updater = createAutoUpdater({
-    enabled: !multiUser && options.autoUpdate !== false && process.env.AIVIN_AUTO_UPDATE !== '0',
+    enabled: autoUpdateEnabled,
     // Chỉ tự thoát để chuyển bản khi chắc có trình giữ chạy mở lại (detectSupervisor) — không thì chỉ nhắc.
     supervised: !!supervisor && options.handleSignals !== false,
     deviceId: creds.device_id,
     isIdle: () => activeCalls === 0 && !processes.hasRunning?.() && !(browserTunnels?.liveCount() > 0),
     lastActivityAt: () => lastActivityAt,
     say: (m) => say(chalk.cyan(m)),
-    onRestart: (version) => {
+    onRestart: async (version) => {
       logActivity({ type: 'self_update', version });
       console.log(chalk.cyan(`⬆  Chuyển sang aivin ${version} — khởi động lại.`));
+      // Báo máy chủ trước khi rớt: máy sắp quay lại (không phải mất máy) — BE cũ không biết sự kiện này, hết 2 s thì thôi.
+      if (socket.connected) {
+        await socket.timeout(RESTARTING_ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.RESTARTING, { reason: 'update', version, expect_back_ms: RESTART_EXPECT_BACK_MS }).catch(() => null);
+      }
       Promise.resolve(stop()).finally(() => process.exit(RESTART_EXIT_CODE));
     },
   });
@@ -422,6 +438,7 @@ export async function startRemoteClient(options = {}) {
 
   const announce = async () => {
     try {
+      if (!multiUser) profile.update = updateProfile({ enabled: autoUpdateEnabled });
       const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash, inflight: ledger.heldIds() });
       serverResume = Array.isArray(hello?.features) && hello.features.includes(ServerFeature.RESUME);
       // Việc máy còn giữ mà BE không còn chờ (đã huỷ / hết giờ lúc máy mất mạng — lệnh huỷ không tới được máy): dừng ngay, bỏ kết quả.
@@ -434,7 +451,7 @@ export async function startRemoteClient(options = {}) {
       }
       if (typeof hello?.rotate_token === 'string' && !envCreds) await rotateToken(hello.rotate_token);
       // BE cần bản CLI tối thiểu (tính năng mới phía máy) → kiểm cập nhật ngay thay vì chờ tới lượt.
-      if (typeof hello?.cli?.min_version === 'string') updater?.setMinVersion(hello.cli.min_version);
+      if (hello?.cli) updater?.setServerHints(hello.cli);
       if (hello?.need_catalog) await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CATALOG, { catalog_hash: hash, tools: catalog });
       // BE mới tính vector cho tệp tài liệu (tìm theo nghĩa); BE cũ không báo → chỉ tìm theo từ khoá.
       if (fileIndex && Array.isArray(hello?.features) && hello.features.includes(ServerFeature.EMBED)) fileIndex.setEmbedder(embedTexts);
