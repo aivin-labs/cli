@@ -5,7 +5,12 @@ import chalk from 'chalk';
 import { io } from 'socket.io-client';
 import { DEFAULT_AIVIN_BASE_URL } from '../context.mjs';
 import { logActivity } from './activityLog.mjs';
-import { DEFAULT_SCOPE_LIMITS, DEVICE_NAMESPACE, DeviceAccess, DeviceErrorCode, DeviceEvent, MAX_RESULT_BYTES, PROTOCOL_VERSION, ServerFeature } from './constants.mjs';
+import { DEFAULT_SCOPE_LIMITS, DEVICE_NAMESPACE, DeviceAccess, DeviceErrorCode, DeviceEvent, MAX_RESULT_BYTES, PROTOCOL_VERSION, REMOTE_IDEM_FILE, REMOTE_OUTBOX_FILE, ServerFeature } from './constants.mjs';
+import { CallState, createCallLedger } from './callLedger.mjs';
+import { configureProxy, proxyAgentFor } from './netProxy.mjs';
+import { createKeepAwake } from './keepAwake.mjs';
+import { describeCall, evaluateLocalPolicy, loadLocalPolicy } from './localPolicy.mjs';
+import { ConfirmResult, createLocalConfirmer } from './localConfirm.mjs';
 import { clearDeviceCredentials, credentialsFromEnv, listDevices, loadDeviceCredentials, pairDevice, pairDeviceWithCode, saveDeviceCredentials } from './credentials.mjs';
 import { ensureMemoryLoaded, memoryStats, stopWatchingMemory, watchMemoryDir } from './deviceMemory.mjs';
 import { buildCatalog, buildDeviceProfile } from './deviceProfile.mjs';
@@ -13,7 +18,7 @@ import { createFileIndex, indexRootsFor } from './fileIndexer.mjs';
 import { createScheduler } from './scheduler.mjs';
 import { acquireDaemonLock } from './daemonLock.mjs';
 import { randomUUID } from 'crypto';
-import { fullAccessRoots, isRemotePaused } from './sandbox.mjs';
+import { DeviceToolError, fullAccessRoots, isRemotePaused } from './sandbox.mjs';
 import { buildTools, toolMap } from './toolHandlers.mjs';
 import { createBrowserTunnels, detectLocalBrowser } from './browserTunnel.mjs';
 import { createGuiController, detectGui } from './gui/index.mjs';
@@ -35,8 +40,8 @@ const ACK_TIMEOUT_MS = 10_000;
 const EMBED_TIMEOUT_MS = 60_000;
 /** Kiểm công tắc tạm dừng (`aivin remote pause` ở cửa sổ khác) bấy nhiêu lâu một lần. */
 const PAUSE_POLL_MS = 2000;
-/** Giữ tối đa bấy nhiêu kết quả làm xong lúc mất kết nối (gửi khi nối lại). */
-const MAX_UNSENT_RESULTS = 200;
+/** Chờ BE xác nhận đã nhận một kết quả (BE có `resume`) — quá hạn thì giữ kết quả trên đĩa, gửi lại khi nối lại. */
+const RESULT_ACK_TIMEOUT_MS = 15_000;
 
 /** Gom đoạn stdout/stderr của một lời gọi, đẩy lên theo nhịp (không bắn mỗi dòng một gói). */
 function createStreamer(socket, callId) {
@@ -74,6 +79,7 @@ export function isValidDeviceCall(call) {
   if (call.timeout_ms !== undefined && call.timeout_ms !== null && !Number.isFinite(call.timeout_ms)) return false;
   if (call.user_scope !== undefined && call.user_scope !== null && typeof call.user_scope !== 'string') return false;
   if (call.idem_key !== undefined && call.idem_key !== null && (typeof call.idem_key !== 'string' || call.idem_key.length > 80)) return false;
+  if (call.purpose !== undefined && call.purpose !== null && typeof call.purpose !== 'string') return false;
   return true;
 }
 
@@ -128,6 +134,8 @@ export async function startRemoteClient(options = {}) {
   if (multiUser && process.platform === 'win32') throw new Error('--multi-user chỉ chạy trên Linux (container máy tính tổ chức).');
   const saved = envCreds || loadDeviceCredentials();
   const serverUrl = resolveServerUrl(options, saved);
+  // Trước mọi lời gọi mạng (ghép máy cũng đi qua proxy).
+  const proxy = configureProxy({ explicit: options.proxy });
   const apiKey = options.apiKey ?? process.env.API_KEY;
   const rootsGiven = Boolean(options.dir) && !multiUser;
   // Toàn quyền: chủ máy chọn lúc kết nối (`--full-access`), giữ qua các lần khởi động lại; `--dir` tường minh thì về chế độ một thư mục.
@@ -156,6 +164,8 @@ export async function startRemoteClient(options = {}) {
     ...(multiUser ? {} : { watch: true }),
     // Tệp lớn qua HTTP thẳng (fs.upload / fs.download, công cụ BE-only nên BE biết qua cờ này) — máy tính tổ chức không có.
     ...(multiUser ? {} : { direct_transfer: true }),
+    // Sàn luật tại máy (localPolicy.mjs): BE biết việc nào sẽ phải chờ người bấm trên máy — máy tính tổ chức không có người ngồi trước máy.
+    ...(multiUser ? {} : { local_confirm: loadLocalPolicy().confirm }),
   };
   let creds;
   try {
@@ -174,7 +184,7 @@ export async function startRemoteClient(options = {}) {
   watchMemoryDir();
   const fileIndex = multiUser ? null : createFileIndex(indexRootsFor(roots, fullAccess));
   const useDailyBrowser = options.separateBrowser !== true;
-  const browserTunnels = browser ? createBrowserTunnels({ serverUrl, deviceToken: creds.device_token, browser, useDailyBrowser, say: (m) => say(chalk.cyan(m)) }) : null;
+  const browserTunnels = browser ? createBrowserTunnels({ serverUrl, deviceToken: () => creds.device_token, browser, useDailyBrowser, say: (m) => say(chalk.cyan(m)) }) : null;
   // Một tiến trình host chung cho giao diện + Office (chỉ dựng khi lời gọi đầu tiên cần).
   const winHost = guiProfile || officeApps.length ? createWindowsHost() : null;
   const gui = guiProfile ? createGuiController({ fullAccess, host: winHost, say: (m) => say(chalk.magenta(m)) }) : null;
@@ -182,6 +192,19 @@ export async function startRemoteClient(options = {}) {
   const undo = multiUser ? null : createUndoStore();
   void undo?.cleanup().catch(() => undefined);
   const processes = createProcessManager();
+  // Giữ máy không tự ngủ khi đang có việc (keepAwake.mjs) — máy tính tổ chức (container) không cần.
+  const keepAwake = createKeepAwake({
+    enabled: !multiUser && options.keepAwake !== false && process.env.AIVIN_REMOTE_KEEP_AWAKE !== '0',
+    say: (m) => say(chalk.gray(`   ${m}`)),
+  });
+  let procAwake = false;
+  const syncProcAwake = () => {
+    const running = !!processes.hasRunning?.();
+    if (running === procAwake) return;
+    procAwake = running;
+    if (running) keepAwake.hold();
+    else keepAwake.release();
+  };
   const schedules = multiUser ? null : createScheduleManager({ undo });
   // Sự kiện của theo dõi đi lên BE qua socket (đã nối) — `socket` được tạo ngay bên dưới, sự kiện chỉ có sau khi BE đặt danh sách.
   const watches = multiUser ? null : createWatchManager({
@@ -189,13 +212,16 @@ export async function startRemoteClient(options = {}) {
     emit: (payload) => { if (socket?.connected) socket.emit(DeviceEvent.EVENT, payload); },
   });
   // Tệp lớn đi HTTP thẳng với vé của BE (fs.upload / fs.download) — máy tính tổ chức không có (gửi HTTP chạy bằng tài khoản của daemon).
-  const transfer = multiUser ? null : { serverUrl, deviceToken: creds.device_token };
+  const transfer = multiUser ? null : { serverUrl, deviceToken: () => creds.device_token };
   const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: winHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer };
   const host = multiUser ? createMultiUserHost({ baseEnv: env, say: (m) => say(chalk.gray(m)) }) : null;
   host?.start();
   const tools = buildTools(env);
   const byName = toolMap(tools);
-  const { catalog, hash } = buildCatalog(tools);
+  // Công cụ chủ máy tắt (`aivin remote policy deny`) không vào danh mục — Planner không lập kế hoạch với nó (gọi tới vẫn bị chặn ở sàn luật).
+  const deniedTools = new Set(loadLocalPolicy().deny_tools);
+  const { catalog, hash } = buildCatalog(tools.filter((t) => !deniedTools.has(t.name)));
+  const confirmer = multiUser ? null : createLocalConfirmer();
   // Nhiều người dùng: thêm trần song song theo từng thành viên — một người không chiếm hết chỗ của cả tổ chức.
   const scheduler = createScheduler(multiUser ? { scopeLimits: DEFAULT_SCOPE_LIMITS } : undefined);
 
@@ -203,6 +229,8 @@ export async function startRemoteClient(options = {}) {
   say(chalk.gray(`   Máy:        ${creds.name} (${creds.device_id})`));
   say(chalk.gray(fullAccess ? `   Quyền:      TOÀN QUYỀN máy (${roots.slice(1).join(' ')}) — trừ thư mục cấu hình Aivin` : `   Thư mục:    ${roots.join(' | ')}`));
   say(chalk.gray(`   Máy chủ:    ${serverUrl}`));
+  if (proxy.url) say(chalk.gray(`   Proxy:      ${proxy.url} (${proxy.source === 'system' ? 'cài đặt của hệ điều hành' : proxy.source === 'env' ? 'HTTPS_PROXY' : '--proxy'})`));
+  else if (proxy.pac) say(chalk.yellow(`   Proxy:      máy dùng tệp PAC (${proxy.pac}) — Aivin chưa đọc được, nếu không nối được hãy thêm --proxy http://<máy>:<cổng>`));
   say(chalk.gray(`   Công cụ:    ${catalog.length} (${profile.binaries.join(', ') || 'không phát hiện chương trình nào'})`));
   say(chalk.gray(`   Ghi nhớ:    ${memoryStats().total} mục — ${memoryStats().dir}`));
   if (officeApps.length) say(chalk.gray(`   Office:     ${officeApps.join(', ')} — AI làm qua ứng dụng, chạy nền`));
@@ -222,6 +250,8 @@ export async function startRemoteClient(options = {}) {
   const socket = io(`${serverUrl}${DEVICE_NAMESPACE}`, {
     auth: { device_token: creds.device_token, protocol: PROTOCOL_VERSION, instance },
     transports: ['websocket'],
+    // Proxy công ty (netProxy.mjs): websocket đi qua đường hầm CONNECT; không có proxy → `undefined`, nối thẳng.
+    agent: proxyAgentFor(`${serverUrl}${DEVICE_NAMESPACE}`),
     reconnection: true,
     reconnectionDelay: 1000,
     reconnectionDelayMax: 30_000,
@@ -229,7 +259,11 @@ export async function startRemoteClient(options = {}) {
   });
 
   let stopped = false;
-  const heartbeat = setInterval(() => { if (socket.connected) socket.emit(DeviceEvent.HEARTBEAT, {}); }, HEARTBEAT_MS);
+  const heartbeat = setInterval(() => {
+    if (socket.connected) socket.emit(DeviceEvent.HEARTBEAT, {});
+    ledger.prune();
+    syncProcAwake();
+  }, HEARTBEAT_MS);
 
   // `aivin remote pause` ở cửa sổ khác: huỷ NGAY việc đang chạy (lệnh shell, đường hầm trình duyệt), không chỉ chặn việc mới.
   let pausedSeen = isRemotePaused();
@@ -246,17 +280,24 @@ export async function startRemoteClient(options = {}) {
   }, PAUSE_POLL_MS);
   pauseWatch.unref?.();
 
-  // Kết quả làm xong lúc đang mất kết nối: giữ lại, gửi khi nối lại (BE vẫn chờ tới hết giờ — mất là agent chạy lại lệnh có tác dụng phụ).
-  const unsent = new Map();
+  // Sổ lời gọi (callLedger.mjs): kết quả làm xong lúc mất kết nối giữ trên đĩa, gửi khi nối lại (BE vẫn chờ tới hết giờ — mất là agent chạy
+  // lại lệnh có tác dụng phụ); lời gọi BE gửi lại cùng `call_id` không chạy lần hai.
+  const ledger = createCallLedger({ file: options.outboxFile || REMOTE_OUTBOX_FILE });
+  // BE có `resume`: kết quả chỉ bỏ khỏi sổ khi BE xác nhận đã nhận (ack của device:result). BE cũ không ack → gửi là coi như xong.
+  let serverResume = false;
   const sendResult = (payload) => {
-    if (socket.connected) socket.emit(DeviceEvent.RESULT, payload);
-    else if (unsent.size < MAX_UNSENT_RESULTS) unsent.set(payload.call_id, payload);
+    if (!socket.connected) return ledger.persist();
+    if (!serverResume) {
+      socket.emit(DeviceEvent.RESULT, payload);
+      return ledger.markSent(payload.call_id);
+    }
+    socket.timeout(RESULT_ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.RESULT, payload)
+      .then(() => ledger.markSent(payload.call_id), () => ledger.persist());
   };
   const flushUnsent = () => {
-    for (const [id, payload] of unsent) {
+    for (const payload of ledger.unsent()) {
       if (!socket.connected) return;
-      socket.emit(DeviceEvent.RESULT, payload);
-      unsent.delete(id);
+      sendResult(payload);
     }
   };
 
@@ -266,11 +307,13 @@ export async function startRemoteClient(options = {}) {
     clearInterval(heartbeat);
     clearInterval(pauseWatch);
     const draining = scheduler.cancelAll('The Aivin agent on this device stopped');
+    ledger.persist();
     socket.disconnect();
     browserTunnels?.closeAll();
     gui?.close();
     winHost?.close();
     processes.stopAll();
+    keepAwake.close();
     watches?.closeAll();
     host?.close();
     fileIndex?.close();
@@ -280,15 +323,49 @@ export async function startRemoteClient(options = {}) {
     return draining;
   };
 
+  // Dừng hẳn (thu hồi / bị thay / token hết hiệu lực): thoát mã 0 — trình giữ chạy (Task Scheduler, launchd, systemd) không chạy lại.
+  const stopForGood = () => {
+    const draining = stop();
+    if (options.handleSignals !== false) Promise.resolve(draining).finally(() => process.exit(0));
+  };
+
   const embedTexts = async (texts) => {
     if (!socket.connected) return null;
     const res = await socket.timeout(EMBED_TIMEOUT_MS).emitWithAck(DeviceEvent.EMBED, { texts });
     return res?.ok ? res.vectors : null;
   };
 
+  /**
+   * Xoay vòng token (BE cấp trong ack của HELLO): lưu token mới (kho bí mật của hệ điều hành) RỒI mới báo BE bỏ token cũ — lưu hỏng thì
+   * không báo, token cũ vẫn dùng được. Lần nối lại sau dùng token mới (socket.io đọc lại `auth` mỗi lần nối).
+   */
+  const rotateToken = async (token) => {
+    try {
+      saveDeviceCredentials({ ...creds, device_token: token });
+      if (loadDeviceCredentials()?.device_token !== token) throw new Error('saved token does not read back');
+    } catch (e) {
+      say(chalk.yellow(`   ⚠️  Không lưu được token mới (${e.message}) — tiếp tục dùng token cũ`));
+      return;
+    }
+    creds.device_token = token;
+    socket.auth = { ...socket.auth, device_token: token };
+    await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.ROTATED, {}).catch(() => null);
+    logActivity({ type: 'token_rotated', deviceId: creds.device_id });
+    say(chalk.gray('   🔑 Đã đổi token máy định kỳ (token cũ hết hiệu lực)'));
+  };
+
   const announce = async () => {
     try {
-      const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash });
+      const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash, inflight: ledger.heldIds() });
+      serverResume = Array.isArray(hello?.features) && hello.features.includes(ServerFeature.RESUME);
+      // Việc máy còn giữ mà BE không còn chờ (đã huỷ / hết giờ lúc máy mất mạng — lệnh huỷ không tới được máy): dừng ngay, bỏ kết quả.
+      const orphaned = Array.isArray(hello?.orphaned) ? hello.orphaned.filter((id) => typeof id === 'string') : [];
+      if (orphaned.length) {
+        say(chalk.gray(`   ↯ Huỷ ${orphaned.length} việc máy chủ không còn chờ (đã huỷ / hết giờ lúc mất kết nối)`));
+        scheduler.cancel(orphaned);
+        ledger.drop(orphaned);
+      }
+      if (typeof hello?.rotate_token === 'string' && !envCreds) await rotateToken(hello.rotate_token);
       if (hello?.need_catalog) await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CATALOG, { catalog_hash: hash, tools: catalog });
       // BE mới tính vector cho tệp tài liệu (tìm theo nghĩa); BE cũ không báo → chỉ tìm theo từ khoá.
       if (fileIndex && Array.isArray(hello?.features) && hello.features.includes(ServerFeature.EMBED)) fileIndex.setEmbedder(embedTexts);
@@ -308,6 +385,30 @@ export async function startRemoteClient(options = {}) {
   // tên công cụ + vài ký tự đầu của vùng.
   const callLabel = (call) => (host ? `${call.tool} [${String(call.user_scope || '-').slice(0, 5)}]` : call.tool);
 
+  /**
+   * Sàn luật tại máy: công cụ / lệnh chủ máy cấm → ném lỗi; việc cần xác nhận → hộp "Cho phép / Từ chối" trên máy (BE được báo giữ chỗ để
+   * không tính hết giờ trong lúc chờ). Máy tính tổ chức: chỉ áp phần cấm (không có người ngồi trước máy để bấm).
+   */
+  const localGate = async (call, tool) => {
+    if (tool.internal) return;
+    const policy = loadLocalPolicy();
+    const verdict = evaluateLocalPolicy(policy, tool, call.args || {});
+    if (verdict.action !== 'confirm' || !confirmer) return;
+    const timeoutSec = policy.confirm_timeout_sec;
+    if (socket.connected) socket.emit(DeviceEvent.HOLD, { call_id: call.call_id, extra_ms: (timeoutSec + 15) * 1000 });
+    say(chalk.magenta(`  ✋ ${call.tool}: chờ bạn bấm xác nhận trên máy (${verdict.reason}, tối đa ${timeoutSec} s)`));
+    const purpose = typeof call.purpose === 'string' ? call.purpose.slice(0, 200) : undefined;
+    const result = await confirmer.ask({ reason: verdict.reason, purpose, detail: describeCall(tool, call.args || {}), timeoutSec });
+    logActivity({ type: 'local_confirm', tool: call.tool, id: call.call_id, result });
+    if (result === ConfirmResult.ALLOW) return;
+    const fail = {
+      [ConfirmResult.REJECT]: [DeviceErrorCode.LOCAL_REJECTED, 'The person at this computer rejected this step'],
+      [ConfirmResult.TIMEOUT]: [DeviceErrorCode.LOCAL_CONFIRM_TIMEOUT, `Nobody confirmed this step on the computer within ${timeoutSec} s — it needs a click at the computer (the owner requires it for risky steps)`],
+      [ConfirmResult.UNAVAILABLE]: [DeviceErrorCode.LOCAL_CONFIRM_UNAVAILABLE, 'This step needs a confirmation at the computer, but no confirmation box could be shown there'],
+    }[result];
+    throw new DeviceToolError(fail[0], fail[1]);
+  };
+
   const runCall = async (call, streamer) => {
     const tool = byName.get(call.tool);
     if (isRemotePaused()) return { tool, outcome: { ok: false, error: 'Remote control is paused on this device', error_code: DeviceErrorCode.KILL_SWITCH, duration_ms: 0 } };
@@ -319,6 +420,7 @@ export async function startRemoteClient(options = {}) {
         callEnv = host.envFor(call.user_scope);
         host.assertQuota(call.tool);
       }
+      await localGate(call, tool);
     } catch (e) {
       return { tool, outcome: { ok: false, error: e.message, error_code: e.code || DeviceErrorCode.INVALID_ARGS, duration_ms: 0 } };
     }
@@ -337,6 +439,7 @@ export async function startRemoteClient(options = {}) {
 
   // Chống làm trùng khi BE gửi lại lô bước dở (xem idempotency.mjs).
   const runOnce = createIdempotentRunner(runCall, (name) => !!byName.get(name)?.read_only, {
+    file: options.idemFile || REMOTE_IDEM_FILE,
     onDuplicate: (call) => say(chalk.gray(`  ↺ ${callLabel(call)}: đã làm ở lần gửi trước — trả lại kết quả cũ`)),
   });
 
@@ -345,14 +448,20 @@ export async function startRemoteClient(options = {}) {
     const streamer = createStreamer(socket, call.call_id);
     let tool;
     let outcome;
+    keepAwake.hold();
     try {
       ({ tool, outcome } = await runOnce(call, streamer));
     } catch (e) {
       outcome = { ok: false, error: e?.message || String(e), error_code: e?.code || DeviceErrorCode.EXECUTION_FAILED, duration_ms: 0 };
+    } finally {
+      keepAwake.release();
+      syncProcAwake();
     }
     try {
       streamer.flush();
-      sendResult({ call_id: call.call_id, ...outcome });
+      const payload = { call_id: call.call_id, ...outcome };
+      ledger.finish(call.call_id, payload, { persistNow: !socket.connected });
+      sendResult(payload);
       logActivity({ type: 'tool_call', tool: call.tool, id: call.call_id, success: outcome.ok, error: outcome.error, ms: outcome.duration_ms });
       if (!tool?.internal) {
         const failed = host ? outcome.error_code : outcome.error;
@@ -392,7 +501,7 @@ export async function startRemoteClient(options = {}) {
       console.log(chalk.red(replaced
         ? '❌ Máy này vừa được ghép lại bởi một cửa sổ khác — cửa sổ này dừng, cửa sổ mới tiếp tục nhận việc.'
         : '❌ Token của máy không còn hiệu lực (đã thu hồi hoặc ghép lại ở nơi khác). Chạy `aivin remote start` để ghép lại.'));
-      stop();
+      stopForGood();
       return;
     }
     say(chalk.gray(`   (chưa nối được: ${err?.message} — thử lại...)`));
@@ -400,19 +509,25 @@ export async function startRemoteClient(options = {}) {
   socket.on(DeviceEvent.REPLACED, guarded(DeviceEvent.REPLACED, (payload) => {
     if (!payload?.by_instance || payload.by_instance === instance) return;
     console.log(chalk.red('❌ Máy này vừa được mở nhận việc ở một cửa sổ hoặc máy khác — cửa sổ này dừng để hai bên không tranh nhau.'));
-    stop();
+    stopForGood();
   }));
   socket.on(DeviceEvent.REVOKED, guarded(DeviceEvent.REVOKED, () => {
     clearDeviceCredentials(creds.device_token);
     console.log(chalk.red('❌ Máy này đã bị thu hồi quyền điều khiển từ xa.'));
-    stop();
+    stopForGood();
   }));
   socket.on(DeviceEvent.CALLS, guarded(DeviceEvent.CALLS, (payload) => {
     // Chỉ nhận / ACK lời gọi đúng dạng — `{ calls: [null] }` từng làm sập daemon (null.call_id trong listener).
     const calls = (Array.isArray(payload?.calls) ? payload.calls : []).filter(isValidDeviceCall);
     if (!calls.length) return;
     socket.emit(DeviceEvent.ACK, { call_ids: calls.map((c) => c.call_id) });
-    calls.forEach((call) => void handleCall(call));
+    // BE gửi lại cùng `call_id` (máy rớt mạng trước khi ACK / kết quả tới nơi): đang chạy thì thôi, đã xong thì gửi lại kết quả cũ.
+    calls.forEach((call) => {
+      const prior = ledger.admit(call);
+      if (!prior) return void handleCall(call);
+      say(chalk.gray(`  ↺ ${callLabel(call)}: máy chủ gửi lại — ${prior.state === CallState.RUNNING ? 'đang chạy' : 'trả lại kết quả đã có'}`));
+      if (prior.state === CallState.DONE) sendResult(ledger.reopen(call.call_id));
+    });
   }));
   socket.on(DeviceEvent.CANCEL, guarded(DeviceEvent.CANCEL, (payload) => {
     if (Array.isArray(payload?.call_ids)) scheduler.cancel(payload.call_ids.filter((id) => typeof id === 'string'));

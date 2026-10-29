@@ -56,6 +56,9 @@ import {
 } from './lib/workspace.mjs';
 import { runMission, runBrowserMission } from './lib/mission.mjs';
 import { DeviceAccess } from './lib/remote/constants.mjs';
+import { configureProxy } from './lib/remote/netProxy.mjs';
+import { DAEMON_RUNNING } from './lib/remote/daemonLock.mjs';
+import { runPolicyCommand } from './lib/remote/policyCommand.mjs';
 import {
   createAutomationJob,
   listTasks,
@@ -1012,7 +1015,9 @@ program
 
 const remoteCommand = program
   .command('remote')
-  .description('Let your Aivin agents work on this computer (Device Agent) - pair, run the listener, manage memory and safety');
+  .description('Let your Aivin agents work on this computer (Device Agent) - pair, run the listener, manage memory and safety')
+  // Proxy công ty cho mọi lệnh remote gọi máy chủ (ghép máy, remote do, test…) — `start` tự cấu hình kèm --proxy của nó.
+  .hook('preAction', (_cmd, action) => { if (action.name() !== 'start') configureProxy({ explicit: action.opts().proxy }); });
 
 const remoteFail = (error) => {
   console.error(chalk.red('❌'), error.message);
@@ -1032,11 +1037,18 @@ remoteCommand
   .option('--no-gui', "Don't let the agent control app windows on this computer with the mouse/keyboard (Windows)")
   .option('--separate-browser', "Always use Aivin's own browser window, never your everyday Chrome/Edge (even if remote debugging is enabled at chrome://inspect/#remote-debugging)")
   .option('--quiet', 'No interactive logs')
+  .option('--proxy <url>', 'HTTP proxy to reach Aivin through (default: HTTPS_PROXY, else the system proxy setting; "none" = connect directly)')
+  .option('--no-keep-awake', "Don't keep this computer from sleeping while the agent is working on it")
   .option('--multi-user', "Organization cloud computer (Linux container provisioned by Aivin): token from AIVIN_DEVICE_TOKEN/AIVIN_DEVICE_ID/AIVIN_SERVER, every org member works in their own Linux account + home folder")
   .action(async (options) => {
     try {
       await startRemoteClient(options);
     } catch (error) {
+      // Tự khởi động (--quiet) mà đã có cửa sổ khác nhận việc: không phải lỗi — thoát 0 để trình giữ chạy không chạy lại mãi.
+      if (error?.code === DAEMON_RUNNING && options.quiet) {
+        console.error(chalk.gray(error.message));
+        process.exit(0);
+      }
       remoteFail(error);
     }
   });
@@ -1098,6 +1110,17 @@ remoteCommand
   });
 
 remoteCommand
+  .command('policy [action] [value]')
+  .description('Rules enforced on this computer itself (Aivin cannot change them): which steps need a click on this computer, tools turned off, extra blocked commands')
+  .action(async (action, value) => {
+    try {
+      await runPolicyCommand(action, value);
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
   .command('resume')
   .description('Turn the kill switch off')
   .action(() => {
@@ -1109,12 +1132,14 @@ remoteCommand
   .command('enable')
   .description('Start the listener automatically when this computer starts')
   .option('--dir <path>', 'Folder the agent may work in (default: current folder)')
+  .option('--proxy <url>', 'HTTP proxy the auto-started listener should use (default: detect at every start)')
   .action((options) => {
     try {
       const res = enableAutoStart(options);
       console.log(chalk.green('✅ Đã bật tự khởi động cùng máy.'));
       console.log(chalk.gray(`   Thư mục: ${res.rootDir}`));
       console.log(chalk.gray(`   Tệp khởi động: ${res.filePath}`));
+      if (res.warning) console.log(chalk.yellow(`   ⚠️  ${res.warning}`));
     } catch (error) {
       remoteFail(error);
     }

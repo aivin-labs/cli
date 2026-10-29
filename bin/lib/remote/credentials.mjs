@@ -5,6 +5,7 @@ import axios from 'axios';
 import { randomUUID } from 'crypto';
 import { DEVICE_API_PREFIX, DEVICE_CREDENTIALS_FILE, DEVICE_ID_FILE, REMOTE_CONFIG_DIR } from './constants.mjs';
 import { parseApiKeyClient } from '../auth.mjs';
+import { TokenStoreKind, forgetToken, openToken, preferredTokenStore, sealToken } from './tokenStore.mjs';
 
 /** Mã máy ổn định (~/.aivin/device-id.json), giữ qua các lần chạy. */
 export function getOrCreateDeviceId() {
@@ -27,19 +28,51 @@ export function resetDeviceId() {
   return deviceId;
 }
 
-export function loadDeviceCredentials() {
+/**
+ * Token đã giải theo nội dung tệp — giải DPAPI / Keychain tốn một tiến trình con (~0,5 s) mà tệp được đọc ở nhiều chỗ (mỗi lời gọi REST
+ * lấy tenant từ token). Tệp đổi (ghép lại / xoay token / tiến trình khác ghi) → giải lại.
+ */
+let opened = { raw: null, token: null };
+
+function readRecord() {
   try {
-    const data = JSON.parse(fs.readFileSync(DEVICE_CREDENTIALS_FILE, 'utf8'));
-    return data?.device_token ? data : null;
+    const raw = fs.readFileSync(DEVICE_CREDENTIALS_FILE, 'utf8');
+    return { raw, data: JSON.parse(raw) };
   } catch {
     return null;
   }
 }
 
-export function saveDeviceCredentials(creds) {
+function writeRecord(record) {
   fs.mkdirSync(REMOTE_CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(DEVICE_CREDENTIALS_FILE, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
+  const raw = JSON.stringify(record, null, 2) + '\n';
+  fs.writeFileSync(DEVICE_CREDENTIALS_FILE, raw, { mode: 0o600 });
   try { fs.chmodSync(DEVICE_CREDENTIALS_FILE, 0o600); } catch { /* Windows: quyền theo ACL hồ sơ người dùng */ }
+  return raw;
+}
+
+/**
+ * Thông tin ghép máy kèm `device_token` đã giải (tokenStore.mjs). Tệp cũ còn token chữ thường mà máy có kho bí mật → chuyển sang kho luôn.
+ * Không giải được (tệp chép từ máy / tài khoản khác) → `null` = coi như chưa ghép.
+ */
+export function loadDeviceCredentials() {
+  const rec = readRecord();
+  if (!rec?.data) return null;
+  const { data, raw } = rec;
+  if (raw === opened.raw && opened.token) return { ...data, device_token: opened.token };
+  const token = openToken(data);
+  if (!token) return null;
+  opened = { raw, token };
+  if (data.device_token && preferredTokenStore() !== TokenStoreKind.FILE) saveDeviceCredentials({ ...data, device_token: token });
+  return { ...data, device_token: token };
+}
+
+export function saveDeviceCredentials(creds) {
+  const { device_token: token, token_store: _s, token_enc: _e, ...rest } = creds;
+  const sealed = sealToken(token, { account: creds.device_id });
+  const { fallback_reason: _why, ...stored } = sealed;
+  const raw = writeRecord({ ...rest, ...stored });
+  opened = { raw, token };
 }
 
 /**
@@ -49,7 +82,9 @@ export function saveDeviceCredentials(creds) {
  */
 export function clearDeviceCredentials(onlyToken) {
   if (onlyToken && loadDeviceCredentials()?.device_token !== onlyToken) return false;
+  forgetToken(readRecord()?.data);
   try { fs.unlinkSync(DEVICE_CREDENTIALS_FILE); } catch { /* không có thì thôi */ }
+  opened = { raw: null, token: null };
   return true;
 }
 

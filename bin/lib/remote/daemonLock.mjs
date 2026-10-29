@@ -33,6 +33,15 @@ export function lockHolder(lockFile = DAEMON_LOCK_FILE) {
   }
 }
 
+/** Đã có tiến trình khác nhận việc — `code` để lệnh tự khởi động thoát 0 (không phải lỗi, trình giữ chạy không chạy lại). */
+export const DAEMON_RUNNING = 'DAEMON_RUNNING';
+
+function daemonRunningError(pid) {
+  const err = new Error(`Máy này đang nhận việc ở một cửa sổ khác (PID ${pid}). Dùng cửa sổ đó, hoặc đóng nó rồi chạy lại — muốn ghép lại thì thêm --code <mã>.`);
+  err.code = DAEMON_RUNNING;
+  return err;
+}
+
 function writeLock(lockFile, flag) {
   const now = new Date().toISOString();
   fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, started_at: now, beat_at: now }), { flag });
@@ -45,7 +54,7 @@ function writeLock(lockFile, flag) {
 export function acquireDaemonLock({ takeOver = false, lockFile = DAEMON_LOCK_FILE } = {}) {
   const holder = lockHolder(lockFile);
   if (holder && !takeOver) {
-    throw new Error(`Máy này đang nhận việc ở một cửa sổ khác (PID ${holder}). Dùng cửa sổ đó, hoặc đóng nó rồi chạy lại — muốn ghép lại thì thêm --code <mã>.`);
+    throw daemonRunningError(holder);
   }
   fs.mkdirSync(REMOTE_CONFIG_DIR, { recursive: true });
   // Tạo nguyên tử: hai tiến trình khởi động cùng lúc (systemd + .desktop lúc đăng nhập) chỉ một bên tạo được tệp.
@@ -54,7 +63,7 @@ export function acquireDaemonLock({ takeOver = false, lockFile = DAEMON_LOCK_FIL
   } catch (e) {
     if (e?.code !== 'EEXIST') throw e;
     const again = lockHolder(lockFile);
-    if (again) throw new Error(`Máy này đang nhận việc ở một cửa sổ khác (PID ${again}). Dùng cửa sổ đó, hoặc đóng nó rồi chạy lại — muốn ghép lại thì thêm --code <mã>.`);
+    if (again) throw daemonRunningError(again);
     writeLock(lockFile, 'w'); // khoá cũ của tiến trình đã chết
   }
   const mine = () => {

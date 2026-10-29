@@ -20,7 +20,8 @@ export function buildTransferTools({ serverUrl, deviceToken }) {
     if (!TICKET_RE.test(String(ticket || ''))) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Invalid transfer ticket');
     return `${String(serverUrl).replace(/\/+$/, '')}${DEVICE_API_PREFIX}/transfers/${ticket}${part === undefined ? '' : `?part=${part}`}`;
   };
-  const headers = (extra = {}) => ({ [DEVICE_TOKEN_HEADER]: deviceToken, ...extra });
+  // `deviceToken` là hàm khi daemon có thể xoay vòng token lúc đang chạy — mỗi yêu cầu lấy token hiện hành.
+  const headers = (extra = {}) => ({ [DEVICE_TOKEN_HEADER]: typeof deviceToken === 'function' ? deviceToken() : deviceToken, ...extra });
 
   async function upload(args, ctx, env) {
     if (env.runAs) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Direct transfer is not available on a shared computer');

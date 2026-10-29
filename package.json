@@ -29,6 +29,7 @@
     "chalk": "^5.6.2",
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
+    "https-proxy-agent": "^7.0.6",
     "ink": "^7.1.1",
     "ink-text-input": "^6.0.0",
     "inquirer": "^14.0.2",

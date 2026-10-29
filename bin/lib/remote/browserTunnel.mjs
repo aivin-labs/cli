@@ -9,6 +9,7 @@ import {
 import { DeviceErrorCode } from './constants.mjs';
 import { applyDevicePolicy, executableDownloadGuid } from './cdpPolicy.mjs';
 import { activeBrowserEndpoint, browserPortFromProcesses, createCdpMux, findDailyBrowser } from './dailyBrowser.mjs';
+import { proxyAgentFor } from './netProxy.mjs';
 import { showOSNotification } from './notify.mjs';
 import { DeviceToolError } from './sandbox.mjs';
 
@@ -81,8 +82,11 @@ async function ensureAivinBrowser(preferredId) {
 }
 
 /** Hai WebSocket nối nhau (BE ↔ trình duyệt), chờ cả hai mở. Một đầu đóng → đóng đầu kia. Lệnh BE gửi xuống đi qua bộ lọc `cdpPolicy.mjs`. */
+/** Token máy: chuỗi, hoặc hàm trả token hiện hành (daemon xoay vòng token khi đang chạy). */
+const tokenOf = (t) => (typeof t === 'function' ? t() : t);
+
 function pipeTunnel({ relayUrl, deviceToken, chromeWsUrl, signal, downloadsDir }) {
-  const toBackend = new WSClient(relayUrl, { headers: { Authorization: `Device ${deviceToken}` } });
+  const toBackend = new WSClient(relayUrl, { headers: { Authorization: `Device ${tokenOf(deviceToken)}` }, agent: proxyAgentFor(relayUrl) });
   const toChrome = new WSClient(chromeWsUrl, { perMessageDeflate: false, maxPayload: 256 * 1024 * 1024 });
   const close = () => {
     try { toBackend.close(); } catch { /* đã đóng */ }
@@ -129,7 +133,7 @@ function pipeTunnel({ relayUrl, deviceToken, chromeWsUrl, signal, downloadsDir }
 
 /** Đường hầm trên kết nối chung tới trình duyệt hằng ngày: BE ↔ một phiên riêng của bộ chia. Khung BE gửi trước khi phiên sẵn sàng được giữ lại. */
 function pipeTunnelToMux({ relayUrl, deviceToken, mux, signal }) {
-  const toBackend = new WSClient(relayUrl, { headers: { Authorization: `Device ${deviceToken}` } });
+  const toBackend = new WSClient(relayUrl, { headers: { Authorization: `Device ${tokenOf(deviceToken)}` }, agent: proxyAgentFor(relayUrl) });
   let client = null;
   let closed = false;
   const early = [];

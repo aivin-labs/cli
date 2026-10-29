@@ -12,10 +12,18 @@ export const DEVICE_DB_FILE = path.join(REMOTE_CONFIG_DIR, 'device-memory.db');
 export const KILL_SWITCH_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-paused');
 /** Khoá một tiến trình nhận việc cho mỗi thư mục cấu hình (PID) — xem daemonLock.mjs. */
 export const DAEMON_LOCK_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-daemon.lock');
+/** Kết quả làm xong mà chưa gửi được lên BE (mất mạng / daemon khởi động lại) — xem callLedger.mjs. */
+export const REMOTE_OUTBOX_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-outbox.json');
+/** Sổ chống làm trùng theo `idem_key` (mỗi dòng một sự kiện bắt đầu / xong) — xem idempotency.mjs. */
+export const REMOTE_IDEM_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-idem.jsonl');
 
 /** Namespace socket.io phía BE (DeviceGateway). */
 export const DEVICE_NAMESPACE = '/device';
-export const PROTOCOL_VERSION = 1;
+/**
+ * 2 (29/10/2026): máy chống làm trùng theo `call_id`, báo lời gọi đang giữ khi chào (`inflight`) → BE gửi lại lô chưa xác nhận khi máy nối
+ * lại và bảo máy huỷ việc không còn ai chờ.
+ */
+export const PROTOCOL_VERSION = 2;
 /** Đường REST của Device Agent — mọi official plugin nằm dưới tiền tố `/plugins`. */
 export const DEVICE_API_PREFIX = '/plugins/device-agent';
 export const DEVICE_AGENT_PLUGIN_ID = 'official.device_agent';
@@ -39,12 +47,21 @@ export const DeviceEvent = Object.freeze({
   EMBED: 'device:embed',
   /** CLI → BE: sự kiện của một theo dõi (tệp mới / dòng log khớp) → BE chạy Automation Job gắn với nó. */
   EVENT: 'device:event',
+  /** CLI → BE (29/10/2026): lời gọi đang chờ người bấm xác nhận trên máy — `{ call_id, extra_ms }`, BE lùi hạn chờ kết quả bấy nhiêu. */
+  HOLD: 'device:hold',
+  /** CLI → BE: đã lưu token mới BE cấp trong ack của HELLO (`rotate_token`) — BE bỏ token cũ. */
+  ROTATED: 'device:rotated',
   /** CLI → BE (vừa nối): xin danh sách theo dõi của máy (ack `{ watches }`). */
   WATCHES: 'device:watches',
 });
 
 /** Năng lực BE báo trong ack của `device:hello` (`features`). */
-export const ServerFeature = Object.freeze({ EMBED: 'embed', WATCH: 'watch' });
+export const ServerFeature = Object.freeze({
+  EMBED: 'embed',
+  WATCH: 'watch',
+  /** BE gửi lại lời gọi khi máy nối lại + xác nhận từng kết quả (ack của `device:result`) — máy giữ kết quả tới khi BE nhận. */
+  RESUME: 'resume',
+});
 
 /** Nhóm giới hạn song song trên máy — mỗi công cụ thuộc một nhóm. */
 export const ToolGroup = Object.freeze({
@@ -97,8 +114,18 @@ export const DeviceErrorCode = Object.freeze({
   KILL_SWITCH: 'KILL_SWITCH',
   PROTECTED_PATH: 'PROTECTED_PATH',
   BLOCKED_COMMAND: 'BLOCKED_COMMAND',
+  /** Chủ máy tắt công cụ / chặn lệnh này trong luật tại máy (`aivin remote policy`). */
+  LOCAL_DENIED: 'LOCAL_DENIED',
+  /** Người ngồi trước máy bấm "Từ chối" ở hộp xác nhận. */
+  LOCAL_REJECTED: 'LOCAL_REJECTED',
+  /** Không ai bấm hộp xác nhận trên máy trong thời hạn (người dùng không ngồi trước máy). */
+  LOCAL_CONFIRM_TIMEOUT: 'LOCAL_CONFIRM_TIMEOUT',
+  /** Máy không hiện được hộp xác nhận (không có màn hình / không có terminal) — việc cần xác nhận bị từ chối. */
+  LOCAL_CONFIRM_UNAVAILABLE: 'LOCAL_CONFIRM_UNAVAILABLE',
   CALL_TIMEOUT: 'CALL_TIMEOUT',
   CANCELLED: 'CANCELLED',
+  /** Bước có tác dụng đã bắt đầu thì daemon khởi động lại — không biết đã làm tới đâu, không tự làm lại. */
+  INTERRUPTED: 'INTERRUPTED',
   TOOL_UNKNOWN: 'TOOL_UNKNOWN',
   INVALID_ARGS: 'INVALID_ARGS',
   NOT_FOUND: 'NOT_FOUND',
