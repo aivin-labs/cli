@@ -433,6 +433,32 @@ async function fsMove(args, _ctx, env) {
   try { return await moveOne(env, undo, args.sourcePath, args.destinationPath, args.overwrite); } finally { undo?.commit(); }
 }
 
+/**
+ * Sao chép một tệp / thư mục (29/10/2026 — trước đó không có công cụ chép, Planner từng "sao chép" bằng fs.move làm mất tệp nguồn). Đích
+ * có sẵn chỉ bị thay khi `overwrite` (bản cũ vào thùng rác của kho, hoàn tác được); hoàn tác bản chép = bỏ đích vừa tạo.
+ */
+async function fsCopy(args, _ctx, env) {
+  const src = resolveInRoots(env.roots, requireArg(args.sourcePath, 'sourcePath'));
+  const dest = resolveInRoots(env.roots, requireArg(args.destinationPath, 'destinationPath'));
+  const stat = await fs.promises.stat(src).catch(() => null);
+  if (!stat) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `Not found: ${args.sourcePath}`);
+  if (path.resolve(src) === path.resolve(dest)) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Source and destination are the same');
+  const exists = fs.existsSync(dest);
+  if (exists && args.overwrite !== true) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Destination exists (set overwrite to replace it): ${args.destinationPath}`);
+  const undo = undoOf(args, env, 'copy');
+  try {
+    if (undo) await undo.ensureDir(path.dirname(dest));
+    else await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+    if (exists) {
+      if (undo) await undo.trash(dest);
+      else await fs.promises.rm(dest, { recursive: true, force: true });
+    }
+    await fs.promises.cp(src, dest, { recursive: stat.isDirectory(), force: true });
+    undo?.created(dest);
+  } finally { undo?.commit(); }
+  return { sourcePath: displayPath(env.roots, src), destinationPath: displayPath(env.roots, dest), dir: stat.isDirectory() || undefined, replaced: exists || undefined };
+}
+
 /** Kiểm + xoá một mục: có kho → thùng rác của kho (hoàn tác được); không có / `permanent` → xoá hẳn. */
 async function deleteOne(env, undo, target, permanent) {
   // Không theo symlink ở thành phần cuối: xoá liên kết là xoá chính liên kết, không xoá thư mục nó trỏ tới.
@@ -609,6 +635,9 @@ export function buildTools(env) {
       input_schema: schema({ path: str('file path'), oldText: str('exact text to replace'), newText: str('replacement'), replaceAll: bool('replace every occurrence') }, ['path', 'oldText', 'newText']) },
     { name: 'fs.move', group: ToolGroup.FS_WRITE, handler: fsMove, lockKeys: (a, e) => [...writeLock('sourcePath')(a, e), ...writeLock('destinationPath')(a, e)],
       description: 'Move or rename one file or folder (several: fs.move_many). Undoable.',
+      input_schema: schema({ sourcePath: str('from'), destinationPath: str('to'), overwrite: bool('replace an existing destination (the replaced one is kept for undo)') }, ['sourcePath', 'destinationPath']) },
+    { name: 'fs.copy', group: ToolGroup.FS_WRITE, handler: fsCopy, lockKeys: (a, e) => [...writeLock('destinationPath')(a, e)],
+      description: 'Copy one file or folder (the source stays). Creates missing folders; an existing destination is replaced only with overwrite. Undoable.',
       input_schema: schema({ sourcePath: str('from'), destinationPath: str('to'), overwrite: bool('replace an existing destination (the replaced one is kept for undo)') }, ['sourcePath', 'destinationPath']) },
     { name: 'fs.move_many', group: ToolGroup.FS_WRITE, handler: fsMoveMany,
       lockKeys: (a, e) => (Array.isArray(a.moves) ? a.moves.slice(0, MAX_BATCH_ITEMS) : []).flatMap((m) => { try { return [resolveInRoots(e.roots, m?.from || ''), resolveInRoots(e.roots, m?.to || '')]; } catch { return []; } }),

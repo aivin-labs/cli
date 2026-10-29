@@ -60,14 +60,18 @@ namespace AivinGui {
     static Opened OpenWorkbook(string path, bool create, bool readOnly) {
       object app = Running("Excel.Application");
       if (app != null) {
-        object books = Get(app, "Workbooks");
-        int n = Convert.ToInt32(Get(books, "Count"));
-        for (int i = 1; i <= n; i++) {
-          object b = Get(books, "Item", i);
-          if (string.Equals(Convert.ToString(Get(b, "FullName")), path, StringComparison.OrdinalIgnoreCase)) { Release(books); return new Opened { App = app, Doc = b, Own = false }; }
-          Release(b);
-        }
-        Release(books);
+        // Bản đang chạy không trả lời (treo / bận, RPC_E_SERVERCALL_RETRYLATER) → bỏ qua, mở bản ẩn riêng (29/10/2026: một Excel treo
+        // trên máy làm mọi lời gọi office.excel.* hỏng, Planner thử lại 12 lượt).
+        try {
+          object books = Get(app, "Workbooks");
+          int n = Convert.ToInt32(Get(books, "Count"));
+          for (int i = 1; i <= n; i++) {
+            object b = Get(books, "Item", i);
+            if (string.Equals(Convert.ToString(Get(b, "FullName")), path, StringComparison.OrdinalIgnoreCase)) { Release(books); return new Opened { App = app, Doc = b, Own = false }; }
+            Release(b);
+          }
+          Release(books);
+        } catch (GuiError) { }
         Release(app);
       }
       object own = Create("Excel.Application");
@@ -214,14 +218,17 @@ namespace AivinGui {
     static Opened OpenDocument(string path, bool create, bool readOnly) {
       object app = Running("Word.Application");
       if (app != null) {
-        object docs = Get(app, "Documents");
-        int n = Convert.ToInt32(Get(docs, "Count"));
-        for (int i = 1; i <= n; i++) {
-          object d = Get(docs, "Item", i);
-          if (string.Equals(Convert.ToString(Get(d, "FullName")), path, StringComparison.OrdinalIgnoreCase)) { Release(docs); return new Opened { App = app, Doc = d, Own = false }; }
-          Release(d);
-        }
-        Release(docs);
+        // Bản đang chạy không trả lời → bỏ qua, mở bản ẩn riêng (như OpenWorkbook).
+        try {
+          object docs = Get(app, "Documents");
+          int n = Convert.ToInt32(Get(docs, "Count"));
+          for (int i = 1; i <= n; i++) {
+            object d = Get(docs, "Item", i);
+            if (string.Equals(Convert.ToString(Get(d, "FullName")), path, StringComparison.OrdinalIgnoreCase)) { Release(docs); return new Opened { App = app, Doc = d, Own = false }; }
+            Release(d);
+          }
+          Release(docs);
+        } catch (GuiError) { }
         Release(app);
       }
       object own = Create("Word.Application");

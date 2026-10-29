@@ -147,3 +147,16 @@ test('fs.write append: tệp chưa kết thúc bằng xuống dòng thì chèn m
   await call('fs.write', { path: 'new.log', content: 'z', append: true });
   assert.equal(fs.readFileSync(p('new.log'), 'utf8'), 'z');
 });
+
+test('fs.copy giữ tệp nguồn, đích có sẵn cần overwrite, hoàn tác bỏ bản chép', async () => {
+  const { call, p } = setup();
+  fs.writeFileSync(p('cfg.json'), '{"port":8080}');
+  const r = await call('fs.copy', { sourcePath: 'cfg.json', destinationPath: 'bak/cfg.bak.json', undo_group: 'c' });
+  assert.equal(r.replaced, undefined);
+  assert.equal(fs.readFileSync(p('cfg.json'), 'utf8'), '{"port":8080}');
+  assert.equal(fs.readFileSync(p('bak/cfg.bak.json'), 'utf8'), '{"port":8080}');
+  await assert.rejects(call('fs.copy', { sourcePath: 'cfg.json', destinationPath: 'bak/cfg.bak.json' }), /overwrite/);
+  await call('fs.undo', { group: 'c' });
+  assert.equal(fs.existsSync(p('bak/cfg.bak.json')), false);
+  assert.equal(fs.existsSync(p('cfg.json')), true);
+});
