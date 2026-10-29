@@ -17,6 +17,8 @@
 #   AIVIN_DOWNLOAD_BASE  one folder holding every asset, e.g. a GitHub release - overrides the root
 #   AIVIN_INSTALL_DIR    install folder (default: %LOCALAPPDATA%\Aivin\bin)
 #   AIVIN_NO_MODIFY_PATH set to 1 to leave the user PATH untouched
+#   AIVIN_NO_AUTOSTART   set to 1 to not start Aivin with Windows (can be turned on later in the tray menu / Task Manager)
+#   AIVIN_NO_DESKTOP     set to 1 to skip the system tray app, the Start menu entry and start-with-Windows (servers, CI)
 #
 # Keep this file ASCII-only: GitHub serves release assets as application/octet-stream and
 # Windows PowerShell 5 may decode them with a legacy code page.
@@ -114,17 +116,29 @@ function Install-AivinCli {
 
     Write-Step "Installed aivin $installedVersion to $installDir"
 
+    # System tray app + Start menu entry ("Aivin") + start with Windows (on by default; listed in Task Manager -> Startup apps).
+    $desktop = $false
+    if (-not $env:AIVIN_NO_DESKTOP) {
+        $desktopArgs = @('desktop', 'install')
+        if ($env:AIVIN_NO_AUTOSTART) { $desktopArgs += '--no-autostart' }
+        try { & $target @desktopArgs | Out-Null; $desktop = ($LASTEXITCODE -eq 0) } catch { $desktop = $false }
+        if ($desktop) { Write-Step 'Aivin is in the system tray and the Start menu' }
+        else { Write-Host '  Could not set up the system tray app - aivin still works from the command line.' -ForegroundColor Yellow }
+    }
+
     if ($env:AIVIN_PAIR_CODE) {
         $argsList = @('remote', 'start', '--code', $env:AIVIN_PAIR_CODE)
         if ($env:AIVIN_SERVER) { $argsList += @('--server', $env:AIVIN_SERVER) }
         if ($env:AIVIN_FULL_ACCESS) { $argsList += @('--full-access') }
         elseif ($env:AIVIN_DIR) { $argsList += @('--dir', $env:AIVIN_DIR) }
-        Write-Step 'Connecting this computer to Aivin - keep this window open so the AI can work here.'
+        if ($desktop) { Write-Step 'Connecting this computer to Aivin - once connected you can close this window, Aivin keeps running from the system tray.' }
+        else { Write-Step 'Connecting this computer to Aivin - keep this window open so the AI can work here.' }
         Write-Host ''
         & $target @argsList
     } else {
         Write-Host ''
-        Write-Host '  Next: create a code in Aivin (chat box -> Browser menu -> Add this computer), then run:' -ForegroundColor Gray
+        Write-Host '  Next: create a code in Aivin (chat box -> Browser menu -> Add this computer), then' -ForegroundColor Gray
+        if ($desktop) { Write-Host '    click the Aivin icon in the system tray and enter the code, or run:' -ForegroundColor Gray }
         Write-Host '    aivin remote start --code <code>' -ForegroundColor White
     }
 }

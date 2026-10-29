@@ -59,6 +59,12 @@ import { DeviceAccess } from './lib/remote/constants.mjs';
 import { configureProxy } from './lib/remote/netProxy.mjs';
 import { DAEMON_RUNNING } from './lib/remote/daemonLock.mjs';
 import { runPolicyCommand } from './lib/remote/policyCommand.mjs';
+import { loadMascotSettings, saveMascotSettings } from './lib/remote/mascot/index.mjs';
+import { MascotText, mascotLang, mascotText } from './lib/remote/mascot/strings.mjs';
+import { UiResult, showMascotDemo, showMascotUi } from './lib/remote/mascot/ui.mjs';
+import { desktopAppStatus, installDesktopApp, uninstallDesktopApp } from './lib/remote/autoStart.mjs';
+import { createMeetingManager, requestMeeting } from './lib/remote/meeting/index.mjs';
+import { DEFAULT_HOTKEYS, hotkeyCandidates, parseHotkey, probeHotkey } from './lib/remote/mascot/hotkey.mjs';
 import { RESTART_EXIT_CODE, UPDATE_ROLLED_BACK, UpdateStatus, cleanupRetired, downloadRoot, installUpdate, isStandaloneBinary, saveUpdateSettings } from './lib/selfUpdate.mjs';
 import {
   createAutomationJob,
@@ -989,10 +995,11 @@ keyCommand
 
 program
   .command('browser [mission]')
-  .description("Run an AI Browser mission - by default opens/reuses a local browser window dedicated to AI Browser (own profile, own cookies - log in once, watch missions run live from then on); --remote uses a server-side browser instead")
+  .description("Run an AI Browser mission - by default in your everyday Chrome/Edge if you've switched on remote debugging in it (chrome://inspect/#remote-debugging), otherwise in a local browser window dedicated to AI Browser (own profile - log in once, the AI's tabs grouped together); --remote uses a server-side browser instead")
   .option('--remote', 'Use a server-side pooled browser instead of your own local one (no local browser needed, no cookies/logins carried over)')
-  .option('--debug-port <port>', 'Local mode only: port to look for/launch your browser\'s remote debugging on (default: 9222, auto-tries a few nearby ports if that one is taken by something else) - pass this to pin an exact port instead')
-  .option('--browser <edge|chrome>', "Local mode only: which browser to drive - default: auto-detects your OS's actual default browser, falling back to whichever of Edge/Chrome is installed if that can't be determined")
+  .option('--debug-port <port>', 'Local mode only: port to launch the AI Browser window\'s remote debugging on (default: 9222, auto-tries a few nearby ports if that one is taken by something else) - pass this to pin an exact port instead')
+  .option('--browser <edge|chrome|brave|chromium>', "Local mode only: which browser to drive - default: auto-detects your OS's actual default browser, falling back to whichever of Edge/Chrome/Brave/Chromium is installed if that can't be determined")
+  .option('--separate-browser', 'Local mode only: always use the dedicated AI Browser window, never your everyday browser (even if remote debugging is switched on in it)')
   .option('--url <url>', "Local mode only: open this URL before the mission starts, instead of a blank page - skips a wasted first analysis step and avoids the AI having to search the web to find the target site itself (auto-guessed for a few well-known sites mentioned by name in the mission if omitted)")
   .option('--workspace <id>', 'Workspace id to run in (default: your personal workspace)')
   .option('--project <id>', 'Project id within the workspace (--remote only)')
@@ -1008,6 +1015,69 @@ program
         });
       }
       await runBrowserMission(mission, options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('ui')
+  .description('Show the Aivin mascot on this computer with its ask box (Windows) - starts the background listener if it is not running')
+  .option('--demo', 'Preview every mascot animation state without pairing or starting the listener')
+  .action(async (options) => {
+    const lang = mascotLang();
+    const say = (key, color = chalk.green) => console.log(color(mascotText(lang, key)));
+    if (options.demo) {
+      const result = showMascotDemo();
+      if (result === UiResult.UNSUPPORTED) return say(MascotText.CMD_UNSUPPORTED, chalk.yellow);
+      if (result === UiResult.START_FAILED) { console.error(chalk.red('Không thể mở bản demo linh vật.')); process.exitCode = 1; return; }
+      console.log(chalk.green('✓ Demo linh vật đang chạy qua 8 trạng thái — đóng cửa sổ hoặc nhấn Ctrl+C để dừng.'));
+      return;
+    }
+    const result = await showMascotUi({ onStarting: () => say(MascotText.UI_STARTING, chalk.gray) });
+    if (result === UiResult.UNSUPPORTED) return say(MascotText.CMD_UNSUPPORTED, chalk.yellow);
+    if (result === UiResult.SHOWN) return say(MascotText.UI_SHOWN);
+    if (result === UiResult.STARTED) return say(MascotText.UI_STARTED);
+    if (result === UiResult.NOT_PAIRED) return say(MascotText.UI_NOT_PAIRED, chalk.yellow);
+    say(MascotText.UI_START_FAILED, chalk.red);
+    process.exitCode = 1;
+  });
+
+program
+  .command('desktop [action]')
+  .description('Aivin as a desktop app: install (Windows: system tray + Start menu; macOS: menu bar + Aivin.app; Linux: app menu + tray) and start it with the computer | uninstall | status (default)')
+  .option('--no-autostart', "install: don't start Aivin with the computer (turn it on later from Aivin's menu or the system's startup settings)")
+  .option('--no-launch', "install: don't open Aivin now")
+  .action((action = 'status', options) => {
+    // Chỗ bật / tắt khởi động cùng máy của từng hệ điều hành — cùng chỗ menu Aivin và `aivin remote enable|disable` đổi.
+    const startupWhere = { win32: 'Task Manager → Startup apps', darwin: 'System Settings → General → Login Items', linux: 'Startup Applications / Autostart' }[process.platform] || '';
+    const where = { win32: 'khay hệ thống, tìm "Aivin" trong Start', darwin: 'thanh menu, tìm "Aivin" bằng Spotlight', linux: 'khay hệ thống, tìm "Aivin" trong menu ứng dụng' }[process.platform] || '';
+    try {
+      if (action === 'install') {
+        const res = installDesktopApp({ autostart: options.autostart !== false, launch: options.launch !== false });
+        console.log(chalk.green(`✅ Đã cài Aivin vào máy: ${where}.`));
+        console.log(chalk.gray(`   Ứng dụng: ${res.exe}`));
+        console.log(chalk.gray(`   Khởi động cùng máy: ${res.autostart ? 'bật' : 'tắt'} (đổi ở menu Aivin hoặc ${startupWhere})`));
+        if (process.platform === 'linux' && !desktopAppStatus().tray) {
+          console.log(chalk.yellow('   ⚠️  Máy chưa có AppIndicator cho python3 nên không có biểu tượng khay — Aivin vẫn chạy nền. Cài: sudo apt install gir1.2-ayatanaappindicator3-0.1 (Ubuntu / Debian)'));
+        }
+        return;
+      }
+      if (action === 'uninstall') {
+        const res = uninstallDesktopApp();
+        console.log(chalk.green('✅ Đã gỡ ứng dụng Aivin trên màn hình và mục khởi động cùng máy (lệnh `aivin` vẫn còn).'));
+        if (!res.removed) console.log(chalk.yellow('   ⚠️  Ứng dụng còn đang chạy nên chưa xoá hết được tệp — chạy lại lệnh này sau ít giây.'));
+        return;
+      }
+      if (action !== 'status') throw new Error('Dùng: aivin desktop install [--no-autostart] [--no-launch] | uninstall | status');
+      const st = desktopAppStatus();
+      if (st.supported === false) return console.log(chalk.gray(`Chưa có ứng dụng Aivin trên màn hình cho ${process.platform} — dùng \`aivin remote enable\`.`));
+      console.log(chalk.blue('🖥️  Aivin trên máy này:'));
+      console.log(chalk.gray(`   Ứng dụng:           ${st.installed ? st.app : 'chưa cài — aivin desktop install'}`));
+      if (st.installed) console.log(chalk.gray(`   Tìm bằng:           ${st.search || 'không'}`));
+      console.log(chalk.gray(`   Khởi động cùng máy: ${st.startup.registered ? (st.startup.enabled ? 'bật' : `tắt (${startupWhere})`) : 'không'}`));
+      if (process.platform === 'linux') console.log(chalk.gray(`   Biểu tượng khay:    ${st.tray ? 'có' : 'không (thiếu python3 + AppIndicator) — vẫn chạy nền'}`));
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);
@@ -1073,11 +1143,13 @@ remoteCommand
   .option('--server <url>', 'Aivin server the code belongs to (Aivin prints it in the command when needed)')
   .option('--no-browser', "Don't let AI Browser use a browser window on this computer (web tasks then run in Aivin's server-side browser)")
   .option('--no-gui', "Don't let the agent control app windows on this computer with the mouse/keyboard (Windows)")
+  .option('--no-meetings', "Don't let the agent take notes of meetings (record the computer's sound + microphone) or take screenshots on this computer (Windows)")
   .option('--separate-browser', "Always use Aivin's own browser window, never your everyday Chrome/Edge (even if remote debugging is enabled at chrome://inspect/#remote-debugging)")
   .option('--quiet', 'No interactive logs')
   .option('--proxy <url>', 'HTTP proxy to reach Aivin through (default: HTTPS_PROXY, else the system proxy setting; "none" = connect directly)')
   .option('--no-keep-awake', "Don't keep this computer from sleeping while the agent is working on it")
   .option('--no-auto-update', "Don't download new aivin releases in the background this run (to turn it off for good: aivin update --auto off)")
+  .option('--no-mascot', "Don't show the Aivin mascot on screen this run (to turn it off for good: aivin remote mascot off)")
   .option('--multi-user', "Organization cloud computer (Linux container provisioned by Aivin): token from AIVIN_DEVICE_TOKEN/AIVIN_DEVICE_ID/AIVIN_SERVER, every org member works in their own Linux account + home folder")
   .action(async (options) => {
     try {
@@ -1154,6 +1226,81 @@ remoteCommand
   });
 
 remoteCommand
+  .command('mascot [action] [combo]')
+  .description('The Aivin mascot floating on screen while the listener runs (Windows): on | off — no argument shows the current setting; hotkey [combo|off|default] — the key combination that calls the mascot (default Win+Alt+Space)')
+  .action((action, combo) => {
+    const lang = mascotLang();
+    if (action === 'hotkey') {
+      try {
+        const setting = loadMascotSettings().hotkey;
+        if (!combo) {
+          const active = hotkeyCandidates(setting);
+          if (!active.length) return console.log('Phím tắt gọi linh vật: tắt (bật lại: aivin remote mascot hotkey default)');
+          return console.log(`Phím tắt gọi linh vật: ${active[0].label}${setting ? '' : ' (mặc định)'} — không đăng ký được thì thử lần lượt: ${active.slice(1).map((h) => h.label).join(', ')}`);
+        }
+        if (combo === 'off') { saveMascotSettings({ hotkey: 'off' }); return console.log(chalk.green('✅ Đã tắt phím tắt gọi linh vật.')); }
+        if (combo === 'default') { saveMascotSettings({ hotkey: null }); return console.log(chalk.green(`✅ Dùng phím tắt mặc định ${DEFAULT_HOTKEYS[0]}.`)); }
+        const hotkey = parseHotkey(combo);
+        const free = probeHotkey(hotkey);
+        if (free === false) {
+          console.log(chalk.yellow(`⚠️  ${hotkey.label} đang bị một ứng dụng khác (hoặc chính linh vật đang chạy) giữ — nếu không phải linh vật thì chọn tổ hợp khác.`));
+        }
+        saveMascotSettings({ hotkey: hotkey.label });
+        return console.log(chalk.green(`✅ Phím tắt gọi linh vật: ${hotkey.label} — có hiệu lực khi linh vật khởi động lại (aivin remote start).`));
+      } catch (error) {
+        return remoteFail(error);
+      }
+    }
+    if (action && !['on', 'off'].includes(action)) remoteFail(new Error(mascotText(lang, MascotText.CMD_USAGE)));
+    if (process.platform !== 'win32') console.log(chalk.gray(mascotText(lang, MascotText.CMD_UNSUPPORTED)));
+    if (!action) return console.log(mascotText(lang, loadMascotSettings().enabled ? MascotText.CMD_STATUS_ON : MascotText.CMD_STATUS_OFF));
+    saveMascotSettings({ enabled: action === 'on' });
+    console.log(chalk.green(`✅ ${mascotText(lang, action === 'on' ? MascotText.CMD_ON : MascotText.CMD_OFF)}`));
+  });
+
+remoteCommand
+  .command('meeting [action] [title...]')
+  .description('Meeting notes on this computer (Windows, needs `aivin remote start` running): start [title] | stop | status | list | show [id] — records the computer\'s sound (the others) + your microphone, transcribes it when the meeting ends')
+  .option('--then <instruction>', 'start: what Aivin should do with the transcript afterwards, e.g. "summarize and draft an email to my manager"')
+  .option('--lang <vi|en>', 'start: language spoken in the meeting')
+  .option('--no-screens', "start: don't save screenshots when the screen changes")
+  .action(async (action = 'status', titleWords = [], options) => {
+    try {
+      const fmt = (s) => { const m = Math.floor((s || 0) / 60); return `${m} phút ${String((s || 0) % 60).padStart(2, '0')} giây`; };
+      if (action === 'start') {
+        const res = await requestMeeting('start', { title: titleWords.join(' '), then: options.then, lang: options.lang, screens: options.screens });
+        console.log(chalk.green(`🎙️  Đang ghi "${res.title}" (id ${res.id})${res.sources && !res.sources.mic ? ' — không mở được micro' : ''}${res.sources && !res.sources.system ? ' — không mở được âm thanh máy' : ''}.`));
+        console.log(chalk.yellow('   Hãy báo cho mọi người trong cuộc họp biết họ đang được ghi âm.'));
+        console.log(chalk.gray('   Tự dừng khi cửa sổ họp đóng / im lặng lâu; dừng tay: aivin remote meeting stop'));
+        return;
+      }
+      if (action === 'stop') {
+        const res = await requestMeeting('stop', { id: titleWords[0] });
+        console.log(chalk.green(`⏹  Đã dừng ghi "${res.title}" (${fmt(res.duration_s)}) — đang làm biên bản, xem: aivin remote meeting status`));
+        return;
+      }
+      const meetings = createMeetingManager({ media: null });
+      if (action === 'list' || action === 'status') {
+        const list = meetings.list({ limit: action === 'list' ? 20 : 5 });
+        if (!list.length) return console.log(chalk.gray('Chưa ghi cuộc họp nào trên máy này. Bắt đầu: aivin remote meeting start "Tên cuộc họp"'));
+        for (const m of list) {
+          const when = new Date(m.started_at).toLocaleString('vi-VN');
+          console.log(`${m.status === 'recording' ? '🔴' : m.status === 'done' ? '✅' : m.status === 'failed' ? '❌' : '⏳'} ${m.title}  ${chalk.gray(`${when} · ${fmt(m.duration_s)} · ${m.status}${m.follow_up ? ` · việc sau họp: ${m.follow_up}` : ''} · ${m.id}`)}`);
+        }
+        return;
+      }
+      if (action === 'show') {
+        const t = meetings.transcript({ id: titleWords[0], max_chars: 100_000 });
+        console.log(t.text || chalk.gray(t.note));
+        return;
+      }
+      remoteFail(new Error('Usage: aivin remote meeting start [title] [--then "..."] | stop | status | list | show [id]'));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
   .command('policy [action] [value]')
   .description('Rules enforced on this computer itself (Aivin cannot change them): which steps need a click on this computer, tools turned off, extra blocked commands')
   .action(async (action, value) => {
@@ -1174,7 +1321,7 @@ remoteCommand
 
 remoteCommand
   .command('enable')
-  .description('Start the listener automatically when this computer starts')
+  .description('Start the listener automatically when this computer starts (Windows: the Aivin tray app, listed in Task Manager → Startup apps)')
   .option('--dir <path>', 'Folder the agent may work in (default: current folder)')
   .option('--proxy <url>', 'HTTP proxy the auto-started listener should use (default: detect at every start)')
   .action((options) => {

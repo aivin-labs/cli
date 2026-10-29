@@ -55,7 +55,42 @@ export const DeviceEvent = Object.freeze({
   WATCHES: 'device:watches',
   /** CLI → BE (29/10/2026): sắp thoát để chuyển sang bản CLI vừa tự cập nhật — `{ reason, version, expect_back_ms }`; máy sẽ nối lại ngay. */
   RESTARTING: 'device:restarting',
+  /** CLI → BE (29/10/2026): chủ máy hỏi / giao việc qua linh vật — `{ text, request_id }`, ack `{ ok, request_id, session_id, error? }`. */
+  CHAT: 'device:chat',
+  /** BE → CLI: tiến trình / câu trả lời của lượt chat — `{ request_id, kind: progress | answer | timeout | error, text }`. */
+  CHAT_EVENT: 'device:chat_event',
+  /** CLI → BE: giọng nói (WAV) → chữ, ack `{ ok, text, error? }` (biên bản họp). */
+  STT: 'device:stt',
+  /** CLI → BE (29/10/2026): mở phiên nói chuyện realtime với linh vật — ack `{ ok, session_id, error? }`, rồi `device:voice_event`. */
+  VOICE_START: 'device:voice_start',
+  /** CLI → BE: một đoạn mic `{ audio }` (base64 PCM16 mono, tần số `input_sample_rate` của sự kiện `ready`). */
+  VOICE_AUDIO: 'device:voice_audio',
+  /** CLI → BE: ngắt lời bot đang nói. */
+  VOICE_INTERRUPT: 'device:voice_interrupt',
+  /** CLI → BE: kết thúc phiên nói chuyện. */
+  VOICE_STOP: 'device:voice_stop',
+  /** BE → CLI: `{ kind: ready | user_transcript | assistant_transcript | audio | audio_done | speech_started | error | closed, … }`. */
+  VOICE_EVENT: 'device:voice_event',
+  /**
+   * BE → CLI (29/10/2026): linh vật báo chủ động — việc của chủ máy (giao trên web, chạy nền, automation…) xong / lỗi / cần trả lời:
+   * `{ id, kind: done | failed | needs_you, title, text, session_id?, question? }`.
+   */
+  NOTIFY: 'device:notify',
 });
+
+/** Loại báo chủ động (`device:notify`). */
+export const NotifyKind = Object.freeze({ DONE: 'done', FAILED: 'failed', NEEDS_YOU: 'needs_you' });
+
+/** Loại sự kiện của phiên nói chuyện (`device:voice_event`). */
+export const VoiceEventKind = Object.freeze({
+  READY: 'ready', USER_TRANSCRIPT: 'user_transcript', ASSISTANT_TRANSCRIPT: 'assistant_transcript', AUDIO: 'audio', AUDIO_DONE: 'audio_done',
+  SPEECH_STARTED: 'speech_started', ERROR: 'error', CLOSED: 'closed',
+  /** Dòng tiến trình của việc agent đang làm trong lúc nói chuyện. */
+  PROGRESS: 'progress',
+});
+
+/** Loại sự kiện của lượt chat từ linh vật (`device:chat_event`). */
+export const ChatEventKind = Object.freeze({ PROGRESS: 'progress', ANSWER: 'answer', TIMEOUT: 'timeout', ERROR: 'error', NEEDS_INPUT: 'needs_input' });
 
 /** Năng lực BE báo trong ack của `device:hello` (`features`). */
 /** Pha của `device:hold`: `waiting` = chờ người bấm xác nhận trên máy, `started` = đã qua hộp, bước bắt đầu chạy (BE phân biệt chưa chạy / chạy dở). */
@@ -66,6 +101,8 @@ export const ServerFeature = Object.freeze({
   WATCH: 'watch',
   /** BE gửi lại lời gọi khi máy nối lại + xác nhận từng kết quả (ack của `device:result`) — máy giữ kết quả tới khi BE nhận. */
   RESUME: 'resume',
+  /** Nói chuyện realtime với linh vật (`device:voice_*`). */
+  VOICE: 'voice',
 });
 
 /** Nhóm giới hạn song song trên máy — mỗi công cụ thuộc một nhóm. */
@@ -84,6 +121,8 @@ export const ToolGroup = Object.freeze({
   OFFICE: 'office',
   /** Tiến trình nền (proc.*) — proc.wait_for giữ chỗ lâu nên trần rộng hơn nhóm chạy lệnh. */
   PROC: 'proc',
+  /** Ghi chú cuộc họp (meeting.*) + chụp màn hình (screen.capture). */
+  MEDIA: 'media',
 });
 
 /** Số lời gọi chạy cùng lúc tối đa mỗi nhóm (chỉnh qua biến môi trường AIVIN_REMOTE_LIMIT_<NHÓM>). */
@@ -98,6 +137,7 @@ export const DEFAULT_GROUP_LIMITS = Object.freeze({
   [ToolGroup.GUI]: 1,
   [ToolGroup.OFFICE]: 1,
   [ToolGroup.PROC]: 16,
+  [ToolGroup.MEDIA]: 4,
 });
 
 /**

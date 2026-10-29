@@ -98,7 +98,9 @@ function runPowerShellJson(script, signal) {
 /**
  * Bộ điều khiển GUI của máy. `env.fullAccess` quyết định có cho điều khiển terminal không. `host` truyền vào được (test dùng host giả).
  */
-export function createGuiController({ fullAccess = false, host = createWindowsHost(), notify = showOSNotification, say = () => {}, background = true } = {}) {
+export function createGuiController({
+  fullAccess = false, host = createWindowsHost(), notify = showOSNotification, say = () => {}, background = true, defaultWindow = () => null,
+} = {}) {
   let appsCache = null;
   let lastNotifyAt = 0;
   /** Cửa sổ của từng lần observe — để kiểm ứng dụng bị chặn ở thao tác theo node_id. */
@@ -117,11 +119,16 @@ export function createGuiController({ fullAccess = false, host = createWindowsHo
     return { windows: list.map((w) => ({ ...w, blocked: BLOCKED_PROCESSES.has(normalizeProcess(w.process)) || (!fullAccess && SHELL_PROCESSES.has(normalizeProcess(w.process))) || undefined })) };
   }
 
-  const windowInfoOf = (args, ctx) => host.call('window_info', { window: args.window }, ctx);
+  /**
+   * Không nói cửa sổ = cửa sổ đang focus; nhưng chủ máy vừa gõ vào ô hỏi của linh vật thì focus là chính linh vật → host đổi sang cửa sổ họ
+   * đang dùng ngay trước đó (`defaultWindow()` = `{ avoid_pid, fallback }`).
+   */
+  const target = (args) => (args.window ? { window: args.window } : { ...defaultWindow() });
+  const windowInfoOf = (args, ctx) => host.call('window_info', target(args), ctx);
 
   async function observe(args, ctx) {
     const res = await host.call('observe', {
-      window: args.window,
+      ...target(args),
       max_nodes: Math.min(Number(args.max_nodes) || OBSERVE_MAX_NODES, 1500),
       include_image: !!args.include_image,
       image_when_poor: args.image_when_poor !== false,
@@ -136,7 +143,7 @@ export function createGuiController({ fullAccess = false, host = createWindowsHo
 
   async function focus(args, ctx) {
     assertWindowAllowed(await windowInfoOf(args, ctx), { fullAccess });
-    return host.call('focus', { window: args.window }, ctx);
+    return host.call('focus', target(args), ctx);
   }
 
   async function act(args, ctx) {
@@ -148,7 +155,7 @@ export function createGuiController({ fullAccess = false, host = createWindowsHo
     assertWindowAllowed(windowInfo, { fullAccess });
     announce(windowInfo);
     return host.call('act', {
-      action, node_id: args.node_id, window: args.node_id ? undefined : args.window, method: args.method, text: args.text, keys: args.keys,
+      action, node_id: args.node_id, ...(args.node_id ? {} : target(args)), method: args.method, text: args.text, keys: args.keys,
       option: args.option, state: args.state, direction: args.direction, amount: args.amount, point: args.point, to: args.to,
       image_scale: args.image_scale, settle_ms: args.settle_ms,
       check_user_input: true, user_input_grace_ms: Number(args.user_input_grace_ms) || 1500,
@@ -217,7 +224,7 @@ export function createGuiController({ fullAccess = false, host = createWindowsHo
 export function buildGuiTools(gui) {
   const target = {
     node_id: str('target element id from the latest gui.observe (preferred)'),
-    window: str('window handle (0x…) or a title/process to match; default the focused window'),
+    window: str('window handle (0x…) or a title/process to match; default the focused window (asked from the mascot: the window the person was using)'),
   };
   return [
     { name: 'gui.windows', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.windows(a, c),

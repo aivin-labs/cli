@@ -120,3 +120,17 @@ test('mã C# của host GUI biên dịch được (Windows có .NET Framework)',
   })();
   assert.doesNotMatch(out, /error CS\d+/, out);
 });
+
+test('không nói cửa sổ: host được báo tiến trình linh vật + cửa sổ chủ máy đang dùng khi hỏi; nói cửa sổ thì không', async () => {
+  const host = fakeHost({ observe: { snapshot: 1, window: NOTEPAD, nodes: [], tree_quality: 'good' }, window_info: NOTEPAD, focus: {}, act: {} });
+  const gui = createGuiController({ host, notify: () => {}, defaultWindow: () => ({ avoid_pid: 42, fallback: '0x10' }) });
+  await gui.observe({}, {});
+  await gui.act({ action: 'key', keys: 'ctrl+s' }, {});
+  await gui.focus({ window: 'notepad' }, {});
+  const args = (op) => host.calls.filter((c) => c.op === op).map((c) => c.args);
+  assert.equal(args('observe')[0].avoid_pid, 42);
+  assert.equal(args('observe')[0].fallback, '0x10');
+  assert.equal(args('act')[0].fallback, '0x10');
+  assert.deepEqual(args('window_info').at(-1), { window: 'notepad' });
+  assert.deepEqual(args('focus')[0], { window: 'notepad' });
+});

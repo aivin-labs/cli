@@ -104,6 +104,12 @@ function watchDeviceMission(api, sessionId, { idleTimeoutMs = 300_000 } = {}) {
   });
 }
 
+/** Cùng máy chủ (bỏ dấu / cuối, không phân biệt hoa thường). */
+function sameServer(a, b) {
+  const norm = (u) => String(u || '').trim().replace(/\/+$/, '').toLowerCase();
+  return !!a && norm(a) === norm(b);
+}
+
 /**
  * `aivin remote do "<việc>"` — giao thẳng cho Device Agent (không qua bước chọn công cụ), chạy nền phía BE, CLI in tiến trình.
  */
@@ -112,13 +118,17 @@ export async function runRemoteMission(objective, options = {}) {
   const apiKey = process.env.API_KEY;
   const authHeaders = missionAuthHeaders();
   // Đăng nhập bằng JWT (không phải API key `<client>-ak-…`) thì không suy ra được tenant → lấy từ token thiết bị đã ghép.
-  const client = deviceTokenClient(loadDeviceCredentials()?.device_token);
+  const creds = loadDeviceCredentials();
+  const client = deviceTokenClient(creds?.device_token);
   if (client && !authHeaders.headers['x-client-slug']) authHeaders.headers['x-client-slug'] = client;
+  // Không nêu --device mà máy này đã ghép với đúng máy chủ → làm trên chính máy này (29/10/2026: người dùng có nhiều máy online, việc gõ
+  // ở máy này từng chạy sang máy khác báo hiệu gần hơn). Máy này đang tắt daemon → BE tự chọn lại như khi không nêu máy.
+  const device = options.device || (creds?.device_id && sameServer(creds.server_url, serverUrl) ? creds.device_id : undefined);
   const workspace = await resolveWorkspace(serverUrl, authHeaders, options.workspace);
   const agentId = resolveAgentId(workspace, options.agent);
   const sessionId = `device-cli-${randomUUID()}`;
   console.log(chalk.blue('💻 Device Agent:'), objective);
-  console.log(chalk.gray(`   Workspace: ${workspace.name || workspace.id}${options.device ? ` · máy: ${options.device}` : ''}`));
+  console.log(chalk.gray(`   Workspace: ${workspace.name || workspace.id}${options.device ? ` · máy: ${options.device}` : device ? ` · máy: ${creds.name || device} (máy này)` : ''}`));
   const watching = options.watch !== false ? watchDeviceMission({ serverUrl, apiKey, authHeaders }, sessionId) : Promise.resolve(undefined);
   try {
     await axios.post(`${serverUrl}${DEVICE_API_PREFIX}/missions/start`, {
@@ -126,7 +136,7 @@ export async function runRemoteMission(objective, options = {}) {
       workspace_id: workspace.id || workspace._id,
       agent_id: agentId,
       session_id: sessionId,
-      ...(options.device ? { device: options.device } : {}),
+      ...(device ? { device } : {}),
       ...(options.cwd ? { working_dir: options.cwd } : {}),
       ...(options.file?.length ? { file_ids: options.file } : {}),
     }, authHeaders);

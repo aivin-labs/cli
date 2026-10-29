@@ -17,6 +17,18 @@ const ALWAYS_BLOCKED = new Set([
   'DOM.setFileInputFiles', 'Page.setInterceptFileChooserDialog', 'Browser.close', 'Browser.crash', 'Browser.crashGpuProcess',
 ]);
 
+/**
+ * Phiên gắn vào đích của tiện ích (`chrome-extension://…` — service worker / trang nền, gồm tiện ích gom nhóm tab của Aivin có quyền `debugger`):
+ * Puppeteer tự gắn mọi đích nên chỉ cho khởi động lại đích đang chờ và gỡ phiên — không chạy script trong tiện ích (29/10/2026).
+ */
+export const EXTENSION_SESSION_ALLOWED = new Set([
+  'Runtime.runIfWaitingForDebugger', 'Target.setAutoAttach', 'Target.detachFromTarget', 'Runtime.releaseObject', 'Runtime.releaseObjectGroup',
+]);
+
+export function isExtensionUrl(url) {
+  return /^\s*(chrome|edge)-extension:/i.test(String(url ?? ''));
+}
+
 export function isBlockedUrl(url) {
   const u = String(url ?? '');
   return BLOCKED_URL_RE.test(u) || BLOCKED_ABOUT_RE.test(u);
@@ -29,7 +41,8 @@ export function isBlockedUrl(url) {
 export function applyDevicePolicy(msg, { downloadsDir }) {
   const method = String(msg?.method || '');
   const params = msg?.params || {};
-  if (ALWAYS_BLOCKED.has(method)) return { error: `${method} is not allowed on this computer` };
+  // `Extensions.*`: nạp / gỡ tiện ích, đọc kho của tiện ích — cửa sổ Aivin mở với `--enable-unsafe-extension-debugging` (để CLI nạp tiện ích gom nhóm tab).
+  if (ALWAYS_BLOCKED.has(method) || method.startsWith('Extensions.')) return { error: `${method} is not allowed on this computer` };
   if ((method === 'Target.setAutoAttach' || method === 'Target.attachToTarget') && params.flatten === false) {
     return { error: 'Only flattened sessions are allowed' };
   }

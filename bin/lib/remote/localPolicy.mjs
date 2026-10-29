@@ -42,7 +42,13 @@ const POLICY_KEY_ACCOUNT = 'remote-policy-key';
 const COMMAND_ARG = Object.freeze({ 'shell.exec': 'command', 'proc.start': 'command', 'proc.write': 'text', 'sys.schedule': 'command', 'gui.act': 'text' });
 
 /** Công cụ luôn xét là rủi ro: gửi ra ngoài thay người dùng, cài việc chạy định kỳ (cách bám trụ kinh điển của mã độc). */
-const ALWAYS_RISKY_TOOLS = new Set(['office.outlook.send', 'sys.schedule']);
+// meeting.start: ghi âm micro + âm thanh máy — AI không tự bật ghi âm khi không ai ngồi trước máy biết (29/10/2026).
+const ALWAYS_RISKY_TOOLS = new Set(['office.outlook.send', 'sys.schedule', 'meeting.start']);
+const ALWAYS_RISKY_REASON = {
+  'office.outlook.send': 'Gửi thư thay bạn',
+  'sys.schedule': 'Đặt việc chạy định kỳ trên máy',
+  'meeting.start': 'Ghi âm cuộc họp (micro + âm thanh máy) và chụp màn hình',
+};
 
 /**
  * Lệnh có hậu quả khó lấy lại / chạm bảo mật — khớp chuỗi nên lách được (ghép chuỗi, mã hoá), nhưng chính các cách lách thông dụng
@@ -212,7 +218,7 @@ const commandOf = (toolName, args) => (COMMAND_ARG[toolName] ? String(args?.[COM
 
 /** Vì sao một lời gọi rủi ro (chuỗi ngắn để hiện cho người dùng) — `null` = không rủi ro. */
 export function riskReason(tool, args = {}) {
-  if (ALWAYS_RISKY_TOOLS.has(tool.name)) return tool.name === 'office.outlook.send' ? 'Gửi thư thay bạn' : 'Đặt việc chạy định kỳ trên máy';
+  if (ALWAYS_RISKY_TOOLS.has(tool.name)) return ALWAYS_RISKY_REASON[tool.name];
   if (tool.destructive && args.permanent === true) return 'Xoá hẳn, không lấy lại được';
   const command = commandOf(tool.name, args);
   if (command && RISKY_COMMAND_PATTERNS.some((re) => re.test(command))) return 'Lệnh có thể thay đổi hệ thống hoặc cài đặt bảo mật';
@@ -243,6 +249,7 @@ export function describeCall(tool, args = {}) {
   const command = commandOf(tool.name, args);
   if (command) return cut(command);
   if (tool.name === 'office.outlook.send') return cut(`Tới: ${args.to || '?'} — ${args.subject || ''}`, 300);
+  if (tool.name === 'meeting.start') return cut(`${args.title || 'Cuộc họp'}${args.then ? ` — sau đó: ${args.then}` : ''}`, 300);
   if (args.path) return cut(args.path, 300);
   if (Array.isArray(args.paths)) return cut(args.paths.join(', '), 300);
   return tool.name;

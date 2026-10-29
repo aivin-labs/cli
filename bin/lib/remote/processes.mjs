@@ -184,6 +184,8 @@ export function createProcessManager() {
     start, read, waitFor, write, stop,
     list: (env) => { prune(); return { processes: [...procs.values()].filter((p) => p.owner === ownerOf(env)).map(view) }; },
     stopAll: () => { for (const p of procs.values()) killTree(p); },
+    /** Còn tiến trình nền chạy (mọi người dùng) — Cloud Computer báo BE qua heartbeat để máy không bị tắt vì "rảnh" giữa lúc đang chạy. */
+    hasRunning: () => [...procs.values()].some((p) => p.status === 'running'),
   };
 }
 

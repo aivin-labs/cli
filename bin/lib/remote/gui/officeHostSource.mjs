@@ -18,10 +18,38 @@ namespace AivinGui {
     static bool B(Dictionary<string, object> d, string k, bool def) { object v; try { return d != null && d.TryGetValue(k, out v) && v != null ? Convert.ToBoolean(v) : def; } catch { return def; } }
     static int I(Dictionary<string, object> d, string k, int def) { object v; try { return d != null && d.TryGetValue(k, out v) && v != null ? Convert.ToInt32(v) : def; } catch { return def; } }
 
+    // Ứng dụng bận (đang sửa ô, hộp thoại, đang khởi động): COM từ luồng MTA không tự thử lại → thử lại tới BUSY_RETRY_MS (29/10/2026).
+    const uint RPC_E_CALL_REJECTED = 0x80010001;
+    const uint RPC_E_SERVERCALL_RETRYLATER = 0x8001010A;
+    const int BUSY_RETRY_MS = 2000;
+    const int BUSY_RETRY_STEP_MS = 200;
+
+    static bool IsBusy(Exception e) {
+      var com = (e is TargetInvocationException && e.InnerException != null ? e.InnerException : e) as COMException;
+      return com != null && ((uint)com.ErrorCode == RPC_E_CALL_REJECTED || (uint)com.ErrorCode == RPC_E_SERVERCALL_RETRYLATER);
+    }
+
     static object Inv(object o, string n, BindingFlags f, object[] a) {
-      try { return o.GetType().InvokeMember(n, f, null, o, a); }
-      catch (TargetInvocationException e) { throw new GuiError("OFFICE_FAILED", n + ": " + (e.InnerException != null ? e.InnerException.Message : e.Message)); }
-      catch (COMException e) { throw new GuiError("OFFICE_FAILED", n + ": " + e.Message); }
+      for (int waited = 0; ; waited += BUSY_RETRY_STEP_MS) {
+        try { return o.GetType().InvokeMember(n, f, null, o, a); }
+        catch (Exception e) {
+          if (IsBusy(e) && waited < BUSY_RETRY_MS) { Thread.Sleep(BUSY_RETRY_STEP_MS); continue; }
+          if (IsBusy(e)) throw new GuiError("OFFICE_BUSY", n + ": the app is busy (a cell is being edited or a dialog is open)");
+          if (e is TargetInvocationException) throw new GuiError("OFFICE_FAILED", n + ": " + (e.InnerException != null ? e.InnerException.Message : e.Message));
+          if (e is COMException) throw new GuiError("OFFICE_FAILED", n + ": " + e.Message);
+          throw;
+        }
+      }
+    }
+
+    /** Tệp đang mở ở bản Excel / Word khác (bận) nên bản ẩn chỉ mở được dạng chỉ đọc → báo rõ thay vì để bước lưu hỏng khó hiểu. */
+    static void RequireWritable(object doc, bool readOnly, string path, bool word) {
+      if (readOnly) return;
+      bool ro = false;
+      try { ro = Convert.ToBoolean(Get(doc, "ReadOnly")); } catch (GuiError) { }
+      if (!ro) return;
+      try { if (word) Call(doc, "Close", 0); else Call(doc, "Close", false); } catch (GuiError) { }
+      throw new GuiError("OFFICE_BUSY", "File is open in another Excel / Word window that is busy or locked: " + path + " - ask the user to finish editing there (press Enter or Esc, close dialogs) or close the file, then try again");
     }
     static object Get(object o, string n, params object[] a) { return Inv(o, n, BindingFlags.GetProperty | BindingFlags.InvokeMethod, a); }
     static void Set(object o, string n, object v) { Inv(o, n, BindingFlags.SetProperty, new object[] { v }); }
@@ -84,6 +112,7 @@ namespace AivinGui {
         else if (create) { book = Call(wbs, "Add"); Call(book, "SaveAs", path); }
         else throw new GuiError("NOT_FOUND", "File not found: " + path);
         Release(wbs);
+        RequireWritable(book, readOnly, path, false);
         return new Opened { App = own, Doc = book, Own = true };
       } catch { try { Call(own, "Quit"); } catch { } Release(own); throw; }
     }
@@ -241,6 +270,7 @@ namespace AivinGui {
         else if (create) { doc = Call(docs, "Add"); Call(doc, "SaveAs2", path); }
         else throw new GuiError("NOT_FOUND", "File not found: " + path);
         Release(docs);
+        RequireWritable(doc, readOnly, path, true);
         return new Opened { App = own, Doc = doc, Own = true };
       } catch { try { Call(own, "Quit", 0); } catch { } Release(own); throw; }
     }

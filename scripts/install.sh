@@ -12,7 +12,9 @@
 #          --dir <folder the agent may use> --version <e.g. v1.1.0>
 # Environment: AIVIN_DOWNLOAD_ROOT (versioned site: <root>/latest.txt + <root>/<version>/<asset>, default https://get.aivin.vn),
 #              AIVIN_DOWNLOAD_BASE (one folder holding every asset, e.g. a GitHub release - overrides the root),
-#              AIVIN_INSTALL_DIR (default: ~/.local/bin).
+#              AIVIN_INSTALL_DIR (default: ~/.local/bin),
+#              AIVIN_NO_AUTOSTART=1 (don't start Aivin with the computer - can be turned on later in Aivin's menu),
+#              AIVIN_NO_DESKTOP=1 (no menu bar / tray app and no app menu entry; Linux without a graphical session never gets them).
 set -eu
 
 CODE=""; SERVER=""; DIR=""; FULL=""; VERSION="${AIVIN_VERSION:-}"
@@ -120,12 +122,34 @@ case ":$PATH:" in
      echo "    export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 
+# Desktop app: macOS = menu bar icon + Aivin.app (Spotlight), Linux = tray icon + app menu entry (only with a graphical session).
+# Starts with the computer by default - listed in Login Items (macOS) / Startup Applications (Linux), can be turned off there.
+DESKTOP=""
+WANT_DESKTOP=""
+if [ -z "${AIVIN_NO_DESKTOP:-}" ]; then
+  case "$(uname -s)" in
+    Darwin) WANT_DESKTOP=1 ;;
+    *) if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then WANT_DESKTOP=1; fi ;;
+  esac
+fi
+if [ -n "$WANT_DESKTOP" ]; then
+  set -- desktop install
+  if [ -n "${AIVIN_NO_AUTOSTART:-}" ]; then set -- "$@" --no-autostart; fi
+  if "$TARGET" "$@" >/dev/null 2>&1; then
+    DESKTOP=1
+    if [ "$(uname -s)" = Darwin ]; then say "Aivin is in the menu bar (search \"Aivin\" in Spotlight)"; else say "Aivin is in the system tray and the app menu"; fi
+  else
+    echo "  Could not set up the desktop app - aivin still works from the command line."
+  fi
+fi
+
 if [ -n "$CODE" ]; then
   set -- remote start --code "$CODE"
   if [ -n "$SERVER" ]; then set -- "$@" --server "$SERVER"; fi
   if [ -n "$FULL" ]; then set -- "$@" --full-access
   elif [ -n "$DIR" ]; then set -- "$@" --dir "$DIR"; fi
-  say "Connecting this computer to Aivin - keep this window open so the AI can work here."
+  if [ -n "$DESKTOP" ]; then say "Connecting this computer to Aivin - once connected you can close this window, Aivin keeps running in the background."
+  else say "Connecting this computer to Aivin - keep this window open so the AI can work here."; fi
   echo ""
   # Run from `curl | sh`: stdin is the pipe - give the keyboard back to the program (so Ctrl+C works).
   # Test by actually opening /dev/tty: without a controlling terminal (CI, `docker run` without -t) it
@@ -133,6 +157,7 @@ if [ -n "$CODE" ]; then
   if (: < /dev/tty) 2>/dev/null; then exec "$TARGET" "$@" < /dev/tty; else exec "$TARGET" "$@" < /dev/null; fi
 else
   echo ""
-  echo "  Next: create a code in Aivin (chat box -> Browser menu -> Add this computer), then run:"
+  echo "  Next: create a code in Aivin (chat box -> Browser menu -> Add this computer), then"
+  if [ -n "$DESKTOP" ]; then echo "    click the Aivin icon, choose \"Connect this computer...\" and enter the code, or run:"; else echo "    run:"; fi
   echo "    aivin remote start --code <code>"
 fi

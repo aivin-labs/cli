@@ -3,7 +3,7 @@ import net from 'net';
 import path from 'path';
 import { execFile } from 'child_process';
 import WSClient from 'ws';
-import { LOCAL_BROWSERS, resolveBrowserInstall } from '../browserAutomation.mjs';
+import { LOCAL_BROWSERS, resolveBrowserInstall } from '../localBrowser.mjs';
 import { applyDevicePolicy, executableDownloadGuid } from './cdpPolicy.mjs';
 
 /**

@@ -19,6 +19,8 @@ import { buildProcessTools, shellCommand } from './processes.mjs';
 import { buildScheduleTools } from './schedule.mjs';
 import { buildWatchTools } from './deviceWatches.mjs';
 import { buildTransferTools } from './httpTransfer.mjs';
+import { buildMeetingTools } from './meeting/index.mjs';
+import { buildClipboardTools } from './clipboard.mjs';
 
 /**
  * Công cụ trên máy, chia gói theo năng lực phát hiện được (git chỉ có khi máy cài git, tìm nội dung dùng ripgrep nếu có…). Mỗi công cụ
@@ -716,6 +718,10 @@ export function buildTools(env) {
   if (env.transfer) tools.push(...buildTransferTools(env.transfer));
   // Theo dõi trên máy kích hoạt việc của Aivin (tệp mới, dòng log) — BE đặt danh sách.
   if (env.watches) tools.push(...buildWatchTools(env.watches));
+  // Ghi chú cuộc họp (ghi âm máy + micro, chuyển chữ sau khi họp) + chụp màn hình — Windows, máy cá nhân.
+  if (env.meetings || env.media) tools.push(...buildMeetingTools({ meetings: env.meetings, media: env.media }));
+  // Clipboard (chữ; Windows thêm ảnh + tệp đã copy) — máy cá nhân có màn hình.
+  if (env.clipboard) tools.push(...buildClipboardTools(env.clipboard));
   // Máy tính tổ chức không lập chỉ mục tệp (nhiều người chung một máy) — Planner tìm bằng fs.list / fs.grep trong thư mục của mình.
   return env.fileIndex ? tools : tools.filter((t) => t.name !== 'fs.find');
 }

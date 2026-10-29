@@ -170,6 +170,7 @@ namespace AivinGui {
 
     static object Get(Dictionary<string, object> d, string k) { object v; return d != null && d.TryGetValue(k, out v) ? v : null; }
     static string Str(Dictionary<string, object> d, string k) { var v = Get(d, k); return v == null ? null : Convert.ToString(v); }
+    static long Long(Dictionary<string, object> d, string k) { var v = Get(d, k); try { return v == null ? 0 : Convert.ToInt64(v); } catch { return 0; } }
     static int Int(Dictionary<string, object> d, string k, int def) { var v = Get(d, k); try { return v == null ? def : Convert.ToInt32(v); } catch { return def; } }
     static double Dbl(Dictionary<string, object> d, string k, double def) { var v = Get(d, k); try { return v == null ? def : Convert.ToDouble(v); } catch { return def; } }
     static bool Bool(Dictionary<string, object> d, string k, bool def) { var v = Get(d, k); try { return v == null ? def : Convert.ToBoolean(v); } catch { return def; } }
@@ -276,7 +277,17 @@ namespace AivinGui {
         }
         throw new GuiError("NOT_FOUND", "No window matches: " + w);
       }
-      return Native.GetForegroundWindow();
+      // Đang focus là chính linh vật (chủ máy vừa bấm vào ô hỏi) → cửa sổ họ đang dùng ngay trước đó ("fallback"), không thì không có.
+      IntPtr fg = Native.GetForegroundWindow();
+      long avoid = Long(a, "avoid_pid");
+      if (avoid > 0 && fg != IntPtr.Zero) {
+        uint fgPid; Native.GetWindowThreadProcessId(fg, out fgPid);
+        if (fgPid == avoid) {
+          IntPtr back = ParseWindow(Str(a, "fallback"));
+          return back != IntPtr.Zero && Native.IsWindow(back) ? back : IntPtr.Zero;
+        }
+      }
+      return fg;
     }
 
     /** Đẩy cửa sổ xuống đáy chồng cửa sổ, không kích hoạt — nằm dưới cửa sổ người dùng, thao tác theo pattern vẫn chạy được. */

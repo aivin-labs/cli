@@ -18,7 +18,14 @@ import { createFileIndex, indexRootsFor } from './fileIndexer.mjs';
 import { createScheduler } from './scheduler.mjs';
 import { acquireDaemonLock } from './daemonLock.mjs';
 import { randomUUID } from 'crypto';
-import { DeviceToolError, fullAccessRoots, isRemotePaused } from './sandbox.mjs';
+import { DeviceToolError, fullAccessRoots, isRemotePaused, setRemotePaused } from './sandbox.mjs';
+import { createMascot, HostEvent as MascotHostEvent } from './mascot/index.mjs';
+import { createMascotChat } from './mascot/ask.mjs';
+import { mascotLang } from './mascot/strings.mjs';
+import { showOSNotification } from './notify.mjs';
+import { createMeetingManager, watchMeetingRequests } from './meeting/index.mjs';
+import { createMediaHost, mediaSupported } from './meeting/recorder.mjs';
+import { createClipboard } from './clipboard.mjs';
 import { buildTools, toolMap } from './toolHandlers.mjs';
 import { createBrowserTunnels, detectLocalBrowser } from './browserTunnel.mjs';
 import { createGuiController, detectGui } from './gui/index.mjs';
@@ -39,6 +46,10 @@ import {
 import { detectSupervisor } from './autoStart.mjs';
 
 const HEARTBEAT_MS = 20_000;
+// Nhịp nối lại tối đa. Máy cá nhân giãn tới 30 s (nhiều máy cùng dội BE lúc deploy). Cloud Computer (`--multi-user`): một socket / org qua
+// mạng nội bộ, BE có thể đang chờ máy nối về để giao việc — giãn 30 s (+50 % ngẫu nhiên) nghĩa là BE lên lại rồi vẫn chờ tới ~45 s (28/10/2026).
+const RECONNECT_DELAY_MAX_MS = 30_000;
+const MULTI_USER_RECONNECT_DELAY_MAX_MS = 2_000;
 const STREAM_FLUSH_MS = 150;
 const STREAM_FLUSH_BYTES = 16 * 1024;
 const ACK_TIMEOUT_MS = 10_000;
@@ -94,7 +105,7 @@ export function isValidDeviceCall(call) {
 
 function boundedResult(outcome) {
   if (!outcome.ok) return outcome;
-  let size = 0;
+  let size;
   try { size = Buffer.byteLength(JSON.stringify(outcome.result ?? null)); } catch { size = MAX_RESULT_BYTES + 1; }
   if (size <= MAX_RESULT_BYTES) return outcome;
   return { ok: false, error: `Result too large (${size} bytes) — read smaller ranges`, error_code: DeviceErrorCode.OUTPUT_TOO_LARGE, duration_ms: outcome.duration_ms };
@@ -229,7 +240,11 @@ export async function startRemoteClient(options = {}) {
   const browserTunnels = browser ? createBrowserTunnels({ serverUrl, deviceToken: () => creds.device_token, browser, useDailyBrowser, say: (m) => say(chalk.cyan(m)) }) : null;
   // Một tiến trình host chung cho giao diện + Office (chỉ dựng khi lời gọi đầu tiên cần).
   const winHost = guiProfile || officeApps.length ? createWindowsHost() : null;
-  const gui = guiProfile ? createGuiController({ fullAccess, host: winHost, say: (m) => say(chalk.magenta(m)) }) : null;
+  // Không nói cửa sổ mà focus đang ở linh vật (chủ máy vừa gõ vào ô hỏi) → cửa sổ họ đang dùng lúc hỏi (mascot/ask.mjs).
+  const gui = guiProfile ? createGuiController({
+    fullAccess, host: winHost, say: (m) => say(chalk.magenta(m)),
+    defaultWindow: () => (mascot.pid() ? { avoid_pid: mascot.pid(), fallback: mascotChat?.userWindow()?.window } : null),
+  }) : null;
   // Kho hoàn tác (xoá → thùng rác của kho, ghi đè → giữ bản cũ). Máy tính tổ chức: công cụ tệp chạy dưới tài khoản thành viên, không có kho.
   const undo = multiUser ? null : createUndoStore();
   void undo?.cleanup().catch(() => undefined);
@@ -255,7 +270,38 @@ export async function startRemoteClient(options = {}) {
   });
   // Tệp lớn đi HTTP thẳng với vé của BE (fs.upload / fs.download) — máy tính tổ chức không có (gửi HTTP chạy bằng tài khoản của daemon).
   const transfer = multiUser ? null : { serverUrl, deviceToken: () => creds.device_token };
-  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: winHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer };
+  // Ghi chú cuộc họp + chụp màn hình (meeting/) — Windows, máy cá nhân; tắt: --no-meetings / AIVIN_REMOTE_MEETINGS=0.
+  const media = !multiUser && mediaSupported() && options.meetings !== false && process.env.AIVIN_REMOTE_MEETINGS !== '0' ? createMediaHost() : null;
+  const meetings = media ? createMeetingManager({
+    roots, media, lang: mascotLang(),
+    say: (m) => say(chalk.cyan(m)),
+    notify: showOSNotification,
+    isPaused: isRemotePaused,
+    keepAwake,
+    // Đang nói chuyện với linh vật → không ghi biên bản họp (và ngược lại, xem micBusy của mascotChat).
+    micBusy: () => !!mascotChat?.inCall(),
+    // Chuyển chữ từng đoạn qua chính `device:stt` của ô hỏi linh vật; mất mạng thì chờ nối lại (tối đa 10 phút) rồi mới báo lỗi.
+    stt: async (audio, lang) => {
+      const deadline = Date.now() + 10 * 60_000;
+      while (!socket?.connected) {
+        if (Date.now() > deadline) throw new Error('offline');
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+      return socket.timeout(60_000).emitWithAck(DeviceEvent.STT, { audio, lang });
+    },
+    // Lượt chat sau họp: qua ô hỏi của linh vật (câu trả lời hiện ở đó); không có linh vật thì gửi thẳng.
+    followUp: async (text) => {
+      if (!socket?.connected) return { ok: false, error: 'offline' };
+      if (mascotChat) {
+        if (mascotChat.busy()) return { ok: false, error: 'busy' };
+        void mascotChat.ask(text);
+        return { ok: true };
+      }
+      const ack = await socket.timeout(15_000).emitWithAck(DeviceEvent.CHAT, { text, request_id: `meeting-${Date.now()}` });
+      return ack?.ok ? { ok: true } : { ok: false, error: ack?.error || 'failed' };
+    },
+  }) : null;
+  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: winHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer, meetings, media, clipboard: multiUser ? null : createClipboard() };
   const host = multiUser ? createMultiUserHost({ baseEnv: env, say: (m) => say(chalk.gray(m)) }) : null;
   host?.start();
   const tools = buildTools(env);
@@ -266,6 +312,30 @@ export async function startRemoteClient(options = {}) {
   const confirmer = multiUser ? null : createLocalConfirmer();
   // Nhiều người dùng: thêm trần song song theo từng thành viên — một người không chiếm hết chỗ của cả tổ chức.
   const scheduler = createScheduler(multiUser ? { scopeLimits: DEFAULT_SCOPE_LIMITS } : undefined);
+  // Linh vật trên màn hình (mascot/): việc chính đang làm + nhật ký chi tiết; nút tạm dừng = công tắc ngắt. Máy tính tổ chức: không có.
+  const mascot = createMascot({
+    enabled: !multiUser && options.mascot !== false && process.env.AIVIN_MASCOT !== '0',
+    onPause: () => setRemotePaused(true),
+    onResume: () => setRemotePaused(false),
+    say: (m) => say(chalk.gray(`   ${m}`)),
+    // Ô hỏi của linh vật: gõ / nói → lượt chat trên Aivin qua socket của máy (mascot/ask.mjs, dựng sau khi có socket).
+    // Gõ khi Aivin đang hỏi lại → là câu trả lời; nút lựa chọn → trả lời đúng lựa chọn đó.
+    onAsk: (text, window) => { void mascotChat?.reply(text, window); },
+    onChoose: (id) => { void mascotChat?.choose(id); },
+    // Thả tệp vào bot → đi kèm câu gõ kế tiếp.
+    onDrop: (files) => mascotChat?.attach(files),
+    // Nói chuyện trực tiếp: mic / loa ở cửa sổ, phiên thoại realtime trên BE (mascot/ask.mjs).
+    onVoice: (msg) => {
+      if (!mascotChat) return;
+      if (msg.t === MascotHostEvent.VOICE_AUDIO) return mascotChat.voiceAudio(msg.audio);
+      if (msg.t === MascotHostEvent.VOICE_START) return void mascotChat.voiceStart(msg.window);
+      if (msg.t === MascotHostEvent.VOICE_INTERRUPT) return mascotChat.voiceInterrupt();
+      if (msg.t === MascotHostEvent.VOICE_STOP) return mascotChat.voiceStop();
+      if (msg.t === MascotHostEvent.VOICE_MIC_LOST) return mascotChat.voiceMicLost();
+    },
+  });
+  if (isRemotePaused()) mascot.paused(true);
+  let mascotChat = null;
 
   say(chalk.blue('💻 Aivin Device Agent — máy này nhận việc từ agent của bạn'));
   say(chalk.gray(`   Máy:        ${creds.name} (${creds.device_id})`));
@@ -281,7 +351,10 @@ export async function startRemoteClient(options = {}) {
   say(chalk.gray(`   Trình duyệt: ${!browser ? 'không có Chrome / Edge — AI dùng trình duyệt trên máy chủ'
     : useDailyBrowser ? `${browser.name} hằng ngày của bạn nếu đã bật ${remoteDebuggingPage(browser.id)}, không thì cửa sổ riêng của Aivin`
       : `${browser.name} (cửa sổ riêng của Aivin)`}`));
+  say(chalk.gray(`   Cuộc họp:   ${meetings ? 'AI ghi chú được cuộc họp (âm thanh máy + micro, bạn bấm Cho phép mỗi lần) và chụp màn hình; tắt: --no-meetings' : 'không (chỉ Windows)'}`));
   if (isRemotePaused()) say(chalk.yellow('   ⏸  Đang TẠM DỪNG (aivin remote resume để nhận việc lại)'));
+  // `aivin remote meeting start|stop` gõ ở máy → daemon này; buổi ghi / biên bản dở từ lần chạy trước → làm nốt.
+  const stopMeetingRequests = meetings ? watchMeetingRequests(meetings) : null;
 
   fileIndex?.build()
     .then((s) => { say(chalk.gray(`   Chỉ mục tệp: ${s.files} tệp (${s.updated} cập nhật, ${s.ms} ms)`)); fileIndex.watch(); })
@@ -297,7 +370,7 @@ export async function startRemoteClient(options = {}) {
     agent: proxyAgentFor(`${serverUrl}${DEVICE_NAMESPACE}`),
     reconnection: true,
     reconnectionDelay: 1000,
-    reconnectionDelayMax: 30_000,
+    reconnectionDelayMax: multiUser ? MULTI_USER_RECONNECT_DELAY_MAX_MS : RECONNECT_DELAY_MAX_MS,
     randomizationFactor: 0.5,
   });
 
@@ -309,8 +382,9 @@ export async function startRemoteClient(options = {}) {
   // Bản vừa tự cập nhật chạy đủ 10 phút không sập → xác nhận, bỏ bản cũ giữ để tự lùi.
   const confirmTimer = selfManaged ? setTimeout(() => { try { confirmUpdate(); } catch { /* lần sau */ } }, UPDATE_CONFIRM_AFTER_MS) : null;
   confirmTimer?.unref?.();
+  // Cloud Computer: `busy` = còn tiến trình nền đang chạy → BE giữ máy không tắt vì rảnh (có trần giờ phía BE).
   const heartbeat = setInterval(() => {
-    if (socket.connected) socket.emit(DeviceEvent.HEARTBEAT, {});
+    if (socket.connected) socket.emit(DeviceEvent.HEARTBEAT, multiUser ? { busy: processes.hasRunning() } : {});
     ledger.prune();
     syncProcAwake();
   }, HEARTBEAT_MS);
@@ -327,6 +401,7 @@ export async function startRemoteClient(options = {}) {
       winHost?.close();
       processes.stopAll();
     }
+    if (paused !== pausedSeen) mascot.paused(paused);
     pausedSeen = paused;
   }, PAUSE_POLL_MS);
   pauseWatch.unref?.();
@@ -359,12 +434,16 @@ export async function startRemoteClient(options = {}) {
     clearInterval(pauseWatch);
     clearTimeout(confirmTimer);
     updater?.close();
+    mascot.close();
     if (selfManaged) noteCleanExit();
     const draining = scheduler.cancelAll('The Aivin agent on this device stopped');
     cancelGating([...gating.keys()]);
     ledger.persist();
     socket.disconnect();
     browserTunnels?.closeAll();
+    // Đóng tệp ghi họp cho đúng; biên bản làm ở lần chạy sau (meetings.recover).
+    stopMeetingRequests?.();
+    void meetings?.shutdown();
     gui?.close();
     winHost?.close();
     processes.stopAll();
@@ -390,7 +469,8 @@ export async function startRemoteClient(options = {}) {
     // Chỉ tự thoát để chuyển bản khi chắc có trình giữ chạy mở lại (detectSupervisor) — không thì chỉ nhắc.
     supervised: !!supervisor && options.handleSignals !== false,
     deviceId: creds.device_id,
-    isIdle: () => activeCalls === 0 && !processes.hasRunning?.() && !(browserTunnels?.liveCount() > 0),
+    // Đang ghi họp / làm biên bản: không tự khởi động lại để cập nhật (mất đoạn ghi).
+    isIdle: () => activeCalls === 0 && !processes.hasRunning?.() && !(browserTunnels?.liveCount() > 0) && !meetings?.busy(),
     lastActivityAt: () => lastActivityAt,
     say: (m) => say(chalk.cyan(m)),
     onRestart: async (version) => {
@@ -441,6 +521,7 @@ export async function startRemoteClient(options = {}) {
       if (!multiUser) profile.update = updateProfile({ enabled: autoUpdateEnabled });
       const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash, inflight: ledger.heldIds() });
       serverResume = Array.isArray(hello?.features) && hello.features.includes(ServerFeature.RESUME);
+      mascotChat?.setVoiceSupported(Array.isArray(hello?.features) && hello.features.includes(ServerFeature.VOICE));
       // Việc máy còn giữ mà BE không còn chờ (đã huỷ / hết giờ lúc máy mất mạng — lệnh huỷ không tới được máy): dừng ngay, bỏ kết quả.
       const orphaned = Array.isArray(hello?.orphaned) ? hello.orphaned.filter((id) => typeof id === 'string') : [];
       if (orphaned.length) {
@@ -461,6 +542,7 @@ export async function startRemoteClient(options = {}) {
         if (Array.isArray(res?.watches)) watches.set(res.watches);
       }
       say(chalk.green('✅ Đã kết nối — sẵn sàng nhận việc.'));
+      mascot.connected();
       logActivity({ type: 'connected', serverUrl, deviceId: creds.device_id });
     } catch (e) {
       say(chalk.yellow(`⚠️  Chào máy chủ lỗi (${e.message}) — sẽ thử lại khi nối lại.`));
@@ -495,6 +577,7 @@ export async function startRemoteClient(options = {}) {
     const controller = new AbortController();
     gating.set(call.call_id, controller);
     let result;
+    mascot.waitingConfirm(call, tool);
     try {
       result = await confirmer.ask({
         reason: verdict.reason, purpose, detail: describeCall(tool, call.args || {}), timeoutSec, signal: controller.signal,
@@ -505,6 +588,7 @@ export async function startRemoteClient(options = {}) {
       gating.delete(call.call_id);
     }
     logActivity({ type: 'local_confirm', tool: call.tool, id: call.call_id, result });
+    mascot.confirmDone(call, result === ConfirmResult.ALLOW);
     // Bấm "Cho phép" đúng lúc chủ máy vừa tạm dừng → không chạy.
     if (result === ConfirmResult.ALLOW && isRemotePaused()) throw new DeviceToolError(DeviceErrorCode.KILL_SWITCH, 'Remote control is paused on this device');
     if (result === ConfirmResult.ALLOW) return hold(0, HoldPhase.STARTED);
@@ -560,6 +644,7 @@ export async function startRemoteClient(options = {}) {
     let outcome;
     activeCalls++;
     lastActivityAt = Date.now();
+    mascot.callStarted(call, byName.get(call.tool));
     keepAwake.hold();
     try {
       ({ tool, outcome } = await runOnce(call, streamer));
@@ -584,6 +669,7 @@ export async function startRemoteClient(options = {}) {
     } finally {
       activeCalls--;
       lastActivityAt = Date.now();
+      mascot.callFinished(call, tool, outcome);
     }
   };
 
@@ -603,6 +689,8 @@ export async function startRemoteClient(options = {}) {
     if (stopped) return;
     say(chalk.yellow(`⚠️  Mất kết nối (${reason}) — tự nối lại...`));
     logActivity({ type: 'disconnected', reason });
+    mascot.disconnected();
+    mascotChat?.voiceDisconnected();
     // Server chủ động cắt (BE khởi động lại, socket khác của máy này vừa thay chỗ…) → socket.io-client KHÔNG tự nối lại; nối tay, giãn nhịp.
     if (reason === 'io server disconnect') {
       const delay = Math.min(30_000, 1000 * 2 ** Math.min(serverKicks++, 5)) + Math.floor(Math.random() * 500);
@@ -656,6 +744,18 @@ export async function startRemoteClient(options = {}) {
     scheduler.cancel(ids);
     cancelGating(ids);
   }));
+  if (mascot.enabled) {
+    mascotChat = createMascotChat({
+      socket: () => socket, send: (cmd) => mascot.chat(cmd), lang: mascot.lang,
+      onAlert: (alert) => mascot.alert(alert), onPending: (on) => mascot.needsYou(on),
+      micBusy: () => !!meetings?.status()?.recording,
+    });
+    socket.on(DeviceEvent.CHAT_EVENT, guarded(DeviceEvent.CHAT_EVENT, (payload) => mascotChat.onChatEvent(payload)));
+    // Báo chủ động: việc của chủ máy (web, chạy nền, automation…) xong / lỗi / cần trả lời.
+    socket.on(DeviceEvent.NOTIFY, guarded(DeviceEvent.NOTIFY, (payload) => mascotChat.onNotify(payload)));
+    socket.on(DeviceEvent.VOICE_EVENT, guarded(DeviceEvent.VOICE_EVENT, (payload) => mascotChat.onVoiceEvent(payload)));
+  }
+  meetings?.recover();
 
   // Lưới cuối: promise bị từ chối mà không ai bắt → ghi log, KHÔNG thoát (daemon phục vụ cả tổ chức, chết là mất mọi lời gọi đang chạy).
   if (!unhandledRejectionHooked) {

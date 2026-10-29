@@ -1062,12 +1062,15 @@ Runs an **AI Browser** mission - a multi-step, self-correcting agent that drives
 Options:
   --remote                 Use a server-side pooled browser instead of your own local one (no
                             local browser needed, no cookies/logins carried over)
-  --debug-port <port>      Local mode only: port to look for/launch your browser's remote
+  --debug-port <port>      Local mode only: port to launch the AI Browser window's remote
                             debugging on (default: 9222, auto-tries a few nearby ports if that
                             one is taken by something else)
-  --browser <edge|chrome>  Local mode only: which browser to drive - default: auto-detects your
-                            OS's actual default browser, falling back to whichever of Edge/Chrome
-                            is installed
+  --browser <edge|chrome|brave|chromium>
+                           Local mode only: which browser to drive - default: auto-detects your
+                            OS's actual default browser, falling back to whichever of
+                            Edge/Chrome/Brave/Chromium is installed
+  --separate-browser       Local mode only: always use the dedicated AI Browser window, never
+                            your everyday browser
   --url <url>              Local mode only: open this URL before the mission starts, instead of a
                             blank page (auto-guessed for a few well-known sites mentioned by name
                             in the mission if omitted)
@@ -1081,12 +1084,34 @@ Options:
                             session is already active - no mission is started
 ```
 
-**Local mode (default)** - drives your own, already-running browser via its remote-debugging
-protocol (CDP). Uses a dedicated Chrome/Edge profile (`~/.aivin/browser-profile`), not your regular
-daily-driver profile - real cookies/logins persist there across runs, but the first time you use a
-given site you'll need to log in once, same as opening it in a fresh browser. If nothing's
-listening on the debug port yet, `aivin browser` prints the exact launch command for your OS/browser
-instead of failing silently:
+**Local mode (default)** - drives a browser on your own computer via its remote-debugging protocol
+(CDP), through the same guarded tunnel `aivin remote` uses. Which browser, in order:
+
+1. **Your everyday Chrome/Edge**, if you've switched on remote debugging in it yourself
+   (`chrome://inspect/#remote-debugging`, or `edge://inspect/#remote-debugging`; Chrome 144+). The
+   browser asks you to **Allow** the connection once. Every login you already have works. The AI
+   opens its own tabs in the background, and your own tabs stay read-only to it. `--separate-browser`
+   skips this step.
+2. **Otherwise, a dedicated AI Browser window**, on its own profile (`~/.aivin/browser-profile`),
+   not your regular one. Cookies and logins persist there across runs. The first time you use a
+   site, you log in once, same as in a fresh browser. The CLI opens this window itself, and
+   reuses it while it's open. A Chrome/Edge window on any other profile is never attached to, even
+   if it has a debug port open.
+
+Either way, every command the server sends is filtered. No `file://` or browser-internal pages, no
+picking files from your disk, and no loading extensions. Downloads always go to `~/Downloads/Aivin`,
+and executables are cancelled as soon as they start downloading.
+
+In the AI Browser window, the tabs a mission opens (and the popups they open) are put in one
+**tab group** named after the mission, with a different color per mission running at the same time.
+Tab groups have no CDP command, so the CLI loads a small extension of its own into that profile
+(`~/.aivin/browser-extension/tab-groups`, permissions `tabGroups` + `debugger`). The server can't
+reach it. A window opened by an older CLI version doesn't have this - close it and rerun. Your
+everyday browser's tabs are not grouped, because the CLI never installs anything into your own
+profile.
+
+If the AI Browser window can't be started, `aivin browser` prints the exact launch command for your
+OS/browser instead of failing silently:
 
 ```bash
 aivin browser "Find the top 3 posts on Hacker News right now and summarize them"
@@ -1119,6 +1144,8 @@ aivin remote devices                  # your paired computers + online state
 aivin remote pause | resume           # local kill switch - refuses every remote call while paused
 aivin remote unpair [deviceId]        # revoke (token stops working immediately)
 aivin remote memory list|search|add|forget|clear   # on-device memory, plain YAML in ~/.aivin/memory/
+aivin remote meeting start "Weekly sales" --then "summarize and draft an email to my manager"   # meeting notes (Windows)
+aivin remote meeting stop | status | list | show [id]
 aivin remote status | test | logs | reindex | enable | disable | reset-id
 ```
 
@@ -1135,7 +1162,105 @@ aivin remote status | test | logs | reindex | enable | disable | reset-id
 - **Stays up to date by itself**: the listener checks for a new release about every 6 hours (and right away when the Aivin server
   asks for a newer minimum version). When started with the computer (`aivin remote enable`), it switches to the new release once the
   computer has had no remote work for 10 minutes; in a window you started yourself it only tells you to restart. If the new release
-  crashes 3 times before it has run for 10 minutes, the previous release is put back and the bad one is skipped. See `aivin update`.
+  crashes 3 times before it has run for 10 minutes, the previous release is put back and the bad one is skipped - by the auto-start
+  script itself (Windows: the Aivin tray app, or the VBS script on older setups; macOS / Linux `~/.aivin/aivin-remote-run.sh`) when it crashes right at start, otherwise by aivin on the
+  next start. Auto-start set up by an older aivin lacks the first part: run `aivin remote enable` again to get it. See `aivin update`.
+- The Aivin server can only *suggest* versions (a minimum version, the latest published one, releases on hold) - it can never choose
+  where aivin downloads from or what it installs. If the download site reports an older release than the server knows about, aivin
+  warns once that the site may be blocked; a release on hold (e.g. because several computers had to roll back from it) is not
+  installed by the background updater (`aivin update --to` still can).
+- **Aivin mascot on screen** (Windows): while the listener runs, a small Aivin bot floats over your windows. Its speech bubble shows
+  the main thing the agent is doing on this computer; drag it anywhere (the spot is remembered). Hover it to **ask Aivin**: a small
+  box pops up above it (and slips away when the mouse leaves, unless you are typing, talking or waiting for an answer); click the
+  bot or the box to type (Enter) - it becomes a real chat on Aivin (also listed in your chats on the web), with the progress and the
+  answer shown in the box. The window you were using right before you reached for the bot (or pressed the mic hotkey) goes along
+  with the question, so "what's wrong here?" or "fill this in" means that window: the agent can read it (`gui.observe`) or take a
+  screenshot (`screen.capture`); it only looks when the question needs it. Or click the mic to **talk with Aivin live**, like the mic on the web: it listens all the time, answers
+  out loud and both sides show up as text in the box; click the mic while it talks to interrupt, while it listens to end. Its voice
+  is not picked up by the mic (your words are ignored while it talks), so interrupt with the button. Right-click it for the detailed activity log and a "Pause AI" button (the same kill switch
+  as `aivin remote pause`). Apart from the open ask box it never takes keyboard focus; it is left out of screenshots and screen sharing,
+  and steps aside while the agent controls an app window. `aivin remote mascot off` (or `on`) for good, `aivin remote start --no-mascot`
+  for one run. Texts follow `AIVIN_LANG` / the system language.
+- **Meeting notes** (Windows): ask the mascot something like "take notes of this meeting, then send my manager a summary". You can also
+  run `aivin remote meeting start "<title>" --then "..."` yourself.
+  - **What's recorded:** the computer's own sound (what the others say) and your microphone, plus a screenshot whenever the screen
+    changes (shared slides). This works with any meeting app (Google Meet, Zoom, Teams, Zalo...), and nobody joins the meeting on
+    your behalf.
+  - **Approval:** the agent can't start a recording on its own. Starting one always needs a click on **Allow** on this computer, and
+    you get a notification while it runs. Tell the other participants that they are being recorded.
+  - **When it stops:** when the meeting window closes and the computer goes quiet, after 10 minutes of silence, after 3 hours, on
+    `aivin remote meeting stop`, or when you press Pause.
+  - **The transcript:** it is made only after the meeting is over, by sending ~30 s pieces through Aivin's voice-to-text.
+    Then the audio files are deleted. If you gave an instruction ("then"), a new chat turn starts by itself with it. The
+    agent reads the transcript with `meeting.transcript`, writes the summary and drafts the email. Sending still asks you on this
+    computer first.
+  - **Where it's stored:** `~/.aivin/meetings/<id>/`, which the file tools can't read. If you name a `save_dir` in the allowed area,
+    it's stored there instead, so the files can be attached to an email.
+  - **Restarts:** if the listener restarts mid-meeting, the transcript is finished on the next start, and background updates wait
+    until the meeting is done. `--no-meetings` (or `AIVIN_REMOTE_MEETINGS=0`) turns it off.
+  - **Speaker labels:** each line of the transcript is labelled **Me** (your microphone) or **Others** (the computer's sound). Pieces
+    are cut where the talking switches between the two. The other participants are not told apart from each other.
+  - **Screenshots on request:** the agent can also take a screenshot of the whole screen (`screen.capture`). The mascot is never in it.
+- **Clipboard**: the agent can read what you copied (`clipboard.read`) and put text on the clipboard for you to paste
+  (`clipboard.write`). On Windows it can also read images and files copied in Explorer; on macOS (`pbpaste`) and Linux (`wl-paste`,
+  `xclip` or `xsel`) only text. Anything a password manager marks private when copying (KeePass, 1Password, Bitwarden…) is never
+  read. Windows' own clipboard history skips the same content.
+
+## `aivin ui`
+
+Shows the Aivin mascot with its ask box open, ready to type (Windows). If the listener (`aivin remote start`) is not running it is
+started in the background - through the Aivin tray app when it is installed (`aivin desktop install`), else the older "Aivin Remote"
+scheduled task, otherwise as a detached process. A computer that is not connected yet gets the pairing instructions.
+
+Preview all eight mascot animations locally without pairing or starting the listener:
+
+```bash
+aivin ui --demo
+```
+
+Recording of the demo (idle, working, thinking, waiting, done, error, paused, offline): [media/aivin-mascot-states.mp4](media/aivin-mascot-states.mp4)
+
+## `aivin desktop`
+
+Puts Aivin on the desktop like a regular app: an icon you can click, an entry the system search finds, and a start-with-the-computer
+setting you can change in the system's own settings. The installers (`install.ps1`, `install.sh`) run `aivin desktop install` for you
+(on Linux only when there is a graphical session; `AIVIN_NO_DESKTOP=1` skips it, `AIVIN_NO_AUTOSTART=1` installs without starting with
+the computer).
+
+```bash
+aivin desktop install                 # app + search entry + start with the computer (on by default)
+aivin desktop install --no-autostart  # same, without starting with the computer
+aivin desktop uninstall               # closes the app (and the listener it runs), removes all of it - `aivin` itself stays
+aivin desktop                         # status
+```
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| Icon | system tray (`%LOCALAPPDATA%\Aivin\Aivin.exe`) | menu bar (`~/Applications/Aivin.app`) | system tray (needs python3 + AppIndicator) |
+| Found by | Start menu | Spotlight / Launchpad | app menu (`~/.local/share/applications/aivin.desktop`) |
+| Start with the computer | Task Manager → Startup apps | System Settings → General → Login Items | Startup Applications (GNOME) / Autostart (KDE) |
+
+- **The icon** is in colour while Aivin is taking work, grey when paused, stopped or not connected. Its menu: connect this computer
+  (asks for the code from Aivin), pause / resume work (the kill switch), start with the computer, open the `~/.aivin` folder, quit
+  (which also stops the listener). On Windows, clicking the icon opens the mascot and its ask box.
+- **Keeps the listener running**: the app runs `aivin remote start --quiet` hidden. It restarts it when it crashes (after 10 s, then
+  longer, up to 5 minutes), switches to a newly installed release right away (exit code 75), and puts the previous release back when a
+  new one keeps crashing at start. If you run `aivin remote start` yourself in a terminal, the app leaves it alone and takes over again
+  once you close that window. Opening Aivin from the search again while it runs just opens it.
+- **Start with the computer** is one setting, whichever way you change it: the app's menu, `aivin remote enable` / `disable`, or the
+  system settings in the table. `aivin remote disable` only switches it off, so it stays listed and can be switched back on there.
+  - Windows: an `Aivin` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, listed as "AIVIN Bot CLI" (publisher Aivin Labs); the Start menu entry has the same name.
+    `Aivin.exe` is compiled on your computer by the C# compiler that comes with Windows (.NET Framework), so nothing is downloaded.
+    If that compiler is blocked, `aivin remote enable` falls back to the "Aivin Remote" scheduled task (not shown in Task Manager).
+  - macOS: the LaunchAgent `~/Library/LaunchAgents/com.aivin.remote.plist` opens `Aivin.app`, so Login Items lists it as "Aivin". If
+    you switch it off in Login Items, Aivin's own menu may still show it as on (macOS does not let apps read that switch).
+  - Linux: `~/.config/autostart/aivin.desktop` (switched off = `Hidden=true` / `X-GNOME-Autostart-enabled=false`). Without a graphical
+    session (servers, SSH), `aivin remote enable` keeps using the systemd user service as before.
+- **Linux without a tray icon**: GNOME shows tray icons only with the AppIndicator extension (Ubuntu has it). Without python3's
+  AppIndicator binding (`sudo apt install gir1.2-ayatanaappindicator3-0.1` on Ubuntu / Debian), Aivin still runs in the background,
+  just without an icon - connect it with `aivin remote start --code <code>` once.
+- Running `aivin remote enable` again replaces the scheduled task, Startup-folder script or older LaunchAgent / autostart entry made by
+  older aivin versions.
 
 ## `aivin update`
 
@@ -1154,6 +1279,9 @@ aivin update --auto off      # stop background updates of `aivin remote start` o
 ```
 
 - npm installs are not replaced; you get the `npm i -g @aivin-labs/cli@latest` command instead.
+- The build is streamed to disk while its SHA-256 is computed and it is unpacked, with size caps on both the download and the
+  unpacked file - nothing large is held in memory, and an oversized or tampered download stops the update without touching the
+  installed file.
 - The download site comes only from this computer's environment, never from the Aivin server or a file: `AIVIN_DOWNLOAD_ROOT`
   (e.g. an internal mirror - it does not need to be trusted, the signature still is checked), else `https://get.aivin.vn`. Only
   `https` is accepted (plain `http` only to this computer itself), redirects included.
