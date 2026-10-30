@@ -1,4 +1,4 @@
-import { BOT_BLINKS, BOT_MOTION, BOT_RIG, BOT_SPINS, SCREEN_SCROLL_LOOP } from './bot.mjs';
+import { BOT_BLINKS, BOT_EYES, BOT_MOTION, BOT_MOUTHS, BOT_RIG, BOT_SPINS, SCREEN_SCROLL_LOOP } from './bot.mjs';
 
 /**
  * Bộ chuyển động của linh vật (29/10/2026) — mã C# biên dịch trong host.ps1 (Add-Type, cùng khối với AivinMascot.Native), chạy theo
@@ -9,10 +9,19 @@ import { BOT_BLINKS, BOT_MOTION, BOT_RIG, BOT_SPINS, SCREEN_SCROLL_LOOP } from '
  *   cộng dồn → đổi trạng thái / đổi nhịp không giật.
  * - Quán tính: đầu xoay quanh cổ bằng lò xo (hơi vượt rồi về), đầu trễ nhịp so với thân khi nhún; ăng-ten là lò xo ít hãm, bị kéo theo gia
  *   tốc xoay của đầu, cú nhảy, cú kéo cửa sổ → lắc lư tự nhiên.
- * - Mắt: chớp ngẫu nhiên (thỉnh thoảng chớp đôi), tự liếc khi rảnh, theo con trỏ khi con trỏ ở gần (toàn màn hình, không cần rê vào bot);
+ * - Mắt: chớp ngẫu nhiên (thỉnh thoảng chớp đôi), tự liếc khi rảnh, theo con trỏ khi con trỏ ở gần hoặc vừa di chuyển (ở đâu trên màn hình
+ *   cũng lia theo, đúng hướng — kể cả khi agent điều khiển chuột), con trỏ đứng yên xa thì thôi; đang làm thì mắt ở trên các màn (trừ khi
+ *   rê chuột lên bot);
  *   mặt dịch nhẹ cùng hướng nhìn cho cảm giác khối.
  * - Đang làm: ba màn hình 3D lật bung ra quanh bot (so le), trôi nhẹ, chữ cuộn / cột nhảy; bot chăm chú nhìn lần lượt từng màn — mắt +
  *   đầu hướng theo màn, màn đang nhìn sáng lên, ở màn chính mắt quét từng dòng như đang đọc. Offline: chữ "z" bay lên.
+ * - Đổi nét mặt (SetFace): mắt khép dẹt lại, đổi kiểu mắt lúc đang khép rồi mở ra nảy nhẹ; miệng theo sau một nhịp (thu lại, đổi, bật ra) —
+ *   mọi kiểu mắt / miệng đều chuyển được, kể cả mắt cong không chớp được. Màu đèn ăng-ten chuyển dần sang màu trạng thái mới.
+ * - Phản ứng (Play, cửa sổ chọn theo cặp trạng thái): startle (đang làm → cần bạn: giật mình, mắt bật to), relief (xong sau khi lỗi: chùng
+ *   xuống thở ra rồi nhổm lên), cheer (xong việc dài: nhảy hai lần, lấp lánh hai đợt), small (xong việc ngắn: gật thay vì nhảy), ack (đã
+ *   nhận câu hỏi: gật nhẹ), yawn (ngáp trước khi ngủ gật). Attend: đang gõ trong ô hỏi → nhìn về ô hỏi.
+ * - Sống trong trạng thái dài: thưa thớt (ngẫu nhiên 22–42 s, không khi đang rê chuột / kéo / ngay sau một phản ứng) — đang làm lâu thì nheo
+ *   mắt tập trung hoặc gật gù; chờ lâu thì nghiêng đầu nhìn về con trỏ như hỏi, mỗi lần đậm hơn một chút (có trần).
  * - Đạo cụ theo trạng thái: "!" nảy khi chờ xác nhận, bong bóng ba chấm khi nghĩ, tia lấp lánh bung ra khi xong việc.
  * - Ngủ gật (Doze, cửa sổ gọi khi rảnh lâu): mắt nhắm, đầu gục, zzz, thỉnh thoảng giật mình ngẩng lên; thức dậy thì nhổm lên + lắc ăng-ten.
  * - Cử chỉ khi vào trạng thái (`enter`): hop (nhảy + nén / giãn), shake (lắc đầu tắt dần), nod (gật), perk (nhổm lên chú ý, lặp khi chờ).
@@ -110,6 +119,7 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
     double phase, glowPhase, tintPhase, scanPhase;
     readonly Spring headA = new Spring(0), antA = new Spring(0), lean = new Spring(0), pop = new Spring(1), alertPop = new Spring(0), thinkPop = new Spring(0), press = new Spring(0), hover = new Spring(0);
     readonly Spring lookX = new Spring(0), lookY = new Spring(0), near = new Spring(0);
+    int curX = int.MinValue, curY = int.MinValue; double curMovedAt = -10;
     double prevHead, prevHeadVel, headAcc;
     double nextBlink = 1.2, blinkAt = -10; bool doubleBlink;
     double nextGlance = 2, glanceX, glanceY;
@@ -120,6 +130,22 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
     double dizzyAt = -10, giggleAt = -10, purrUntil = -10, purrK;
     readonly List<RotateTransform> spins = new List<RotateTransform>();
     const double DIZZY_S = 2.6, GIGGLE_S = 1.1;
+    // Reactions (Play) + life in a long state: when each started; the next spontaneous gesture; how insistent the waiting "ask" has got.
+    double stateAt, sighAt = -10, hop2At = -10, yawnAt = -10, squintAt = -10, askAt = -10, reactAt = -10, nextLife;
+    int askLevel; double askSide = 1;
+    // Attend (typing in the ask box): look at the box until this time; where the box is (eye offset units, like the cursor look).
+    double attendUntil = -10, attendX, attendY;
+    // Face morph (SetFace): the shown eye / mouth kind, the one waiting to swap in, squash springs (1 = full size), when the mouth starts.
+    readonly Dictionary<string, System.Windows.UIElement[]> eyeEls = new Dictionary<string, System.Windows.UIElement[]>();
+    readonly Dictionary<string, System.Windows.UIElement> mouthEls = new Dictionary<string, System.Windows.UIElement>();
+    readonly ScaleTransform eyeMorphL, eyeMorphR, mouthMorph;
+    string eyesNow, eyesNext, mouthNow, mouthNext; double mouthAt;
+    readonly Spring eyeSq = new Spring(1), mouthSq = new Spring(1);
+    const double MOUTH_LAG = 0.05;
+    // Antenna light color: eases from the old state's color to the new one.
+    readonly SolidColorBrush tintBrush = new SolidColorBrush();
+    Color colorFrom, colorTo; double colorAt = -10; bool hasColor;
+    const double COLOR_S = 0.45;
 
     T Get<T>(string name) where T : class {
       var o = w.FindName(name) as T;
@@ -156,6 +182,28 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       foreach (var name in new[] { ${BOT_BLINKS.map((b) => `"${b}"`).join(', ')} }) { var b = w.FindName(name) as ScaleTransform; if (b != null) blinks.Add(b); }
       foreach (var name in new[] { ${BOT_SPINS.map((b) => `"${b}"`).join(', ')} }) { var r = w.FindName(name) as RotateTransform; if (r != null) spins.Add(r); }
       faceBase = faceScale.ScaleX;
+      foreach (var name in new[] { ${BOT_EYES.map((e) => `"${e}"`).join(', ')} }) eyeEls[name] = new[] { Get<System.Windows.UIElement>("Eyes_" + name + "_L"), Get<System.Windows.UIElement>("Eyes_" + name + "_R") };
+      foreach (var name in new[] { ${BOT_MOUTHS.map((e) => `"${e}"`).join(', ')} }) mouthEls[name] = Get<System.Windows.UIElement>("Mouth_" + name);
+      eyeMorphL = Get<ScaleTransform>("EyeMorphL"); eyeMorphR = Get<ScaleTransform>("EyeMorphR"); mouthMorph = Get<ScaleTransform>("MouthMorph");
+      tint.Fill = tintBrush; halo.Fill = tintBrush;
+    }
+
+    /**
+     * Change the face (BOT_FACES eyes + mouth kind). The first face shows at once; later ones morph (see Frame) - calling again before a
+     * morph finished just retargets it, so a quick hover in / out never stacks up.
+     */
+    public void SetFace(string eyes, string mouth) {
+      if (!eyeEls.ContainsKey(eyes) || !mouthEls.ContainsKey(mouth)) return;
+      if (eyesNow == null) { eyesNow = eyes; ShowEyes(eyes); }
+      else if (eyesNext != null || eyes != eyesNow) eyesNext = eyes;
+      if (mouthNow == null) { mouthNow = mouth; ShowMouth(mouth); }
+      else if (mouthNext != null || mouth != mouthNow) { if (mouthNext == null) mouthAt = Now + MOUTH_LAG; mouthNext = mouth; }
+    }
+    void ShowEyes(string name) {
+      foreach (var kv in eyeEls) { var v = kv.Key == name ? Visibility.Visible : Visibility.Collapsed; foreach (var e in kv.Value) e.Visibility = v; }
+    }
+    void ShowMouth(string name) {
+      foreach (var kv in mouthEls) kv.Value.Visibility = kv.Key == name ? Visibility.Visible : Visibility.Collapsed;
     }
 
     Screen MakeScreen(int i, double tilt, double turn, double lookX, double lookY, double head, double dwellMin, double dwellMax) {
@@ -187,6 +235,7 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       double t = Now;
       if (s != state) {
         state = s; m = Motion.For(s); dozing = false;
+        stateAt = t; nextLife = t + 14 + rnd.NextDouble() * 10; askLevel = 0;
         if (s == "done") sparkAt = t;
         if (s == "working") { workAt = t; focus = 0; nextFocus = t + 2.4; }
         switch (m.Enter) {
@@ -198,8 +247,9 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
         if (rnd.NextDouble() < 0.7) blinkAt = t; // a state change usually comes with a blink
       }
       if (!string.IsNullOrEmpty(color)) {
-        var b = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color)); b.Freeze();
-        tint.Fill = b; halo.Fill = b;
+        var c = (Color)ColorConverter.ConvertFromString(color);
+        if (!hasColor) { hasColor = true; colorFrom = colorTo = c; tintBrush.Color = c; }
+        else if (c != colorTo) { colorFrom = tintBrush.Color; colorTo = c; colorAt = Now; }
       }
     }
 
@@ -214,9 +264,24 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
         case "giggle": giggleAt = t; antA.V -= 140; blinkAt = t; break;
         case "purr": purrUntil = t + 0.9; break;
         case "wave": hopAt = t; hopKick = landKick = false; perkAt = t + 0.6; flashAt = t; break;
+        // Busy -> needs you: a start (eyes pop wide, antenna jolts, a quick rise) before the waiting look.
+        case "startle": perkAt = t; flashAt = t; antA.V -= 260; eyeSq.V += 6; pop.V += 2.5; break;
+        // Done after an error: no hop - sag with a slow breath out, then perk up.
+        case "relief": hopAt = -10; sighAt = t; perkAt = t + 0.75; antA.V += 70; break;
+        // Done after long work: a second hop + sparkle burst right after the first.
+        case "cheer": hop2At = t + 0.62; break;
+        // Done after a quick task: a nod instead of the hop.
+        case "small": hopAt = -10; nodAt = t; break;
+        case "ack": nodAt = t; antA.V -= 80; break;
+        case "yawn": yawnAt = t; break;
       }
+      reactAt = t;
     }
     public bool Dizzy { get { return Now - dizzyAt < DIZZY_S; } }
+    /** Typing in the ask box: look at it (dx, dy = box offset from the bot, DIPs) for a moment; called again on each keystroke. */
+    public void Attend(double dx, double dy) {
+      attendUntil = Now + 1.4; attendX = Clamp(dx / 110, -1, 1) * 2.6; attendY = Clamp(dy / 110, -1, 1) * 2.0;
+    }
 
     /** The window was dragged by (dx, dy) DIPs: the body lags behind and the antenna swings. */
     public void Nudge(double dx, double dy) {
@@ -227,6 +292,9 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
     static double Ease(double current, double target, double rate, double dt) { return current + (target - current) * (1 - Math.Exp(-rate * dt)); }
     static double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
     static double Bump(double u, double len) { return (u < 0 || u > len) ? 0 : Math.Sin(Math.PI * u / len); }
+    static Color Mix(Color a, Color b, double k) {
+      return Color.FromArgb((byte)(a.A + (b.A - a.A) * k), (byte)(a.R + (b.R - a.R) * k), (byte)(a.G + (b.G - a.G) * k), (byte)(a.B + (b.B - a.B) * k));
+    }
 
     void OnRender(object sender, EventArgs e) {
       var re = e as RenderingEventArgs;
@@ -260,6 +328,10 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       if (state == "waiting" && t - perkAt > 2.6) perkAt = t;
       double perk = Bump(t - perkAt, 0.42);
       y -= perk * 2.6; sq += perk * 0.03;
+      if (hop2At > 0 && t >= hop2At) { hop2At = -10; hopAt = t; hopKick = landKick = false; sparkAt = t; flashAt = t; }
+      // Relief: sink + squash slowly (a breath out); yawn: stretch up.
+      double sigh = Bump(t - sighAt, 0.8), yawn = Bump(t - yawnAt, 1.8);
+      y += sigh * 2.4; sq -= sigh * 0.035; sq += yawn * 0.035;
       // Play: dizzy / giggle fade out over their length; purr eases in and out while petting goes on.
       double dizU = t - dizzyAt, dz = (dizU >= 0 && dizU < DIZZY_S) ? 1 - dizU / DIZZY_S : 0;
       double gigU = t - giggleAt, gig = (gigU >= 0 && gigU < GIGGLE_S) ? 1 - gigU / GIGGLE_S : 0;
@@ -285,8 +357,15 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
           var src = PresentationSource.FromVisual(w); double dpi = src != null && src.CompositionTarget != null ? src.CompositionTarget.TransformToDevice.M11 : 1;
           var fc = face.PointToScreen(new System.Windows.Point(0, 0));
           double dx = (p.X - fc.X) / dpi, dy = (p.Y - fc.Y) / dpi, d = Math.Sqrt(dx * dx + dy * dy);
-          nearT = Hover ? 1 : Clamp((460 - d) / 160, 0, 1);
-          cx = Clamp(dx / 110, -1, 1) * 2.6; cy = Clamp(dy / 110, -1, 1) * 2.0;
+          // The cursor just moved (the owner, or the agent driving the mouse): the eyes dart after it wherever it is on screen, for a
+          // moment after it stops; a still cursor is only watched when near. Working: a little less (the screens still pull the eyes).
+          if (p.X != curX || p.Y != curY) { curX = p.X; curY = p.Y; curMovedAt = t; }
+          double moving = Clamp(1 - (t - curMovedAt - 1.5), 0, 1);
+          // Working: the eyes stay on the screens (darting between them) - only the pointer on the bot itself draws them away.
+          nearT = Hover ? 1 : (state == "working" ? 0 : Math.Max(Clamp((460 - d) / 160, 0, 1), moving));
+          // Keep the real direction (per-axis clamping pinned every diagonal to the corner); full swing from 140 DIPs out.
+          double g = Math.Min(1, d / 140) / Math.Max(d, 0.001);
+          cx = dx * g * 2.6; cy = dy * g * 2.0;
         }
       }
       near.Step(nearT, 60, 15, dt);
@@ -297,7 +376,8 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       // Working: eyes on the focused screen. Main screen = reading (sweep along a line, snap back); side screens = a short steady look.
       if (state == "working") {
         if (t >= nextFocus) {
-          focus = focus != 0 ? 0 : (rnd.NextDouble() < 0.5 ? 1 : 2); var f = screens[focus];
+          // Next screen: one of the other two (all three get looked at, never the same one twice in a row).
+          focus = (focus + 1 + rnd.Next(2)) % screens.Count; var f = screens[focus];
           nextFocus = t + f.DwellMin + rnd.NextDouble() * (f.DwellMax - f.DwellMin); if (rnd.NextDouble() < 0.4) blinkAt = t;
         }
         var fs = screens[focus];
@@ -317,6 +397,10 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       double nw = asleep ? 0 : near.X;
       // Dizzy: eyes roll round and round instead of following the cursor.
       if (dz > 0) { gx = Math.Cos(dizU * 8) * 2.4 * dz; gy = Math.Sin(dizU * 8) * 1.6 * dz; nw = 0; }
+      // Waiting "ask": look at the cursor wherever it is; typing in the ask box: look at the box.
+      double ask = Bump(t - askAt, 1.8);
+      if (!asleep) nw = Math.Max(nw, ask);
+      if (t < attendUntil && !asleep && dz <= 0) { gx = attendX; gy = attendY; nw = 0; }
       lookX.Step(gx + (cx - gx) * nw, 320, 34, dt); lookY.Step(gy + (cy - gy) * nw, 320, 34, dt);
       eyeLook.X = lookX.X; eyeLook.Y = lookY.X;
       faceLook.X = lookX.X * 0.55; faceLook.Y = lookY.X * 0.45;
@@ -324,11 +408,12 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       // 4) Head: spring toward the state's tilt + a curious lean toward a nearby cursor; lags the body's bob; nod / shake gestures.
       double curious = asleep ? 0 : Clamp(cx / 2.6, -1, 1) * 3.0 * near.X;
       headFocus = Ease(headFocus, state == "working" ? screens[focus].Head : 0, 5, dt);
-      headA.Step(headTilt + curious + headFocus + purrK * 7, 95, 12, dt);
+      headA.Step(headTilt + curious + headFocus + purrK * 7 + askSide * (5 + 2 * askLevel) * ask - yawn * 7, 95, 12, dt);
       double su = t - shakeAt, shake = (su >= 0 && su < 0.8) ? 7 * Math.Exp(-su * 4.2) * Math.Sin(su * 27) : 0;
       double angle = headA.X + shake + Math.Sin(dizU * 7) * 9 * dz + Math.Sin(gigU * 30) * 3 * gig;
       headRot.Angle = angle;
-      headMove.Y = headY - bobVel * 0.13 + Bump(t - nodAt, 0.5) * 2.2 - perk * 0.8;
+      double squint = Bump(t - squintAt, 0.9);
+      headMove.Y = headY - bobVel * 0.13 + Bump(t - nodAt, 0.5) * 2.2 - perk * 0.8 + squint * 0.8;
       double headVel = (angle - prevHead) / dt; headAcc += ((headVel - prevHeadVel) / dt - headAcc) * 0.5; prevHead = angle; prevHeadVel = headVel;
       double faceS = faceBase * (1 + perk * 0.05 + Bump(t - flashAt, 0.35) * 0.04);
       faceScale.ScaleX = faceS; faceScale.ScaleY = faceS;
@@ -347,6 +432,9 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       double gl = glow + glowPulse * Math.Sin(glowPhase) + flash, gr = glow + glowPulse * Math.Sin(glowPhase + (m.Alt ? Math.PI : 0)) + flash;
       earL.Opacity = Clamp(gl, 0, 1); earR.Opacity = Clamp(gr, 0, 1);
       double tv = Clamp(tintV + tintPulse * Math.Sin(tintPhase), 0, 1);
+      double cu = (t - colorAt) / COLOR_S;
+      if (cu >= 0 && cu < 1) { double k = cu * cu * (3 - 2 * cu); tintBrush.Color = Mix(colorFrom, colorTo, k); }
+      else if (hasColor && tintBrush.Color != colorTo) tintBrush.Color = colorTo;
       tint.Opacity = tv; halo.Opacity = Clamp(0.12 + (tv - 0.45) * 0.9 + flash * 0.5, 0, 0.8);
       visorFx.Opacity = scan; scanY.Y = (scanPhase % 1.0) * VISOR_SCAN;
 
@@ -418,6 +506,35 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       if (bu >= 0 && bu < 0.17) blink = bu < 0.06 ? 1 - 0.9 * (bu / 0.06) : (bu < 0.08 ? 0.1 : 0.1 + 0.9 * Math.Sin((bu - 0.08) / 0.09 * Math.PI / 2));
       foreach (var b in blinks) b.ScaleY = blink;
       if (dz > 0) foreach (var r in spins) r.Angle = (dizU * 540) % 360;
+
+      // 10) Face morph: eyes squash shut fast (~80 ms, no overshoot), swap kind while shut, spring open with a small overshoot (and a
+      //     touch wider while squashed); the mouth a beat later shrinks, swaps, pops back a little bouncier.
+      bool eyeSwap = eyesNext != null;
+      eyeSq.Step(eyeSwap ? 0 : 1, eyeSwap ? 1400 : 380, eyeSwap ? 75 : 20, dt);
+      if (eyeSwap && eyeSq.X < 0.2) { eyesNow = eyesNext; eyesNext = null; ShowEyes(eyesNow); }
+      double es = Clamp(eyeSq.X, 0.08, 1.25) * (1 - 0.38 * squint);
+      eyeMorphL.ScaleY = es; eyeMorphR.ScaleY = es;
+      eyeMorphL.ScaleX = eyeMorphR.ScaleX = 1 + (1 - Math.Min(es, 1)) * 0.15;
+      bool mouthSwap = mouthNext != null && t >= mouthAt;
+      mouthSq.Step(mouthSwap ? 0 : 1, mouthSwap ? 1400 : 300, mouthSwap ? 75 : 15, dt);
+      if (mouthSwap && mouthSq.X < 0.3) { mouthNow = mouthNext; mouthNext = null; ShowMouth(mouthNow); }
+      double ms = Clamp(mouthSq.X, 0.15, 1.3) * (1 + 0.6 * Bump(t - yawnAt - 0.15, 1.5));
+      mouthMorph.ScaleX = ms; mouthMorph.ScaleY = ms;
+
+      // 11) Life in a long state: a rare gesture of its own - never while the pointer is on the bot, dragging, dozing or right after a
+      //     reaction. Working a while: a focused squint or an "I see" nod. Waiting a while: tilt the head at the cursor as if asking, a bit
+      //     more each time (capped) with a perk from the second time on.
+      if (t >= nextLife) {
+        nextLife = t + 22 + rnd.NextDouble() * 20;
+        double inState = t - stateAt;
+        if (!Hover && !Dragging && !dozing && t - reactAt > 6) {
+          if (state == "working" && inState > 15) { if (rnd.NextDouble() < 0.5) squintAt = t; else nodAt = t; }
+          else if (state == "waiting" && inState > 12) {
+            askAt = t; askSide = rnd.NextDouble() < 0.5 ? -1 : 1; askLevel = Math.Min(askLevel + 1, 3);
+            if (askLevel >= 2) perkAt = t + 0.3;
+          }
+        }
+      }
       mouthOpen.ScaleY = 1 + Math.Sin(t * 3.4) * 0.1; mouthOpen.ScaleX = 1 - Math.Sin(t * 3.4) * 0.05;
       talk.ScaleY = 0.45 + 0.55 * Math.Abs(Math.Sin(t * 12));
     }

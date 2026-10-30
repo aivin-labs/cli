@@ -52,7 +52,7 @@ test('Aivin hỏi lại trong lượt chat → hiện câu hỏi + nút, linh v�
   assert.deepEqual(pending, [true]);
 
   await chat.choose('team');
-  assert.deepEqual(socket.emitted[1].payload, { text: '', request_id: socket.emitted[1].payload.request_id, session_id: 's1', reply_id: 'm9', option_ids: ['team'] });
+  assert.deepEqual(socket.emitted[1].payload, { text: '', request_id: socket.emitted[1].payload.request_id, session_id: 's1', reply_id: 'm9', option_ids: ['team'], stream: true });
   assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text === 'Cả nhóm'), 'dòng của chủ máy là tên nút');
   assert.deepEqual(choices(sent).at(-1).options, []);
   assert.equal(chat.hasPending(), false);
@@ -114,11 +114,43 @@ test('câu trả lời đã rút gọn ghi "(chi tiết trên Aivin)"; hết gi�
   assert.deepEqual(alerts, [{ kind: 'done', text: 'Doanh thu tăng 8%.' }]);
 });
 
+test('câu chọn nhiều: nút báo multiple + icon của mục; xác nhận các mục đã tích → gửi đủ id; gõ "a, b" khớp hết cũng vậy', async () => {
+  const MULTI = {
+    reply_id: 'm5', kind: 'choice', question: 'Gửi tệp nào?', multiple: true,
+    options: [{ id: 'a', text: 'Báo cáo', icon: 'FileText' }, { id: 'b', text: 'Hoá đơn' }, { id: 'c', text: 'Ảnh' }],
+  };
+  const { chat, sent, socket } = setup();
+  chat.onNotify({ id: 'n5', kind: 'needs_you', title: 'Chọn tệp', text: 'Gửi tệp nào?', session_id: 's5', question: MULTI });
+  assert.deepEqual(choices(sent).at(-1), {
+    t: AskCommand.CHOICES, multiple: true,
+    options: [{ id: 'a', text: 'Báo cáo', icon: 'FileText' }, { id: 'b', text: 'Hoá đơn' }, { id: 'c', text: 'Ảnh' }],
+  });
+  await chat.choose(['a', 'c', 'zz']);
+  assert.equal(socket.emitted.length, 0, 'id lạ → không gửi');
+  await chat.choose(['a', 'c']);
+  assert.deepEqual(socket.emitted[0].payload.option_ids, ['a', 'c']);
+  assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text === 'Báo cáo, Ảnh'));
+
+  const typed = setup();
+  typed.chat.onNotify({ id: 'n6', kind: 'needs_you', title: 'Chọn tệp', text: 'Gửi tệp nào?', session_id: 's6', question: MULTI });
+  await typed.chat.reply('hoá đơn, ảnh');
+  assert.deepEqual(typed.socket.emitted[0].payload.option_ids, ['b', 'c']);
+
+  // Câu chọn một: nhiều id cùng lúc bị bỏ qua.
+  const single = setup();
+  single.chat.onNotify({ id: 'n7', kind: 'needs_you', title: 'Duyệt', text: 'Gửi cho ai?', session_id: 's7', question: QUESTION });
+  assert.equal(choices(single.sent).at(-1).multiple, false);
+  await single.chat.choose(['boss', 'team']);
+  assert.equal(single.socket.emitted.length, 0);
+});
+
 test('cửa sổ có hàng nút lựa chọn + lệnh ask_choices, bấm nút gửi sự kiện choose', () => {
   assert.match(MASCOT_XAML, /x:Name="Choices"/);
   const ps = hostScript();
-  assert.match(ps, /'ask_choices' \{ ChoiceButtons \$m\.options; return \}/);
+  assert.match(ps, /'ask_choices' \{ ChoiceButtons \$m\.options \$m\.multiple; return \}/);
   assert.match(ps, /t = 'choose'; id = \[string\]\$s\.CommandParameter/);
+  // Chọn nhiều: tích rồi xác nhận → gửi các id đã tích.
+  assert.match(ps, /t = 'choose'; ids = @\(\$script:picked\.ToArray\(\)\)/);
   assert.ok([...ps].every((c) => c.charCodeAt(0) < 128), 'host.ps1 giữ toàn ASCII');
 });
 
@@ -217,6 +249,65 @@ test('câu hỏi đang chờ: ô hỏi tự ghim ra (kèm câu hỏi + nút), tr
   assert.deepEqual(sent.filter((c) => c.t === 'ask_pin'), [{ t: 'ask_pin', on: true }]);
   await chat.choose('boss');
   assert.deepEqual(sent.filter((c) => c.t === 'ask_pin').at(-1), { t: 'ask_pin', on: false });
+});
+
+test('nhiều việc cùng hỏi → xếp hàng: nút của câu đầu, dòng ghi "(còn N câu hỏi nữa)"; trả lời xong thì câu kế lên, hết hàng mới bỏ ghim', async () => {
+  const { chat, sent, socket, pending } = setup();
+  const Q2 = { reply_id: 'm2', kind: 'choice', options: [{ id: 'y', text: 'Có' }, { id: 'n', text: 'Không' }] };
+  chat.onNotify({ id: 'n1', kind: 'needs_you', title: 'Gửi thư', text: 'Gửi cho ai?', session_id: 's1', question: QUESTION });
+  chat.onNotify({ id: 'n2', kind: 'needs_you', title: 'Xoá tệp', text: 'Xoá bản nháp?', session_id: 's2', question: Q2 });
+  assert.equal(rows(sent).filter((r) => r.id === 'q-m9').at(-1).text, 'Cần bạn: Gửi thư\nGửi cho ai?\n(còn 1 câu hỏi nữa)');
+  assert.ok(rows(sent).some((r) => r.id !== 'q-m2' && r.text === 'Cần bạn: Xoá tệp\nXoá bản nháp?'), 'câu xếp sau hiện ngay một dòng thường');
+  assert.deepEqual(choices(sent).at(-1).options, [{ id: 'boss', text: 'Sếp' }, { id: 'team', text: 'Cả nhóm' }], 'nút vẫn của câu đầu');
+  assert.deepEqual(pending, [true]);
+
+  await chat.choose('boss');
+  assert.equal(socket.emitted[0].payload.reply_id, 'm9');
+  assert.equal(rows(sent).filter((r) => r.id === 'q-m9').at(-1).text, 'Cần bạn: Gửi thư\nGửi cho ai?', 'câu đã xong bỏ phần đếm');
+  assert.equal(rows(sent).filter((r) => r.id === 'q-m2').at(-1).text, 'Cần bạn: Xoá tệp\nXoá bản nháp?');
+  assert.deepEqual(choices(sent).at(-1).options, [{ id: 'y', text: 'Có' }, { id: 'n', text: 'Không' }]);
+  assert.deepEqual(sent.filter((c) => c.t === 'ask_pin').at(-1), { t: 'ask_pin', on: true });
+  assert.equal(chat.hasPending(), true);
+
+  chat.onChatEvent({ request_id: socket.emitted[0].payload.request_id, kind: 'answer', text: 'Đã gửi.' });
+  await chat.reply('không');
+  assert.deepEqual(socket.emitted[1].payload, { text: 'không', request_id: socket.emitted[1].payload.request_id, session_id: 's2', reply_id: 'm2', option_ids: ['n'], stream: true });
+  assert.equal(chat.hasPending(), false);
+  assert.deepEqual(pending, [true, false]);
+  assert.deepEqual(sent.filter((c) => c.t === 'ask_pin').at(-1), { t: 'ask_pin', on: false });
+});
+
+test('cùng reply_id hỏi lại → cập nhật tại chỗ, không xếp thêm; câu xếp sau hết hạn → bỏ khỏi hàng, câu đầu giữ nút', async () => {
+  const { chat, sent } = setup(() => ({ ok: false, error: 'no_question' }));
+  chat.onNotify({ id: 'a', kind: 'needs_you', title: 't', text: 'q1', session_id: 's', question: QUESTION });
+  chat.onNotify({ id: 'b', kind: 'needs_you', title: 't', text: 'q1 sửa', session_id: 's', question: QUESTION });
+  assert.equal(rows(sent).filter((r) => r.id === 'q-m9').at(-1).text, 'Cần bạn: t\nq1 sửa');
+  assert.ok(!rows(sent).some((r) => /còn/.test(r.text)));
+
+  // Đầu hàng hết hạn → câu kế lên.
+  chat.onNotify({ id: 'c', kind: 'needs_you', title: 't', text: 'q2', session_id: 's', question: { reply_id: 'm2', options: [] } });
+  await chat.choose('boss');
+  assert.equal(chat.hasPending(), true);
+  assert.equal(rows(sent).filter((r) => r.id === 'q-m2').at(-1).text, 'Cần bạn: t\nq2');
+  assert.deepEqual(choices(sent).at(-1).options, []);
+});
+
+test('bấm nút / gõ trả lời khi đang nói chuyện hoặc đang chờ lượt trước → không gửi nhưng báo trong ô hỏi, câu hỏi vẫn chờ', async () => {
+  const { chat, sent, socket } = setup(() => ({ ok: true, session_id: 's1' }));
+  socket.emit = () => {};
+  chat.onNotify({ id: 'n1', kind: 'needs_you', title: 't', text: 'q', session_id: 's', question: QUESTION });
+  await chat.voiceStart();
+  const before = socket.emitted.length;
+  await chat.choose('boss');
+  assert.equal(socket.emitted.length, before, 'không gửi device:chat');
+  assert.equal(sent.filter((c) => c.t === AskCommand.STATUS).at(-1).text, 'Đang nói chuyện — kết thúc rồi hãy trả lời');
+  assert.equal(chat.hasPending(), true);
+  chat.voiceStop();
+
+  await chat.ask('việc khác');
+  await chat.reply('sếp');
+  assert.equal(sent.filter((c) => c.t === AskCommand.STATUS).at(-1).text, 'Đang làm việc trước, chờ chút');
+  assert.equal(chat.hasPending(), true);
 });
 
 test('cửa sổ dựng lại / chưa sẵn sàng khi có câu hỏi chờ → gửi lại dòng câu hỏi, nút và ghim', async () => {

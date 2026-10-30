@@ -118,7 +118,7 @@ export function userWindow(w) {
 
 /**
  * `onPause` / `onResume`: nút trên bảng nhật ký bật / tắt công tắc ngắt (như `aivin remote pause|resume`). `onVoice(msg)`: sự kiện nói
- * chuyện của cửa sổ (`voice_*`, xem ask.mjs); cửa sổ chết giữa chừng → `voice_stop`. `onChoose(id)`: bấm nút trả lời câu Aivin hỏi.
+ * chuyện của cửa sổ (`voice_*`, xem ask.mjs); cửa sổ chết giữa chừng → `voice_stop`. `onChoose(id | ids)`: bấm nút trả lời câu Aivin hỏi (câu chọn nhiều: mảng id đã tích).
  * `onAsk(text, window)`: câu gõ trong ô hỏi + cửa sổ chủ máy đang dùng (`userWindow`). `pid()`: tiến trình của cửa sổ linh vật (null khi
  * chưa chạy). `spawnImpl`, `timers`, `now`, `dir`, `settingsFile`, các mốc `*Ms`: cho test.
  */
@@ -187,7 +187,11 @@ export function createMascot({
     if (msg.t === HostEvent.HIDE) { hiddenUntilWork = true; return; }
     // Ô hỏi: chủ máy gõ / nói với bot → daemon gửi lên Aivin (ask.mjs).
     if (msg.t === HostEvent.ASK && typeof msg.text === 'string') return onAsk(msg.text, userWindow(msg.window));
-    if (msg.t === HostEvent.CHOOSE && typeof msg.id === 'string') return onChoose(msg.id);
+    if (msg.t === HostEvent.CHOOSE) {
+      // Câu chọn nhiều: `ids` = các mục đã tích; chọn một: `id`.
+      if (Array.isArray(msg.ids) && msg.ids.length && msg.ids.every((x) => typeof x === 'string')) return onChoose(msg.ids);
+      if (typeof msg.id === 'string') return onChoose(msg.id);
+    }
     if (msg.t === HostEvent.DROP && Array.isArray(msg.files)) return onDrop(msg.files.filter((f) => typeof f === 'string' && f));
     if (msg.t === HostEvent.AWAY) { away = { since: now(), done: 0, failed: 0, needs: 0 }; return; }
     if (msg.t === HostEvent.BACK) return welcomeBack();

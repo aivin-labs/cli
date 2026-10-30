@@ -20,16 +20,21 @@ import { VOICE_CS } from './voiceSource.mjs';
 const B = AIVIN_BRAND;
 
 /** Cỡ linh vật: thân vẽ trên khung gốc rồi Viewbox thu về MASCOT_BOX (60 px); khung bấm / kéo bao quanh thân; tâm khung = điểm neo vị trí. */
-// The rendered bot is a MASCOT_BOX-sized Viewbox. Keep the hit/layout box equally large so WPF's
-// SizeToContent window includes the rounded lower body instead of clipping it.
+// The rendered bot is a MASCOT_BOX-sized Viewbox. Keep the hit/layout box equally large so the rounded lower body is not clipped.
 const MASCOT_BOX = { w: 60, h: 60 };
-const MASCOT_CENTER = { x: 30, y: 28.5 };
+export const MASCOT_CENTER = Object.freeze({ x: 30, y: 28.5 });
 /** Rảnh (idle) liền chừng này phút mà không ai rê chuột → bot ngủ gật; có việc / rê chuột vào thì thức. */
 const MASCOT_DOZE_MIN = 10;
 /** Không chạm chuột / bàn phím chừng này phút = chủ máy đi vắng (khoá máy, đi họp…) → daemon gom việc xảy ra để báo khi quay lại. */
 const MASCOT_AWAY_MIN = 10;
-/** Lề quanh nội dung cửa sổ (chỗ cho bóng đổ) — Root Margin. */
+/** Lề trong cửa sổ quanh bot / các hộp (chỗ cho bóng đổ). */
 const ROOT_MARGIN = 14;
+/**
+ * Cửa sổ cỡ cố định (đủ cho bảng nhật ký 372 px + lề bóng, cao đủ cho bảng / ô hỏi + bot): hiện / ẩn ô hỏi, bảng, bong bóng chỉ đổi
+ * chỗ bên trong cửa sổ, không đổi cỡ / dời cửa sổ — cửa sổ layered bị dời thì ảnh cũ nhảy theo một nhịp trước khi vẽ lại (bot "chập").
+ * Vùng trong suốt hẳn bấm xuyên qua nên cửa sổ lớn không che gì.
+ */
+const WINDOW = { w: 372 + 2 * ROOT_MARGIN, h: 640 };
 
 /** Màu từng trạng thái: `fg` chấm / chữ, `bg` nền chip. */
 export const MASCOT_PALETTE = Object.freeze({
@@ -94,7 +99,7 @@ export const ASK_BTN = Object.freeze({ bg: '#EEF0FF', icon: '#8B7CF6', recBg: '#
 
 
 export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-  SizeToContent="WidthAndHeight" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="NoResize"
+  Width="${WINDOW.w}" Height="${WINDOW.h}" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="NoResize"
   Topmost="True" ShowInTaskbar="False" ShowActivated="False" FontFamily="Segoe UI" UseLayoutRounding="True" Opacity="0">
  <Window.Resources>
   ${buttonStyle('Btn', 9)}
@@ -108,7 +113,10 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
    <DoubleAnimation Storyboard.TargetName="AskGlowSpin" Storyboard.TargetProperty="Angle" From="0" To="360" Duration="0:0:3"/>
   </Storyboard>
  </Window.Resources>
- <StackPanel x:Name="Root" Margin="${ROOT_MARGIN}">
+ <!-- Bot và các hộp đặt bằng toạ độ trong cửa sổ (Place / ArrangeBoxes): bot đứng đúng điểm neo, hộp nằm trên bot (hoặc dưới khi
+      sát mép trên), kẹp trong cửa sổ. -->
+ <Canvas>
+ <StackPanel x:Name="Boxes">
   <Border x:Name="Panel" Visibility="Collapsed" Width="372" Margin="0,0,0,10" CornerRadius="16" Background="White" BorderBrush="#E5E6EB"
           BorderThickness="1" Opacity="0" RenderTransformOrigin="0.5,1">
    <Border.RenderTransform><ScaleTransform ScaleX="0.96" ScaleY="0.96"/></Border.RenderTransform>
@@ -181,7 +189,7 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
   </Border>
   <Grid x:Name="Bubble" Visibility="Collapsed" Opacity="0" RenderTransformOrigin="0.5,1">
    <Grid.RenderTransform><ScaleTransform ScaleX="0.94" ScaleY="0.94"/></Grid.RenderTransform>
-   <Border CornerRadius="12" Background="White" BorderBrush="#E5E6EB" BorderThickness="1" Padding="10,6,12,7" MaxWidth="220" Margin="0,0,0,7">
+   <Border x:Name="BubbleBox" CornerRadius="12" Background="White" BorderBrush="#E5E6EB" BorderThickness="1" Padding="10,6,12,7" MaxWidth="220" Margin="0,0,0,7">
     <Border.Effect>${SHADOW}</Border.Effect>
     <DockPanel>
      <!-- Chấm trạng thái đã có ở quả cầu ăng-ten trên đầu bot — bong bóng không lặp lại (giữ phần tử ẩn vì SetState còn tô màu nó). -->
@@ -189,8 +197,9 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
      <TextBlock x:Name="BubbleText" FontSize="12" Foreground="${B.ink}" TextWrapping="Wrap" MaxHeight="34" TextTrimming="CharacterEllipsis" LineHeight="17"/>
     </DockPanel>
    </Border>
-   <Path x:Name="Tail" Data="M0,0 L14,0 L7,7 Z" Fill="#D9DCE1" VerticalAlignment="Bottom" HorizontalAlignment="Center"/>
+   <Path x:Name="Tail" Data="M0,0 L14,0 L7,7 Z" Fill="#D9DCE1" VerticalAlignment="Bottom" HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5"/>
   </Grid>
+ </StackPanel>
   <!-- Nền alpha 1/255: cửa sổ layered cho bấm xuyên qua điểm trong suốt hẳn — khoảng trống quanh bot vẫn phải bấm / kéo được.
        Bóng dưới đất nằm trong BOT_XAML (co / nhạt theo cú nhún). -->
   <Grid x:Name="Mascot" Width="${MASCOT_BOX.w}" Height="${MASCOT_BOX.h}" Cursor="Hand" Background="#01FFFFFF">
@@ -198,7 +207,7 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
     ${BOT_XAML}
    </Viewbox>
   </Grid>
- </StackPanel>
+ </Canvas>
 </Window>`;
 
 export const MASCOT_PS1 = String.raw`$ErrorActionPreference = 'Stop'
@@ -229,6 +238,35 @@ namespace AivinMascot {
     public static double IdleSeconds() {
       var l = new LASTINPUTINFO(); l.cbSize = (uint)Marshal.SizeOf(l);
       return GetLastInputInfo(ref l) ? unchecked((uint)Environment.TickCount - l.dwTime) / 1000.0 : 0;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+    [StructLayout(LayoutKind.Sequential)] struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public uint dwFlags; }
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(POINT p, uint flags);
+    [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref MONITORINFO i);
+    /** Bounds (left, top, right, bottom; device pixels) of the monitor at / nearest to a point - a saved spot on a monitor that is gone
+        lands on the nearest one. */
+    public static int[] MonitorAt(int x, int y) {
+      var p = new POINT(); p.X = x; p.Y = y;
+      var i = new MONITORINFO(); i.cbSize = Marshal.SizeOf(i);
+      if (!GetMonitorInfo(MonitorFromPoint(p, 2), ref i)) return null;
+      return new[] { i.rcMonitor.L, i.rcMonitor.T, i.rcMonitor.R, i.rcMonitor.B };
+    }
+  }
+  /** Screens added / removed / resized or the taskbar moved: the window re-places itself (C# hook - a PowerShell one would run for
+      every window message). */
+  public static class DisplayWatch {
+    static Action changed; static System.Windows.Interop.HwndSourceHook hook;
+    public static void Start(IntPtr h, Action onChanged) {
+      changed = onChanged; hook = Hook;
+      System.Windows.Interop.HwndSource.FromHwnd(h).AddHook(hook);
+    }
+    static IntPtr Hook(IntPtr h, int msg, IntPtr wp, IntPtr lp, ref bool handled) {
+      // WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE + SPI_SETWORKAREA.
+      if (msg == 0x007E || msg == 0x02E0 || (msg == 0x001A && wp.ToInt64() == 0x2F)) {
+        System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, changed);
+      }
+      return IntPtr.Zero;
     }
   }
   /** Keep the mascot above the taskbar: the taskbar is topmost too and jumps to the front when it (or any window) is activated, so
@@ -285,6 +323,7 @@ $w.Add_SourceInitialized({
   if (-not $env:AIVIN_MASCOT_CAPTURABLE) { [void][AivinMascot.Native]::SetWindowDisplayAffinity($h, 0x11) }
   $script:hwnd = $h
   [AivinMascot.TopKeeper]::Start($h)
+  [AivinMascot.DisplayWatch]::Start($h, [Action]{ Dbg 'display changed'; Place })
 })
 
 # Stay above the taskbar: TopKeeper re-asserts HWND_TOPMOST on every foreground change; this timer is the fallback for the shell
@@ -293,52 +332,102 @@ $script:topTimer = New-Object Windows.Threading.DispatcherTimer; $script:topTime
 $script:topTimer.Add_Tick({ if ($script:hwnd -and $w.IsVisible) { [AivinMascot.TopKeeper]::Raise() } })
 $script:topTimer.Start()
 
-# Anchor = screen point of the mascot center (DIPs); the window is laid out around it, kept on screen.
+# Anchor = screen point of the mascot center (DIPs). The window has a fixed size and only moves when the bot is dragged or the screens
+# change: the bot sits at the anchor inside it, the boxes (ask box, bubble, activity panel) are laid out around the bot (ArrangeBoxes).
 $wa = [Windows.SystemParameters]::WorkArea
 $script:cx = if ($cfg.x -ne $null) { [double]$cfg.x } else { $wa.Right - 76 }
 $script:cy = if ($cfg.y -ne $null) { [double]$cfg.y } else { $wa.Bottom - 70 }
-function Place {
-  $vl = [Windows.SystemParameters]::VirtualScreenLeft; $vt = [Windows.SystemParameters]::VirtualScreenTop
-  $vw = [Windows.SystemParameters]::VirtualScreenWidth; $vh = [Windows.SystemParameters]::VirtualScreenHeight
-  $script:cx = [Math]::Max($vl + 40, [Math]::Min($script:cx, $vl + $vw - 40)); $script:cy = [Math]::Max($vt + 40, [Math]::Min($script:cy, $vt + $vh - 40))
-  # Boxes (ask box, bubble, activity panel) sit centered above the bot. Near a screen edge the window is pushed back on screen and the
-  # bot alone is shifted back by the same amount, so it stays exactly at its anchor while the box stays fully visible.
-  foreach ($n in 'Panel', 'Ask', 'Bubble', 'Mascot') { (E $n).HorizontalAlignment = 'Center' }
-  (E 'Mascot').RenderTransform = [Windows.Media.Transform]::Identity
-  $w.UpdateLayout()
-  # Mascot = last child of Root (margin ${ROOT_MARGIN}), centered: its center is at half the window width, a fixed offset from the bottom.
-  # (TranslatePoint returned ~0 here before layout settled, so the window was clamped to the screen edge instead of the anchor.)
-  $ww = $w.ActualWidth; $wh = $w.ActualHeight
-  $py = $wh - ${ROOT_MARGIN} - ${MASCOT_BOX.h - MASCOT_CENTER.y}
-  $left = $script:cx - $ww / 2; $top = $script:cy - $py
-  $cl = [Math]::Max($vl, [Math]::Min($left, $vl + $vw - $ww))
-  if ($cl -ne $left) { (E 'Mascot').RenderTransform = New-Object Windows.Media.TranslateTransform (($left - $cl), 0) }
-  Dbg "place anchor $($script:cx),$($script:cy) size $ww x $wh -> $cl,$top (bot shift $($left - $cl))"
-  $w.Left = $cl
-  $w.Top = [Math]::Max($vt, [Math]::Min($top, $vt + $vh - $wh))
+# Bot center inside the window (DIPs).
+$script:mx = ${WINDOW.w / 2}; $script:my = ${WINDOW.h - ROOT_MARGIN - (MASCOT_BOX.h - MASCOT_CENTER.y)}
+function DeviceScale {
+  $src = [Windows.PresentationSource]::FromVisual($w)
+  if ($src -and $src.CompositionTarget) { $src.CompositionTarget.TransformToDevice.M11 } else { 1 }
 }
-$w.Add_SizeChanged({ Place })
+function Clamp($v, $lo, $hi) { [Math]::Max($lo, [Math]::Min($v, $hi)) }
+function Place {
+  $k = DeviceScale
+  # The monitor the anchor is on (nearest one if it is on none): the bot stays whole on it, the window too.
+  $r = [AivinMascot.Native]::MonitorAt([int]($script:cx * $k), [int]($script:cy * $k))
+  if ($r) { $ml = $r[0] / $k; $mt = $r[1] / $k; $mr = $r[2] / $k; $mb = $r[3] / $k }
+  else {
+    $ml = [Windows.SystemParameters]::VirtualScreenLeft; $mt = [Windows.SystemParameters]::VirtualScreenTop
+    $mr = $ml + [Windows.SystemParameters]::VirtualScreenWidth; $mb = $mt + [Windows.SystemParameters]::VirtualScreenHeight
+  }
+  $script:cx = Clamp $script:cx ($ml + ${MASCOT_CENTER.x}) ($mr - ${MASCOT_BOX.w - MASCOT_CENTER.x})
+  $script:cy = Clamp $script:cy ($mt + ${MASCOT_CENTER.y}) ($mb - ${MASCOT_BOX.h - MASCOT_CENTER.y})
+  # Bot centered at the bottom of the window when there is room; near a screen edge the window stays on the monitor and the bot moves
+  # inside it instead. One SetWindowPos (device pixels) - setting Left then Top moved the window twice.
+  $px = [Math]::Round((Clamp ($script:cx - ${WINDOW.w / 2}) $ml ($mr - ${WINDOW.w})) * $k)
+  $py = [Math]::Round((Clamp ($script:cy - ${WINDOW.h - ROOT_MARGIN - (MASCOT_BOX.h - MASCOT_CENTER.y)}) $mt ($mb - ${WINDOW.h})) * $k)
+  if ($script:hwnd) { [void][AivinMascot.Native]::SetWindowPos($script:hwnd, [IntPtr]::Zero, [int]$px, [int]$py, 0, 0, 0x0015) }
+  else { $w.Left = $px / $k; $w.Top = $py / $k }
+  $script:mx = $script:cx - $px / $k; $script:my = $script:cy - $py / $k
+  $m = E 'Mascot'; [Windows.Controls.Canvas]::SetLeft($m, $script:mx - ${MASCOT_CENTER.x}); [Windows.Controls.Canvas]::SetTop($m, $script:my - ${MASCOT_CENTER.y})
+  Dbg "place anchor $($script:cx),$($script:cy) -> window $px,$py px (scale $k), bot at $($script:mx),$($script:my)"
+  ArrangeBoxes
+}
+# Boxes centered over the bot, kept inside the window (shadow margin). Not enough room above (bot near the top of the screen) -> below
+# the bot: the gap to the bot (each box's margin), the bubble tail and the grow-in origin flipped to the top.
+function ArrangeBoxes {
+  $b = E 'Boxes'; $bw = $b.ActualWidth; $bh = $b.ActualHeight
+  $top = $script:my - ${MASCOT_CENTER.y}; $bottom = $top + ${MASCOT_BOX.h}
+  $below = $bh -gt ($top - ${ROOT_MARGIN}) -and (${WINDOW.h - ROOT_MARGIN} - $bottom) -gt ($top - ${ROOT_MARGIN})
+  $left = Clamp ($script:mx - $bw / 2) ${ROOT_MARGIN} (${WINDOW.w - ROOT_MARGIN} - $bw)
+  [Windows.Controls.Canvas]::SetLeft($b, $left)
+  [Windows.Controls.Canvas]::SetTop($b, $(if ($below) { $bottom } else { $top - $bh }))
+  if ($below -ne $script:boxesBelow) {
+    $script:boxesBelow = $below
+    $origin = if ($below) { '0.5,0' } else { '0.5,1' }
+    foreach ($n in 'Panel', 'Ask', 'Bubble') { (E $n).RenderTransformOrigin = $origin }
+    $tail = E 'Tail'
+    $tail.VerticalAlignment = if ($below) { 'Top' } else { 'Bottom' }
+    $tail.RenderTransform = if ($below) { New-Object Windows.Media.ScaleTransform 1, -1 } else { [Windows.Media.Transform]::Identity }
+    (E 'Panel').Margin = if ($below) { '0,10,0,0' } else { '0,0,0,10' }
+    foreach ($n in 'Ask', 'BubbleBox') { (E $n).Margin = if ($below) { '0,7,0,0' } else { '0,0,0,7' } }
+  }
+  # The bubble tail points at the bot even when the bubble is pushed sideways by the window edge (centered + margin 2d = moved by d).
+  $d = $script:mx - ($left + $bw / 2)
+  (E 'Tail').Margin = if ($d -ge 0) { "$(2 * $d),0,0,0" } else { "0,0,$(-2 * $d),0" }
+}
+$script:boxesBelow = $false
+# A box shown / hidden / grown: lay the boxes out again in the same layout pass (before the frame is drawn), the window stays put.
+(E 'Boxes').Add_SizeChanged({ ArrangeBoxes })
 
 $script:state = 'idle'
 $faceMap = ConvertFrom-Json '${JSON.stringify(BOT_FACES)}'
+# Face changes morph in the rig (eyes squash shut + reopen, mouth pops) instead of cutting.
 function SetFace($s) {
   $f = $faceMap.$s; if (-not $f) { $f = $faceMap.idle }
-  foreach ($eye in ${Object.keys(BOT_FACES).map((s) => BOT_FACES[s].eyes).filter((v, i, a) => a.indexOf(v) === i).map((v) => `'${v}'`).join(',')}) {
-    foreach ($side in 'L','R') { $e = E ('Eyes_' + $eye + '_' + $side); if ($e) { $e.Visibility = if ($eye -eq $f.eyes) { 'Visible' } else { 'Collapsed' } } }
-  }
-  foreach ($mouth in ${Object.keys(BOT_FACES).map((s) => BOT_FACES[s].mouth).filter((v, i, a) => a.indexOf(v) === i).map((v) => `'${v}'`).join(',')}) {
-    $e = E ('Mouth_' + $mouth); if ($e) { $e.Visibility = if ($mouth -eq $f.mouth) { 'Visible' } else { 'Collapsed' } }
+  $script:rig.SetFace([string]$f.eyes, [string]$f.mouth)
+}
+# Reactions picked from the state pair (the rig plays them, see rigSource.mjs): busy -> needs you = startle; done after an error in the
+# last minutes = relief; done after long work = cheer, after a quick one = a nod. Busy time counts from the first working / thinking
+# until done / error / idle (a question in between does not reset it).
+$script:busySince = $null; $script:errorAt = [DateTime]::MinValue
+function React($prev, $s) {
+  $now = Get-Date
+  $busyFor = if ($script:busySince) { ($now - $script:busySince).TotalSeconds } else { 0 }
+  if ($s -eq 'working' -or $s -eq 'thinking') { if (-not $script:busySince) { $script:busySince = $now } }
+  elseif ($s -ne 'waiting') { $script:busySince = $null }
+  if ($s -eq 'error') { $script:errorAt = $now }
+  if ($s -eq 'waiting' -and ($prev -eq 'working' -or $prev -eq 'thinking')) { $script:rig.Play('startle') }
+  elseif ($s -eq 'done') {
+    if (($now - $script:errorAt).TotalMinutes -lt 5) { $script:errorAt = [DateTime]::MinValue; PlayFace 'relief' 'relief' 1.3 }
+    elseif ($busyFor -ge 60) { $script:rig.Play('cheer') }
+    elseif ($busyFor -gt 0 -and $busyFor -lt 10) { $script:rig.Play('small') }
   }
 }
 function SetState($s) {
   if (-not $P.$s) { return }
-  if ($s -ne $script:state) { Wake }
+  $prev = $script:state
+  if ($s -ne $prev) { Wake }
   $script:state = $s; $c = $P.$s
   (E 'BubbleDot').Fill = Brush $c.fg
   (E 'Chip').Background = Brush $c.bg; (E 'ChipText').Foreground = Brush $c.fg; (E 'ChipText').Text = $T.('state_' + $s)
   $busy = $s -eq 'working' -or $s -eq 'thinking'
   if (-not ($script:rig.Hover -and -not $busy) -and -not $script:rig.Dozing) { SetFace $s }
   $script:rig.SetState($s, $c.fg)
+  if ($s -ne $prev) { React $prev $s }
   (E 'PauseBtn').Content = if ($s -eq 'paused') { $T.resume } else { $T.pause }
   if (-not $busy -and $s -ne 'waiting' -and (E 'Bubble').Visibility -eq 'Visible') { $script:bubbleTimer.Stop(); $script:bubbleTimer.Start() }
 }
@@ -349,11 +438,13 @@ function IsBusy { $script:state -eq 'working' -or $script:state -eq 'thinking' }
 
 # Doze: idle for a long while with nobody around -> the bot nods off (closed eyes, zzz); new work or the pointer wakes it up.
 $script:lastActive = Get-Date
-function Wake { $script:lastActive = Get-Date; if ($script:rig.Dozing) { $script:rig.Doze($false); SetFace $script:state } }
+function Wake { $script:lastActive = Get-Date; $script:yawned = $false; if ($script:rig.Dozing) { $script:rig.Doze($false); SetFace $script:state } }
 $script:dozeTimer = New-Object Windows.Threading.DispatcherTimer; $script:dozeTimer.Interval = [TimeSpan]::FromSeconds(15)
 $script:dozeTimer.Add_Tick({
   if ($script:state -eq 'idle' -and -not $script:rig.Dozing -and -not $script:rig.Hover -and ((Get-Date) - $script:lastActive).TotalMinutes -ge ${MASCOT_DOZE_MIN}) {
-    $script:rig.Doze($true); SetFace 'offline'
+    # A yawn first, nodding off on the next tick (PlayFace would count as activity: keep the idle clock and the yawn flag).
+    if (-not $script:yawned) { $script:rig.Play('yawn'); SetFace 'yawn'; $script:faceTimer.Stop(); $script:faceTimer.Interval = [TimeSpan]::FromSeconds(2); $script:faceTimer.Start(); $script:yawned = $true }
+    else { $script:rig.Doze($true); SetFace 'offline' }
   }
 })
 $script:dozeTimer.Start()

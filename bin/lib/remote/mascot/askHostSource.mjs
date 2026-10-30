@@ -19,7 +19,7 @@
  *   (listening | thinking | speaking), `voice_end { text? }`.
  * Giữ toàn ASCII (xem hostSource.mjs).
  */
-import { ASK_BTN } from './hostSource.mjs';
+import { ASK_BTN, MASCOT_CENTER } from './hostSource.mjs';
 
 /**
  * Lựa chọn khi Aivin hỏi lại: mỗi thẻ tô một màu pastel nhạt (xoay vòng hồng → tím nhạt → xanh trời → xanh bạc hà, theo viền ô hỏi), không
@@ -28,6 +28,20 @@ import { ASK_BTN } from './hostSource.mjs';
 const CHOICE_CARDS = Object.freeze(['#FDF2F8', '#F5F3FF', '#EFF6FF', '#ECFDF5']);
 const CHOICE_INK = '#3B4256';
 const CHOICE_HOVER = '#0F1E1B4B';
+/** Viền chấm tròn / ô vuông đầu mỗi lựa chọn (chưa tích). */
+const CHOICE_MARK = '#9AA1B2';
+/**
+ * Icon cuối lựa chọn: tên Lucide (như thẻ chọn trên Aivin; so khớp viết thường, bỏ dấu gạch) → mã ký tự Segoe MDL2 Assets. Tên không có ở
+ * đây thì không vẽ icon; một emoji / ký hiệu ngắn thì vẽ nguyên.
+ */
+const CHOICE_ICON_GLYPHS = Object.freeze({
+  check: 'E73E', checkcircle: 'E930', x: 'E711', file: 'E8A5', filetext: 'E8A5', folder: 'E8B7', folderopen: 'E838', calendar: 'E787',
+  clock: 'E823', mail: 'E715', send: 'E724', globe: 'E774', link: 'E71B', search: 'E721', settings: 'E713', user: 'E77B', users: 'E716',
+  download: 'E896', upload: 'E898', image: 'EB9F', trash: 'E74D', trash2: 'E74D', pencil: 'E70F', edit: 'E70F', play: 'E768', pause: 'E769',
+  star: 'E734', heart: 'EB51', phone: 'E717', lock: 'E72E', unlock: 'E785', alerttriangle: 'E7BA', trianglealert: 'E7BA', info: 'E946',
+  home: 'E80F', refreshcw: 'E72C', copy: 'E8C8', save: 'E74E', monitor: 'E7F4', terminal: 'E756', code: 'E943', thumbsup: 'E8E1',
+  thumbsdown: 'E8E0', arrowright: 'E72A', externallink: 'E8A7', mic: 'E720', camera: 'E722', printer: 'E749', share: 'E72D',
+});
 
 export const ASK_PS1 = String.raw`
 # ---- Ask box (askHostSource.mjs) ----
@@ -144,13 +158,32 @@ function SyncAction {
   (E 'AskHint').Visibility = if ((E 'AskBox').Text) { 'Collapsed' } else { 'Visible' }
   (E 'SendIcon').Visibility = if ($typed) { 'Visible' } else { 'Collapsed' }; (E 'MicIcon').Visibility = if ($typed) { 'Collapsed' } else { 'Visible' }
   (E 'MicBtn').ToolTip = if ($typed) { $T.ask_send } else { $T.ask_mic }
+  InputLayout
 }
-(E 'AskBox').Add_TextChanged({ SyncAction })
+# Input row height: two lines for a fresh question; once a conversation is above it (or while talking), one line with the hint and the mic
+# button centred on the same line - the box only grows (mic back at the bottom) when the typed text wraps.
+function InputLayout {
+  $box = E 'AskBox'
+  # Box hidden = the voice bar is in its place (VoiceLook hides it before the voice state is set).
+  $compact = $box.Visibility -ne 'Visible' -or [bool]$script:voiceLive -or (E 'ChatList').Children.Count -gt 0
+  $wrapped = $box.Visibility -eq 'Visible' -and $box.LineCount -gt 1
+  $box.Parent.MinHeight = if ($compact) { 26 } else { 40 }
+  $mid = if ($compact -and -not $wrapped) { 'Center' } else { 'Top' }
+  $box.VerticalAlignment = $mid; (E 'AskHint').VerticalAlignment = $mid
+  (E 'MicBtn').VerticalAlignment = if ($compact -and -not $wrapped) { 'Center' } else { 'Bottom' }
+}
+(E 'AskBox').Add_TextChanged({ SyncAction; AttendAsk })
+# Typing: the bot looks at the box (above or below it) while keys come in; a little nod when a question / answer goes out.
+function AttendAsk {
+  if (-not (E 'AskBox').Text) { return }
+  $a = E 'Ask'; $p = $a.TranslatePoint((New-Object Windows.Point ($a.ActualWidth / 2), ($a.ActualHeight / 2)), (E 'Mascot'))
+  $script:rig.Attend($p.X - ${MASCOT_CENTER.x}, $p.Y - ${MASCOT_CENTER.y})
+}
 
 $script:chatBusy = $false
 function SubmitAsk {
   $text = (E 'AskBox').Text.Trim(); if (-not $text -or $script:chatBusy -or $script:voiceLive) { return }
-  NoteTarget; (E 'AskBox').Text = ''; Send @{ t = 'ask'; text = $text; window = $script:askTarget }
+  NoteTarget; (E 'AskBox').Text = ''; $script:rig.Play('ack'); Send @{ t = 'ask'; text = $text; window = $script:askTarget }
 }
 (E 'AskBox').Add_KeyDown({ param($s, $e)
   if ($e.Key -eq 'Return') { SubmitAsk; $e.Handled = $true }
@@ -192,23 +225,71 @@ function ChatRow($m) {
   # Words the owner is still saying: lighter until the sentence is settled (the box's own opacity is the fade-in).
   $row.text.Opacity = if ($m.partial) { 0.55 } else { 1 }
   (E 'ChatScroll').ScrollToEnd()
+  InputLayout
 }
 
-# Aivin asked something with choices: a vertical list, one full-width row per option (text left, wraps), click = answer (the daemon
-# clears them once answered). Typing still works.
+# Aivin asked something with choices: a vertical list, one full-width card per option (the daemon clears them once answered). Typing
+# still works. Like the cards in Aivin: a round dot at the start (pick one: click = answer) or a square box (pick several: click ticks /
+# unticks, a confirm button sends the ticked ones), the text, the option's icon at the end when it has one we can draw.
 # Soft look: each card filled with a light pastel (cycling the ask box's glow colors), no border, dark-grey text; hover deepens it.
-function ChoiceButtons($options) {
-  $panel = E 'Choices'; $panel.Children.Clear(); $k = 0
+$script:iconGlyphs = ConvertFrom-Json '${JSON.stringify(CHOICE_ICON_GLYPHS)}'
+function ChoiceIcon($name) {
+  $n = [string]$name; if (-not $n) { return $null }
+  $tb = New-Object Windows.Controls.TextBlock; $tb.FontSize = 12; $tb.Margin = '8,1,0,0'; $tb.VerticalAlignment = 'Top'; $tb.Foreground = Brush '${CHOICE_INK}'
+  # An emoji / short symbol is drawn as is; a Lucide name (as Aivin's cards use) maps to the matching Segoe MDL2 glyph, unknown = none.
+  if ($n.Length -le 2) { $tb.Text = $n; $tb.FontFamily = 'Segoe UI Emoji'; return $tb }
+  $code = $script:iconGlyphs.(($n -replace '[^A-Za-z0-9]', '').ToLowerInvariant()); if (-not $code) { return $null }
+  $tb.Text = [string][char][Convert]::ToInt32($code, 16); $tb.FontFamily = 'Segoe MDL2 Assets'; $tb.Opacity = 0.75; return $tb
+}
+function ChoiceMark($multi) {
+  $m = New-Object Windows.Controls.Border; $m.Width = 13; $m.Height = 13; $m.Margin = '0,2,8,0'; $m.VerticalAlignment = 'Top'
+  $m.CornerRadius = if ($multi) { '3.5' } else { '6.5' }; $m.BorderThickness = '1.4'
+  $tick = New-Object Windows.Shapes.Path; $tick.Data = [Windows.Media.Geometry]::Parse('M2.4,6.2 L4.9,8.6 L9.4,3.6'); $tick.Stroke = Brush '#FFFFFF'
+  $tick.StrokeThickness = 1.7; $tick.StrokeStartLineCap = 'Round'; $tick.StrokeEndLineCap = 'Round'; $tick.StrokeLineJoin = 'Round'
+  $m.Child = $tick; SetTicked $m $false; $m
+}
+function SetTicked($mark, $on) {
+  $mark.Background = if ($on) { Brush '${ASK_BTN.icon}' } else { Brush '#B3FFFFFF' }
+  $mark.BorderBrush = if ($on) { Brush '${ASK_BTN.icon}' } else { Brush '${CHOICE_MARK}' }
+  $mark.Child.Visibility = if ($on) { 'Visible' } else { 'Collapsed' }
+}
+$script:picked = New-Object Collections.ArrayList; $script:choiceMarks = @{}; $script:choiceConfirm = $null
+function SyncConfirm {
+  $b = $script:choiceConfirm; if (-not $b) { return }
+  $b.Content = $T.ask_confirm -replace '\{n\}', $script:picked.Count
+  $b.Visibility = if ($script:picked.Count) { 'Visible' } else { 'Collapsed' }
+}
+function ChoiceButtons($options, $multiple) {
+  $panel = E 'Choices'; $panel.Children.Clear(); $k = 0; $multi = [bool]$multiple
+  $script:picked.Clear(); $script:choiceMarks = @{}; $script:choiceConfirm = $null
   $cards = @(${CHOICE_CARDS.map((c) => `'${c}'`).join(', ')})
   foreach ($o in @($options)) {
     if (-not $o) { continue }
-    $c = $cards[$k % $cards.Count]; $k++
-    $tb = New-Object Windows.Controls.TextBlock; $tb.Text = [string]$o.text; $tb.TextWrapping = 'Wrap'; $tb.Width = 192; $tb.Foreground = Brush '${CHOICE_INK}'
-    $btn = New-Object Windows.Controls.Button; $btn.Style = $w.FindResource('Btn'); $btn.Content = $tb; $btn.CommandParameter = [string]$o.id
+    $c = $cards[$k % $cards.Count]; $k++; $id = [string]$o.id
+    $row = New-Object Windows.Controls.DockPanel; $row.Width = 192
+    $mark = ChoiceMark $multi; [Windows.Controls.DockPanel]::SetDock($mark, 'Left'); [void]$row.Children.Add($mark)
+    $icon = ChoiceIcon $o.icon; if ($icon) { [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$row.Children.Add($icon) }
+    $tb = New-Object Windows.Controls.TextBlock; $tb.Text = [string]$o.text; $tb.TextWrapping = 'Wrap'; $tb.Foreground = Brush '${CHOICE_INK}'; [void]$row.Children.Add($tb)
+    $btn = New-Object Windows.Controls.Button; $btn.Style = $w.FindResource('Btn'); $btn.Content = $row; $btn.CommandParameter = $id
     $btn.FontSize = 12; $btn.FontWeight = 'Normal'; $btn.Padding = '10,6,10,6'; $btn.Margin = '0,0,0,4'; $btn.HorizontalAlignment = 'Stretch'
     $btn.Background = Brush $c; $btn.BorderThickness = '0'; $btn.Tag = Brush '${CHOICE_HOVER}'
-    $btn.Add_Click({ param($s) if (-not $script:chatBusy) { Send @{ t = 'choose'; id = [string]$s.CommandParameter } } })
+    $script:choiceMarks[$id] = $mark
+    if ($multi) {
+      $btn.Add_Click({ param($s)
+        $id = [string]$s.CommandParameter; $on = -not $script:picked.Contains($id)
+        if ($on) { [void]$script:picked.Add($id) } else { $script:picked.Remove($id) }
+        SetTicked $script:choiceMarks[$id] $on; SyncConfirm
+      })
+    } else {
+      $btn.Add_Click({ param($s) if (-not $script:chatBusy) { SetTicked $script:choiceMarks[[string]$s.CommandParameter] $true; $script:rig.Play('ack'); Send @{ t = 'choose'; id = [string]$s.CommandParameter } } })
+    }
     [void]$panel.Children.Add($btn)
+  }
+  if ($multi -and $panel.Children.Count) {
+    $ok = New-Object Windows.Controls.Button; $ok.Style = $w.FindResource('Btn'); $ok.FontSize = 12; $ok.Padding = '12,5,12,5'; $ok.Margin = '0,1,0,4'
+    $ok.HorizontalAlignment = 'Right'; $ok.Background = Brush '${ASK_BTN.icon}'; $ok.Foreground = Brush '#FFFFFF'; $ok.BorderThickness = '0'; $ok.Tag = Brush '#1F000000'
+    $ok.Add_Click({ if (-not $script:chatBusy -and $script:picked.Count) { $script:rig.Play('ack'); Send @{ t = 'choose'; ids = @($script:picked.ToArray()) } } })
+    $script:choiceConfirm = $ok; [void]$panel.Children.Add($ok); SyncConfirm
   }
   $panel.Visibility = if ($panel.Children.Count) { 'Visible' } else { 'Collapsed' }
 }
@@ -249,12 +330,10 @@ $script:levelTimer.Add_Tick({
 function VoiceLook($on) {
   (E 'MicBtn').Background = Brush $(if ($on) { '${ASK_BTN.recBg}' } else { '${ASK_BTN.bg}' })
   (E 'MicIcon').Stroke = Brush $(if ($on) { '${ASK_BTN.recIcon}' } else { '${ASK_BTN.icon}' })
-  (E 'MicBtn').VerticalAlignment = if ($on) { 'Center' } else { 'Bottom' }
-  # The input row is two lines tall for typing; the voice bar only needs the button's height.
-  $inputCell.MinHeight = if ($on) { 26 } else { 40 }
+  # The voice bar only needs the button's height (InputLayout, via SyncAction / below).
   (E 'AskBox').Visibility = if ($on) { 'Collapsed' } else { 'Visible' }
   $voiceBar.Visibility = if ($on) { 'Visible' } else { 'Collapsed' }
-  if ($on) { (E 'MicIcon').Visibility = 'Visible'; (E 'SendIcon').Visibility = 'Collapsed'; (E 'AskHint').Visibility = 'Collapsed'; $script:levelTimer.Start() }
+  if ($on) { (E 'MicIcon').Visibility = 'Visible'; (E 'SendIcon').Visibility = 'Collapsed'; (E 'AskHint').Visibility = 'Collapsed'; $script:levelTimer.Start(); InputLayout }
   else { $script:levelTimer.Stop(); SyncAction }
 }
 function VoiceState($state) {
@@ -317,7 +396,7 @@ function Handle($m) {
       return
     }
     'ask_status' { AskStatus $m.text; return }
-    'ask_choices' { ChoiceButtons $m.options; return }
+    'ask_choices' { ChoiceButtons $m.options $m.multiple; return }
     'ask_pin' {
       $script:askPinned = [bool]$m.on
       if ($script:askPinned) { $script:userHidden = $false; ApplyVisibility; AskHide 'Panel'; PeekAsk; (E 'ChatScroll').ScrollToEnd() }

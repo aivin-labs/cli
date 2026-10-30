@@ -28,9 +28,9 @@ export const BOT_RIG = Object.freeze({
    * tilt: quay quanh trục ngang (dương = mép trên nhô về người xem); turn: quay quanh trục đứng (dương = mép phải lùi xa). kind: text | bars.
    */
   screens: [
-    { x: 96, y: 168, z: 40, w: 124, h: 46, tilt: 34, turn: 0, look: [0, 3.2], head: 0, kind: 'text', dwell: [2.6, 4.4] },
-    { x: 4, y: 112, z: 22, w: 64, h: 48, tilt: 12, turn: -34, look: [-2.8, 1.8], head: -6, kind: 'bars', dwell: [1.2, 2.2] },
-    { x: 188, y: 112, z: 22, w: 64, h: 48, tilt: 12, turn: 34, look: [2.8, 1.8], head: 6, kind: 'text', dwell: [1.2, 2.2] },
+    { x: 96, y: 153, z: 40, w: 132, h: 58, tilt: 34, turn: 0, look: [0, 3.2], head: 0, kind: 'text', dwell: [1.6, 2.6] },
+    { x: 4, y: 112, z: 22, w: 64, h: 48, tilt: 12, turn: -34, look: [-2.8, 1.8], head: -6, kind: 'bars', dwell: [0.9, 1.6] },
+    { x: 188, y: 112, z: 22, w: 64, h: 48, tilt: 12, turn: 34, look: [2.8, 1.8], head: 6, kind: 'text', dwell: [0.9, 1.6] },
   ],
   /** Chữ "z" khi ngủ (offline): bay từ (x, y) lên chéo phải (dx, dy), to dần rồi mờ. */
   zzz: { x: 140, y: 30, dx: 40, dy: -52, size: 46 },
@@ -59,6 +59,9 @@ export const BOT_FACES = Object.freeze({
   // Chơi với bot (hostSource.mjs): bị lắc mạnh khi kéo → chóng mặt (mắt xoắn ốc quay); được vuốt (rê chuột qua lại) → lim dim sung sướng.
   dizzy: { eyes: 'dizzy', mouth: 'wobble' },
   purr: { eyes: 'happy', mouth: 'smile' },
+  // Phản ứng (hostSource.mjs): xong sau khi lỗi → nhắm mắt thở phào; rảnh lâu sắp ngủ gật → ngáp.
+  relief: { eyes: 'closed', mouth: 'smile' },
+  yawn: { eyes: 'closed', mouth: 'open' },
 });
 
 export const BOT_EYES = Object.freeze(['open', 'focus', 'up', 'wide', 'happy', 'closed', 'sad', 'dizzy']);
@@ -282,14 +285,14 @@ export const BOT_XAML = `<Canvas x:Name="Stage" Width="${S}" Height="${S}">
      </TransformGroup></Canvas.RenderTransform>
      <Canvas.Effect><DropShadowEffect BlurRadius="7" ShadowDepth="0" Opacity="0.8" Color="${GLOW}"/></Canvas.Effect>
      <Canvas><Canvas.RenderTransform><TranslateTransform x:Name="EyeLook"/></Canvas.RenderTransform>
-      <Canvas x:Name="EyeL" Canvas.Left="${-F.eyeDx}" Canvas.Top="${F.eyeY}">
+      <Canvas x:Name="EyeL" Canvas.Left="${-F.eyeDx}" Canvas.Top="${F.eyeY}"><Canvas.RenderTransform><ScaleTransform x:Name="EyeMorphL"/></Canvas.RenderTransform>
       ${eyeSide('L')}
       </Canvas>
-      <Canvas x:Name="EyeR" Canvas.Left="${F.eyeDx}" Canvas.Top="${F.eyeY}">
+      <Canvas x:Name="EyeR" Canvas.Left="${F.eyeDx}" Canvas.Top="${F.eyeY}"><Canvas.RenderTransform><ScaleTransform x:Name="EyeMorphR"/></Canvas.RenderTransform>
       ${eyeSide('R')}
       </Canvas>
      </Canvas>
-     <Canvas x:Name="Mouth" Canvas.Top="${F.mouthY}">
+     <Canvas x:Name="Mouth" Canvas.Top="${F.mouthY}"><Canvas.RenderTransform><ScaleTransform x:Name="MouthMorph"/></Canvas.RenderTransform>
       ${BOT_MOUTHS.map((n) => `<Canvas x:Name="Mouth_${n}" Visibility="Collapsed">${MOUTH_SHAPES[n]}</Canvas>`).join('\n      ')}
      </Canvas>
     </Canvas>

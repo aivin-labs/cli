@@ -90,7 +90,8 @@ export const VoiceEventKind = Object.freeze({
 });
 
 /** Loại sự kiện của lượt chat từ linh vật (`device:chat_event`). */
-export const ChatEventKind = Object.freeze({ PROGRESS: 'progress', ANSWER: 'answer', TIMEOUT: 'timeout', ERROR: 'error', NEEDS_INPUT: 'needs_input' });
+/** `delta`: câu trả lời đang viết — `text` = cả câu tới lúc đó; chỉ tới khi máy xin (`stream: true` trong `device:chat`). */
+export const ChatEventKind = Object.freeze({ PROGRESS: 'progress', ANSWER: 'answer', TIMEOUT: 'timeout', ERROR: 'error', NEEDS_INPUT: 'needs_input', DELTA: 'delta' });
 
 /** Năng lực BE báo trong ack của `device:hello` (`features`). */
 /** Pha của `device:hold`: `waiting` = chờ người bấm xác nhận trên máy, `started` = đã qua hộp, bước bắt đầu chạy (BE phân biệt chưa chạy / chạy dở). */
