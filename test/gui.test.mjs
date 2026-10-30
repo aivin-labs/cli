@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
-const { assertWindowAllowed, buildGuiTools, createGuiController, detectGui, matchApps } = await import('../bin/lib/remote/gui/index.mjs');
+const { assertAppAllowed, assertWindowAllowed, buildGuiTools, createGuiController, detectGui, matchApps } = await import('../bin/lib/remote/gui/index.mjs');
 const { buildTools } = await import('../bin/lib/remote/toolHandlers.mjs');
 const { buildCatalog } = await import('../bin/lib/remote/deviceProfile.mjs');
 const { DEFAULT_GROUP_LIMITS, ToolGroup } = await import('../bin/lib/remote/constants.mjs');
@@ -192,4 +192,18 @@ test('find: chỉ phần tử khớp mọi từ (bỏ dấu, cả AutomationId /
   assert.equal((await gui.find({ query: 'luu', max: 1 }, {})).nodes.length, 1);
   await assert.rejects(gui.find({ query: '  ' }, {}), (e) => e.code === 'INVALID_ARGS');
   assert.equal((await gui.act({ action: 'click', node_id: '5.3' }, {})).method, 'invoke', 'id của find dùng ngay cho act');
+});
+
+test('trình soạn code / ứng dụng agent (VS Code, Cursor, Claude…) chỉ điều khiển / mở được khi máy toàn quyền', async () => {
+  for (const proc of ['Code', 'Cursor', 'claude', 'devenv', 'idea64']) {
+    assert.throws(() => assertWindowAllowed({ process: proc }, { fullAccess: false }), /full device access/, proc);
+    assert.doesNotThrow(() => assertWindowAllowed({ process: proc }, { fullAccess: true }), proc);
+  }
+  assert.doesNotThrow(() => assertWindowAllowed({ process: 'EXCEL' }, { fullAccess: false }));
+  for (const name of ['Visual Studio Code', 'Cursor', 'Claude', 'Windows Terminal', 'Command Prompt', 'Git Bash']) {
+    assert.throws(() => assertAppAllowed(name, { fullAccess: false }), /full device access/, name);
+    assert.doesNotThrow(() => assertAppAllowed(name, { fullAccess: true }), name);
+  }
+  for (const name of ['Excel', 'Notepad', 'MISA SME', 'Zalo']) assert.doesNotThrow(() => assertAppAllowed(name, { fullAccess: false }), name);
+  assert.throws(() => assertAppAllowed('KeePassXC', { fullAccess: true }), /not allowed/);
 });

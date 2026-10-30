@@ -25,10 +25,18 @@ const BLOCKED_PROCESSES = new Set([
   'consent', 'credentialuihost', 'lockapp', 'logonui', 'securityhealthsystray', 'securityhealthhost', 'windowsdefender', 'msmpeng',
   'keepass', 'keepassxc', '1password', 'bitwarden', 'lastpass', 'dashlane', 'enpass', 'nordpass', 'roboform',
 ]);
-/** Chỉ cho khi máy toàn quyền — điều khiển được những thứ này là chạy lệnh tuỳ ý ngoài vùng thư mục. */
+/**
+ * Chỉ cho khi máy toàn quyền — điều khiển được những thứ này là chạy lệnh tuỳ ý ngoài vùng thư mục: terminal / registry, và (30/10/2026)
+ * trình soạn code có terminal tích hợp + ứng dụng agent tự chạy lệnh (VS Code, Cursor, Claude…) — gõ vào terminal của VS Code hay nhờ panel
+ * Claude chạy lệnh cũng là lách vùng thư mục như gõ vào cmd.
+ */
 const SHELL_PROCESSES = new Set([
   'cmd', 'powershell', 'pwsh', 'windowsterminal', 'wt', 'openconsole', 'conhost', 'regedit', 'mmc', 'taskmgr', 'wsl', 'bash', 'mintty',
+  'code', 'code - insiders', 'codium', 'cursor', 'windsurf', 'zed', 'devenv', 'idea64', 'pycharm64', 'webstorm64', 'rider64', 'goland64',
+  'claude', 'chatgpt', 'warp', 'alacritty', 'wezterm-gui', 'hyper', 'tabby',
 ]);
+/** Cùng nhóm đó theo tên trong menu Start (`gui.open_app` tìm theo tên, khác tên tiến trình) — chặn trước khi mở. */
+const SHELL_APP_NAME = /\b(command prompt|powershell|terminal|registry editor|task manager|visual studio|vs ?code|cursor|windsurf|zed|intellij|pycharm|webstorm|rider|goland|claude|chatgpt|warp|alacritty|wezterm|hyper|tabby|wsl|ubuntu|git bash)\b/i;
 /** Không mở tệp có đuôi chạy được bằng `gui.open_app` (mở = chạy chương trình). */
 const EXECUTABLE_EXT = /\.(exe|com|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|msi|msp|lnk|scr|pif|hta|cpl|jar|reg|url|appref-ms|application)$/i;
 
@@ -68,6 +76,14 @@ export function assertWindowAllowed(windowInfo, { fullAccess }) {
   if (BLOCKED_PROCESSES.has(proc)) throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, `Controlling "${windowInfo.process}" is not allowed on this device`);
   if (!fullAccess && SHELL_PROCESSES.has(proc)) {
     throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, `Controlling "${windowInfo.process}" needs full device access (aivin remote start --full-access)`);
+  }
+}
+
+/** Ứng dụng này (tên trong menu Start) có được mở không — ném lỗi trước khi mở. */
+export function assertAppAllowed(name, { fullAccess }) {
+  if (BLOCKED_PROCESSES.has(normalizeProcess(String(name || '').replace(/\s+/g, '')))) throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, `Opening "${name}" is not allowed`);
+  if (!fullAccess && SHELL_APP_NAME.test(String(name || ''))) {
+    throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, `Opening "${name}" needs full device access (aivin remote start --full-access)`);
   }
 }
 
@@ -251,7 +267,7 @@ export function createGuiController({
     if (!matches.length) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `No installed app named "${name}"`);
     if (matches.length > 1 && !args.first) return { ambiguous: true, candidates: matches.slice(0, 10).map((m) => m.name), hint: 'Call again with the exact name' };
     const app = matches[0];
-    if (BLOCKED_PROCESSES.has(normalizeProcess(app.name.replace(/\s+/g, '')))) throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, `Opening "${app.name}" is not allowed`);
+    assertAppAllowed(app.name, { fullAccess });
     spawn('explorer.exe', [`shell:AppsFolder\\${app.app_id}`], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
     const win = await waitNewWindow(before, ctx, app.name);
     await sendToBack(win, before, ctx);
