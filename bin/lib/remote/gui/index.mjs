@@ -36,6 +36,8 @@ const OBSERVE_MAX_NODES = 300;
 const APPS_CACHE_MS = 10 * 60_000;
 const OPEN_WAIT_MS = 10_000;
 const WAIT_MAX_MS = 60_000;
+const FIND_DEFAULT = 20;
+const FIND_MAX = 60;
 /** Báo người dùng "AI đang điều khiển" một lần mỗi quãng này (lần thao tác ghi đầu tiên). */
 const NOTIFY_EVERY_MS = 5 * 60_000;
 
@@ -147,6 +149,29 @@ export function createGuiController({
     return res;
   }
 
+  /**
+   * Chỉ những phần tử khớp chữ cần tìm (cửa sổ lớn: Excel, ERP có hàng trăm phần tử) — đi cả cây (tới 1500) rồi lọc ở đây; id vẫn của lần
+   * observe đó nên `gui.act` dùng được ngay. Mọi từ đều có trong tên / AutomationId / giá trị / chú thích (bỏ dấu); không phần tử nào đủ
+   * hết từ thì lấy phần tử khớp nhiều từ nhất.
+   */
+  async function find(args, ctx) {
+    const words = normalizeName(args.query).split(' ').filter(Boolean);
+    if (!words.length) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give query (words of the element to find)');
+    const role = String(args.role || '').toLowerCase();
+    const max = Math.max(1, Math.min(Number(args.max) || FIND_DEFAULT, FIND_MAX));
+    const res = await observe({ ...args, max_nodes: 1500 }, ctx);
+    const scored = (res.nodes || [])
+      .filter((n) => !role || n.role === role)
+      .map((n) => {
+        const text = normalizeName([n.name, n.automation_id, n.value, n.help].filter(Boolean).join(' '));
+        return { n, hits: words.filter((w) => text.includes(w)).length };
+      })
+      .filter((x) => x.hits > 0);
+    const all = scored.filter((x) => x.hits === words.length);
+    const picked = (all.length ? all : scored.sort((a, b) => b.hits - a.hits)).slice(0, max).map((x) => x.n);
+    return { ...res, nodes: picked, query: String(args.query), matched: all.length ? all.length : scored.length, exact: all.length > 0 };
+  }
+
   /** Chờ phần tử / cửa sổ hiện ra hoặc mất đi — chỉ đọc. Chờ trong một cửa sổ thì cửa sổ đó phải được phép điều khiển. */
   async function waitFor(args, ctx) {
     const elementWait = !!(args.name || args.automation_id);
@@ -234,7 +259,7 @@ export function createGuiController({
     return { opened: app.name, window: win, hint: win ? undefined : 'App started but no new window yet — call gui.windows in a moment' };
   }
 
-  return { windows, observe, waitFor, focus, act, openApp, close: () => host.close() };
+  return { windows, observe, find, waitFor, focus, act, openApp, close: () => host.close() };
 }
 
 /** Công cụ GUI cho danh mục của Planner. */
@@ -253,6 +278,12 @@ export function buildGuiTools(gui) {
         window: target.window, include_image: bool('attach a screenshot even when the tree is good'), max_nodes: num('default 300'),
         ocr: bool('read the text on the window even when the tree is good (default: only when poor)'),
       }) },
+    { name: 'gui.find', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.find(a, c),
+      description: 'Like gui.observe but returns only the elements whose name / AutomationId / value contains the query words (accents ignored), optionally of one role — for big windows (spreadsheets, ERP forms) where the full tree is too long. Ids work with gui.act right away. exact=false means no element had every word; the closest ones are returned.',
+      input_schema: schema({
+        query: str('words of the element, e.g. "Save", "Số tiền", "Customer name"'), window: target.window,
+        role: str('only this role, e.g. button, edit, menuitem, dataitem'), max: num('default 20, max 60'),
+      }, ['query']) },
     { name: 'gui.wait_for', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.waitFor(a, c),
       description: 'Wait until the UI reaches a state instead of observing again and again: an element (name contains / automation_id, optional role) appears or is gone in a window, or a window whose title contains some text appears or is gone (no window = any window). Returns met + waited_ms + the match; GUI_WAIT_TIMEOUT if it did not happen in time.',
       input_schema: schema({

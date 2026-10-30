@@ -169,3 +169,27 @@ test('node chữ OCR ("<snap>.t<k>"): act kiểm ứng dụng theo cửa sổ c�
   assert.equal(res.method, 'mouse');
   await assert.rejects(gui.act({ action: 'click', node_id: '8.t0' }, {}), (e) => e.code === 'GUI_STALE_NODE');
 });
+
+test('find: chỉ phần tử khớp mọi từ (bỏ dấu, cả AutomationId / giá trị), lọc vai trò, có trần; không đủ hết từ → gần nhất; id giữ nguyên để act', async () => {
+  const nodes = [
+    { id: '5.0', role: 'window', name: 'Phiếu chi - MISA' },
+    { id: '5.1', role: 'edit', name: 'Số tiền', automation_id: 'txtAmount' },
+    { id: '5.2', role: 'button', name: 'Lưu và đóng' },
+    { id: '5.3', role: 'button', name: 'Lưu' },
+    { id: '5.4', role: 'edit', name: 'Diễn giải', value: 'Tiền điện tháng 10' },
+  ];
+  const host = fakeHost({ observe: { snapshot: 5, window: NOTEPAD, nodes, tree_quality: 'good', node_count: nodes.length }, act: (a) => ({ action: a.action, method: 'invoke' }) });
+  const gui = createGuiController({ host, notify: () => {} });
+  const r = await gui.find({ query: 'luu', role: 'button' }, {});
+  assert.deepEqual(r.nodes.map((n) => n.id), ['5.2', '5.3']);
+  assert.equal(r.exact, true);
+  assert.equal(host.calls[0].args.max_nodes, 1500, 'đi cả cây rồi lọc');
+  assert.deepEqual((await gui.find({ query: 'amount' }, {})).nodes.map((n) => n.id), ['5.1']);
+  assert.deepEqual((await gui.find({ query: 'tien dien' }, {})).nodes.map((n) => n.id), ['5.4']);
+  const near = await gui.find({ query: 'luu ban nhap' }, {});
+  assert.equal(near.exact, false);
+  assert.ok(near.nodes.length >= 2 && near.nodes.every((n) => n.name.startsWith('Lưu')));
+  assert.equal((await gui.find({ query: 'luu', max: 1 }, {})).nodes.length, 1);
+  await assert.rejects(gui.find({ query: '  ' }, {}), (e) => e.code === 'INVALID_ARGS');
+  assert.equal((await gui.act({ action: 'click', node_id: '5.3' }, {})).method, 'invoke', 'id của find dùng ngay cho act');
+});
