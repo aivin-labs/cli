@@ -16,6 +16,10 @@ import { buildGuiTools } from './gui/index.mjs';
 import { buildOfficeTools } from './office/index.mjs';
 import { measurePath } from './undoStore.mjs';
 import { buildProcessTools, shellCommand } from './processes.mjs';
+import { buildAgentTools, createAgentRunner } from './codingAgents.mjs';
+
+/** Một bộ chạy agent lập trình cho cả tiến trình (việc đang chạy sống qua các lần dựng lại danh mục công cụ). */
+let sharedAgents = null;
 import { buildScheduleTools } from './schedule.mjs';
 import { buildWatchTools } from './deviceWatches.mjs';
 import { buildTransferTools } from './httpTransfer.mjs';
@@ -712,6 +716,11 @@ export function buildTools(env) {
   if (env.office?.apps?.length) tools.push(...buildOfficeTools(env.office.host, env.office.apps));
   // Tiến trình nền + đọc log thời gian thực (dev server, build watch, claude -p, tail log).
   if (env.processes) tools.push(...buildProcessTools(env.processes));
+  // Giao việc cho agent lập trình trên máy (Claude Code…, chế độ không giao diện, có phiên nói tiếp) — máy cá nhân có cài ít nhất một agent.
+  if (env.processes && env.schedules && !env.runAs) {
+    sharedAgents ||= env.codingAgents || createAgentRunner();
+    if (sharedAgents.installed().length) tools.push(...buildAgentTools(sharedAgents));
+  }
   // Lịch chạy định kỳ (Task Scheduler / crontab) — máy cá nhân; máy tính tổ chức không đặt lịch cho thành viên.
   if (env.schedules) tools.push(...buildScheduleTools(env.schedules));
   // Tệp lớn hơn trần socket: HTTP thẳng với vé của BE (chỉ BE gọi).
