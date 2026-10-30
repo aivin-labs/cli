@@ -35,6 +35,8 @@ const ROOT_MARGIN = 14;
  * Vùng trong suốt hẳn bấm xuyên qua nên cửa sổ lớn không che gì.
  */
 const WINDOW = { w: 372 + 2 * ROOT_MARGIN, h: 640 };
+/** Kéo tệp vào trong bán kính này (DIP, quanh tâm bot) là thùng nhận tệp bật ra — không cần chạm đúng vào bot. */
+const DROP_ZONE_R = 90;
 
 /** Màu từng trạng thái: `fg` chấm / chữ, `bg` nền chip. */
 export const MASCOT_PALETTE = Object.freeze({
@@ -91,6 +93,11 @@ const SHADOW = '<DropShadowEffect BlurRadius="24" ShadowDepth="6" Direction="270
 const ICON_MIC = 'M12,3 A3,3 0 0 1 15,6 L15,12 A3,3 0 0 1 9,12 L9,6 A3,3 0 0 1 12,3 Z M5,11 A7,7 0 0 0 19,11 M12,18 L12,21';
 /** Gửi: mũi tên lên (nét). */
 const ICON_SEND_UP = 'M12,20 L12,5 M5,11 L12,4 L19,11';
+/** Chat mới (nút trên bảng): bong bóng chat có dấu cộng (nét). */
+/** Tắt (nút tắt linh vật): vòng nguồn hở trên + vạch. */
+const ICON_POWER = 'M12,3 L12,11 M7.05,6.05 A7,7 0 1 0 16.95,6.05';
+const OFF_RED = '#F53F3F';
+const ICON_NEW_CHAT = 'M5,4 L19,4 A2,2 0 0 1 21,6 L21,15 A2,2 0 0 1 19,17 L10,17 L6,20.5 L6,17 L5,17 A2,2 0 0 1 3,15 L3,6 A2,2 0 0 1 5,4 Z M12,7.5 L12,13.5 M9,10.5 L15,10.5';
 /** Viền ô hỏi: pastel hồng → tím nhạt → xanh nhạt (theo ô nhập của FE), khép vòng để xoay không bị nối gãy. */
 const ASK_GLOW_STOPS = [['#F9A8D4', 0], ['#C4B5FD', 0.3], ['#93C5FD', 0.58], ['#A5F3FC', 0.8], ['#F9A8D4', 1]]
   .map(([color, offset]) => `<GradientStop Color="${color}" Offset="${offset}"/>`).join('');
@@ -108,14 +115,36 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
   ${motion('PanelOut', 0, 0.96, 120, 'EaseIn')}
   ${motion('BubbleIn', 1, 1, 160, 'EaseOut')}
   ${motion('BubbleOut', 0, 0.94, 140, 'EaseIn')}
+  <Style TargetType="ScrollBar">
+   <Setter Property="Width" Value="6"/>
+   <Setter Property="MinWidth" Value="6"/>
+   <Setter Property="Template"><Setter.Value>
+    <ControlTemplate TargetType="ScrollBar">
+     <Track x:Name="PART_Track" IsDirectionReversed="True">
+      <Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType="Thumb">
+       <Border x:Name="ThumbBar" CornerRadius="3" Background="#D5D8DE" Margin="1,2"/>
+       <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ThumbBar" Property="Background" Value="#AEB3BC"/></Trigger></ControlTemplate.Triggers>
+      </ControlTemplate></Thumb.Template></Thumb></Track.Thumb>
+     </Track>
+    </ControlTemplate>
+   </Setter.Value></Setter>
+  </Style>
   <Storyboard x:Key="WindowIn"><DoubleAnimation Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.250"/></Storyboard>
+  <Storyboard x:Key="WindowOut">
+   <DoubleAnimation Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.220">${ease('EaseIn')}</DoubleAnimation>
+   <DoubleAnimation Storyboard.TargetName="Root" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="14" Duration="0:0:0.240">${ease('EaseIn')}</DoubleAnimation>
+  </Storyboard>
   <Storyboard x:Key="AskGlow" RepeatBehavior="Forever">
    <DoubleAnimation Storyboard.TargetName="AskGlowSpin" Storyboard.TargetProperty="Angle" From="0" To="360" Duration="0:0:3"/>
   </Storyboard>
  </Window.Resources>
  <!-- Bot và các hộp đặt bằng toạ độ trong cửa sổ (Place / ArrangeBoxes): bot đứng đúng điểm neo, hộp nằm trên bot (hoặc dưới khi
       sát mép trên), kẹp trong cửa sổ. -->
- <Canvas>
+ <Canvas x:Name="Root" RenderTransformOrigin="0.5,1">
+  <Canvas.RenderTransform><TranslateTransform Y="0"/></Canvas.RenderTransform>
+ <!-- Vùng thả tệp quanh bot: trong suốt hẳn (bấm xuyên qua) — DropSense chỉ phủ nền alpha 1/255 lên khi đang giữ chuột ở gần bot, để
+      tệp đang kéo tới "chạm" được vào cửa sổ trước khi tới đúng bot. -->
+ <Ellipse x:Name="DropZone" Width="${DROP_ZONE_R * 2}" Height="${DROP_ZONE_R * 2}"/>
  <StackPanel x:Name="Boxes">
   <Border x:Name="Panel" Visibility="Collapsed" Width="372" Margin="0,0,0,10" CornerRadius="16" Background="White" BorderBrush="#E5E6EB"
           BorderThickness="1" Opacity="0" RenderTransformOrigin="0.5,1">
@@ -132,14 +161,27 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
              FontWeight="Normal" Background="Transparent" BorderThickness="0" Tag="#F2F3F5" Foreground="${B.muted}"/>
     </DockPanel>
     <TextBlock x:Name="NowLabel" DockPanel.Dock="Top" Margin="0,14,0,4" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
-    <TextBlock x:Name="NowText" DockPanel.Dock="Top" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap" LineHeight="20" Margin="0,0,6,0"/>
+    <TextBlock x:Name="NowText" DockPanel.Dock="Top" Margin="0,0,6,0" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap" LineHeight="20"/>
+    <!-- Hàng nút: phiên chat mới (nút chính); "Cho AI làm tiếp" chỉ hiện khi AI đang tạm dừng (dừng bằng aivin remote pause); tắt linh vật (đỏ). -->
     <DockPanel DockPanel.Dock="Bottom" Margin="0,12,6,0" LastChildFill="False">
-     <Button x:Name="PauseBtn" Style="{StaticResource Btn}" Height="34" Padding="14,0" Background="White" Foreground="${B.ink}"
-             BorderBrush="#C9CDD4" BorderThickness="1" Tag="#0F000000"/>
+     <Button x:Name="NewChatBtn" Style="{StaticResource Btn}" Height="34" Padding="12,0,14,0" Background="${B.brand}" Foreground="White"
+             BorderThickness="0" Tag="#1F000000">
+      <StackPanel Orientation="Horizontal">
+       <Path Data="${ICON_NEW_CHAT}" Stroke="White" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+             Width="14" Height="14" Stretch="Uniform" Margin="0,0,7,0" VerticalAlignment="Center"/>
+       <TextBlock x:Name="NewChatText" VerticalAlignment="Center"/>
+      </StackPanel>
+     </Button>
+     <Button x:Name="PauseBtn" Style="{StaticResource Btn}" Height="34" Padding="14,0" Margin="8,0,0,0" Background="White" Foreground="${B.ink}"
+             BorderBrush="#C9CDD4" BorderThickness="1" Tag="#0F000000" Visibility="Collapsed"/>
      <Button x:Name="OffBtn" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="34" Padding="10,0" Background="Transparent"
-             Foreground="${B.muted}" BorderThickness="0" Tag="#F2F3F5" FontWeight="Normal"/>
-     <Button x:Name="HideBtn" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="34" Padding="10,0" Background="Transparent"
-             Foreground="${B.body}" BorderThickness="0" Tag="#F2F3F5" FontWeight="Normal"/>
+             Foreground="${OFF_RED}" BorderThickness="0" Tag="#FFECE8" FontWeight="Normal">
+      <StackPanel Orientation="Horizontal">
+       <Path Data="${ICON_POWER}" Stroke="${OFF_RED}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+             Width="13" Height="13" Stretch="Uniform" Margin="0,0,6,0" VerticalAlignment="Center"/>
+       <TextBlock x:Name="OffText" VerticalAlignment="Center"/>
+      </StackPanel>
+     </Button>
     </DockPanel>
     <TextBlock x:Name="LogLabel" DockPanel.Dock="Top" Margin="0,16,0,6" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
     <Border CornerRadius="10" Background="#F7F8FA" BorderBrush="#EEF0F4" BorderThickness="1" Margin="0,0,6,0">
@@ -176,6 +218,7 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
              Width="11" Height="13" Stretch="Uniform"/>
        <Path x:Name="SendIcon" Data="${ICON_SEND_UP}" Stroke="${ASK_BTN.icon}" StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
              StrokeLineJoin="Round" Width="11" Height="12" Stretch="Uniform" Visibility="Collapsed"/>
+       <Rectangle x:Name="StopIcon" Width="9" Height="9" RadiusX="2" RadiusY="2" Fill="${ASK_BTN.icon}" Visibility="Collapsed"/>
       </Grid>
      </Button>
      <Grid MinHeight="40">
@@ -285,6 +328,36 @@ namespace AivinMascot {
       SetWinEventHook(0x0003, 0x0003, IntPtr.Zero, proc, 0, 0, 0x0002);
     }
   }
+  /**
+   * Files dragged toward the bot: the drop zone around it is fully transparent (clicks pass through), so a drag would only reach the
+   * window on the bot itself. While a mouse button is held with the pointer inside the zone, give it a 1/255 alpha fill so it takes part in
+   * drag and drop (DragEnter -> the tray shows); let go -> transparent again. Nothing is shown here - only a real file drag reacts.
+   */
+  public static class DropSense {
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+    static System.Windows.Threading.DispatcherTimer timer;
+    public static void Start(System.Windows.Shapes.Shape zone, Brush armed) {
+      bool on = false;
+      timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
+      timer.Tick += (s, e) => {
+        // Physical buttons: with swapped buttons the primary one is VK_RBUTTON (SM_SWAPBUTTON).
+        bool down = (GetAsyncKeyState(GetSystemMetrics(23) != 0 ? 0x02 : 0x01) & 0x8000) != 0;
+        bool next = false;
+        if (down && zone.IsVisible && PresentationSource.FromVisual(zone) != null) {
+          if (on) next = true;
+          else { POINT p; if (GetCursorPos(out p)) {
+            var q = zone.PointFromScreen(new Point(p.X, p.Y)); double rx = zone.ActualWidth / 2, ry = zone.ActualHeight / 2;
+            double dx = (q.X - rx) / rx, dy = (q.Y - ry) / ry; next = dx * dx + dy * dy <= 1;
+          } }
+        }
+        if (next != on) { on = next; zone.Fill = on ? armed : null; }
+      };
+      timer.Start();
+    }
+  }
   public static class Input {
     public static readonly ConcurrentQueue<string> Lines = new ConcurrentQueue<string>();
     public static volatile bool Closed;
@@ -313,7 +386,7 @@ ${Object.entries(BOT_LAYER_FILES).map(([el, file]) => `(E '${el}').Source = Img 
 $script:rig = [AivinMascot.Rig]::new($w)
 $w.Title = $T.window_title; (E 'Mascot').ToolTip = $T.tooltip; (E 'PanelTitle').Text = $T.panel_title
 (E 'NowLabel').Text = $T.now_label; (E 'LogLabel').Text = $T.log_label; (E 'Empty').Text = $T.nothing_yet; (E 'NowText').Text = $T.ready
-(E 'HideBtn').Content = $T.hide; (E 'OffBtn').Content = $T.turn_off; (E 'PanelClose').ToolTip = $T.close
+(E 'OffText').Text = $T.turn_off; (E 'PanelClose').ToolTip = $T.close
 
 # No focus stealing + no Alt+Tab entry; hidden from screen capture (AI screenshots, screen sharing).
 $w.Add_SourceInitialized({
@@ -324,6 +397,7 @@ $w.Add_SourceInitialized({
   $script:hwnd = $h
   [AivinMascot.TopKeeper]::Start($h)
   [AivinMascot.DisplayWatch]::Start($h, [Action]{ Dbg 'display changed'; Place })
+  [AivinMascot.DropSense]::Start((E 'DropZone'), (Brush '#01FFFFFF'))
 })
 
 # Stay above the taskbar: TopKeeper re-asserts HWND_TOPMOST on every foreground change; this timer is the fallback for the shell
@@ -363,6 +437,7 @@ function Place {
   else { $w.Left = $px / $k; $w.Top = $py / $k }
   $script:mx = $script:cx - $px / $k; $script:my = $script:cy - $py / $k
   $m = E 'Mascot'; [Windows.Controls.Canvas]::SetLeft($m, $script:mx - ${MASCOT_CENTER.x}); [Windows.Controls.Canvas]::SetTop($m, $script:my - ${MASCOT_CENTER.y})
+  $z = E 'DropZone'; [Windows.Controls.Canvas]::SetLeft($z, $script:mx - ${DROP_ZONE_R}); [Windows.Controls.Canvas]::SetTop($z, $script:my - ${DROP_ZONE_R})
   Dbg "place anchor $($script:cx),$($script:cy) -> window $px,$py px (scale $k), bot at $($script:mx),$($script:my)"
   ArrangeBoxes
 }
@@ -428,7 +503,8 @@ function SetState($s) {
   if (-not ($script:rig.Hover -and -not $busy) -and -not $script:rig.Dozing) { SetFace $s }
   $script:rig.SetState($s, $c.fg)
   if ($s -ne $prev) { React $prev $s }
-  (E 'PauseBtn').Content = if ($s -eq 'paused') { $T.resume } else { $T.pause }
+  # The panel has no pause button any more (new chat session took its place): it only shows "let AI continue" while paused.
+  (E 'PauseBtn').Content = $T.resume; (E 'PauseBtn').Visibility = if ($s -eq 'paused') { 'Visible' } else { 'Collapsed' }
   if (-not $busy -and $s -ne 'waiting' -and (E 'Bubble').Visibility -eq 'Visible') { $script:bubbleTimer.Stop(); $script:bubbleTimer.Start() }
 }
 
@@ -482,22 +558,56 @@ $script:awayTimer.Add_Tick({
 })
 $script:awayTimer.Start()
 
-# Drop files / folders on the bot (or the ask box) -> they ride along with the next question. Dragging over: wide-eyed "ooh".
+# Drop files / folders on the bot, the zone around it or the ask box -> they ride along with the next question. Dragged near the bot: it
+# holds up the tray (lid open, wide-eyed "ooh", a hint bubble naming what comes); the tray is full -> lid shut, head shake. Dropped: the
+# tray gulps them and stays in the bot's arms with the number of files waiting (ask_files from the daemon) until the question goes out.
+# Handlers on the window (every part of the mascot, handled events too - the text box marks file drags handled); moving between its
+# parts fires leave + enter, so a leave only counts once nothing re-entered for a moment.
+$script:files = 0; $script:dragFiles = $null; $script:hinting = $false
 function HasFiles($e) { $e.Data.GetDataPresent([Windows.DataFormats]::FileDrop) }
-foreach ($n in 'Mascot', 'Ask') {
-  (E $n).AllowDrop = $true
-  (E $n).Add_DragEnter({ param($s, $e) if (HasFiles $e) { Wake; $script:rig.Hover = $true; SetFace 'waiting' } })
-  (E $n).Add_DragOver({ param($s, $e) $e.Effects = if (HasFiles $e) { 'Copy' } else { 'None' }; $e.Handled = $true })
-  (E $n).Add_DragLeave({ param($s, $e) $script:rig.Hover = $false; SetFace $script:state })
-  (E $n).Add_Drop({ param($s, $e)
-    if (-not (HasFiles $e)) { return }
-    $files = @($e.Data.GetData([Windows.DataFormats]::FileDrop)) | ForEach-Object { [string]$_ }
-    $e.Handled = $true
-    Send @{ t = 'drop'; files = @($files) }
-    PlayFace 'wave' 'hello' 1.4
-    if (Get-Command OpenAsk -ErrorAction SilentlyContinue) { OpenAsk }
-  })
+function TrayFull { $script:files -ge [int]$cfg.max_files }
+function TrayRest { $script:rig.Tray($(if ($script:files -gt 0) { 'hold' } else { 'off' }), $script:files) }
+# The hint bubble while files hover (not the activity text: NowText stays); gone when they leave or drop.
+function DropHint($text) {
+  if ($text) {
+    if ((E 'Panel').Visibility -eq 'Visible') { return }
+    (E 'BubbleText').Text = $text; $script:hinting = $true; $script:bubbleTimer.Stop()
+    $b = E 'Bubble'; if ($b.Visibility -ne 'Visible') { $b.Visibility = 'Visible'; $w.FindResource('BubbleIn').Begin($b) }
+  } elseif ($script:hinting) { $script:hinting = $false; HideBubble }
 }
+function DragEnd { $script:dragFiles = $null; $script:rig.Hover = $false; DropHint $null; TrayRest; if (-not $script:rig.Dizzy) { SetFace $script:state } }
+$script:dragLeaveTimer = New-Object Windows.Threading.DispatcherTimer; $script:dragLeaveTimer.Interval = [TimeSpan]::FromMilliseconds(140)
+$script:dragLeaveTimer.Add_Tick({ $script:dragLeaveTimer.Stop(); DragEnd })
+$w.AllowDrop = $true
+$w.AddHandler([Windows.DragDrop]::DragEnterEvent, [Windows.DragEventHandler]{ param($s, $e)
+  $script:dragLeaveTimer.Stop()
+  if ($script:dragFiles -or -not (HasFiles $e)) { return }
+  $script:dragFiles = @(@($e.Data.GetData([Windows.DataFormats]::FileDrop)) | ForEach-Object { [string]$_ })
+  Wake; $script:rig.Hover = $true
+  if (TrayFull) { $script:rig.Tray('deny', $script:files); SetFace 'error'; DropHint ($T.drop_full.Replace('{n}', [string]$cfg.max_files)) }
+  else {
+    $script:rig.Tray('open', $script:files); SetFace 'waiting'
+    $one = $script:dragFiles.Count -eq 1
+    $name = if ($one) { [IO.Path]::GetFileName($script:dragFiles[0].TrimEnd('\', '/')) } else { '' }
+    DropHint $(if ($one) { $T.drop_one.Replace('{name}', $name) } else { $T.drop_many.Replace('{n}', [string]$script:dragFiles.Count) })
+  }
+}, $true)
+$w.AddHandler([Windows.DragDrop]::DragOverEvent, [Windows.DragEventHandler]{ param($s, $e)
+  $e.Effects = if ((HasFiles $e) -and -not (TrayFull)) { 'Copy' } else { 'None' }; $e.Handled = $true
+}, $true)
+$w.AddHandler([Windows.DragDrop]::DragLeaveEvent, [Windows.DragEventHandler]{ param($s, $e) if ($script:dragFiles) { $script:dragLeaveTimer.Stop(); $script:dragLeaveTimer.Start() } }, $true)
+$w.AddHandler([Windows.DragDrop]::DropEvent, [Windows.DragEventHandler]{ param($s, $e)
+  $script:dragLeaveTimer.Stop()
+  if (-not (HasFiles $e) -or (TrayFull)) { DragEnd; return }
+  $files = @(@($e.Data.GetData([Windows.DataFormats]::FileDrop)) | ForEach-Object { [string]$_ })
+  $e.Handled = $true
+  Send @{ t = 'drop'; files = $files }
+  # The count until the daemon confirms it (ask_files: duplicates / over the limit dropped).
+  $script:files = [Math]::Min($script:files + $files.Count, [int]$cfg.max_files)
+  $script:dragFiles = $null; $script:rig.Hover = $false; DropHint $null
+  $script:rig.Tray('hold', $script:files); PlayFace 'gulp' 'hello' 1.4
+  if (Get-Command OpenAsk -ErrorAction SilentlyContinue) { OpenAsk }
+}, $true)
 
 $script:bubbleTimer = New-Object Windows.Threading.DispatcherTimer; $script:bubbleTimer.Interval = [TimeSpan]::FromSeconds(7)
 $script:bubbleTimer.Add_Tick({ $script:bubbleTimer.Stop(); HideBubble })
@@ -552,6 +662,17 @@ function TogglePanel {
 $script:userHidden = $false; $script:guiHidden = $false
 function ApplyVisibility { $w.Visibility = if ($script:userHidden -or $script:guiHidden) { 'Hidden' } else { 'Visible' } }
 
+# Let the mascot leave the screen before destroying its host. The guard matters because the quit command and closed stdin can arrive
+# in the same pump tick.
+$script:closing = $false
+function CloseAnimated {
+  if ($script:closing) { return }
+  $script:closing = $true; $w.IsHitTestVisible = $false; $pump.Stop()
+  $sb = $w.FindResource('WindowOut').Clone()
+  $sb.Add_Completed({ $w.Close() })
+  $sb.Begin($w)
+}
+
 # Drag to move, click to open / collapse the activity panel. Own drag loop (mouse capture + screen DIPs): Window.DragMove on a
 # no-activate window jumped the window on a plain click and swallowed the click.
 $script:drag = $null
@@ -599,7 +720,6 @@ function MascotClick { TogglePanel }
 (E 'Mascot').Add_LostMouseCapture({ $d = $script:drag; $script:drag = $null; $script:rig.Pressed = $false; $script:rig.Dragging = $false; Dbg "lost capture drag=$([bool]$d)"; if ($d -and $d.moved) { SendPos } })
 (E 'PanelClose').Add_Click({ TogglePanel })
 (E 'PauseBtn').Add_Click({ if ($script:state -eq 'paused') { Send @{ t = 'resume' } } else { Send @{ t = 'pause' } } })
-(E 'HideBtn').Add_Click({ $script:userHidden = $true; ApplyVisibility; Send @{ t = 'hide' } })
 (E 'OffBtn').Add_Click({ Send @{ t = 'off' } })
 
 function Handle($m) {
@@ -612,7 +732,9 @@ function Handle($m) {
     'show' { $script:userHidden = $false; ApplyVisibility }
     # Daemon-driven reaction, e.g. 'wave' when the user comes back.
     'gesture' { if (-not (IsBusy)) { PlayFace ([string]$m.g) 'hello' 1.6 } else { $script:rig.Play([string]$m.g) } }
-    'quit' { $w.Close() }
+    # Files dropped on the bot still waiting for the next question (0 = sent / cleared): the tray in the bot's arms + its badge.
+    'ask_files' { $script:files = [int]$m.n; if (-not $script:dragFiles) { TrayRest } }
+    'quit' { CloseAnimated }
   }
 }
 
@@ -625,7 +747,7 @@ $pump.Add_Tick({
   while ([AivinMascot.Input]::Lines.TryDequeue([ref]$line)) {
     if ($line) { try { Handle ($line | ConvertFrom-Json) } catch { [Console]::Error.WriteLine($_.Exception.Message) } }
   }
-  if ([AivinMascot.Input]::Closed -and [AivinMascot.Input]::Lines.IsEmpty) { $pump.Stop(); $w.Close() }
+  if ([AivinMascot.Input]::Closed -and [AivinMascot.Input]::Lines.IsEmpty) { CloseAnimated }
 })
 $w.Add_ContentRendered({
   SetState 'idle'; Place; $w.FindResource('WindowIn').Begin($w); $script:rig.Start(); $script:rig.Intro(); $pump.Start(); Send @{ t = 'ready' }

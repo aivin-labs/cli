@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import path from 'path';
-import { ChatEventKind, DeviceEvent, NotifyKind, VoiceEventKind } from '../constants.mjs';
+import { ChatEventKind, DeviceEvent, NotifyKind, ServerFeature, VoiceEventKind } from '../constants.mjs';
 import { createAdpcmEncoder, decodeAdpcm, VOICE_CODEC } from './adpcm.mjs';
 import { MascotText, mascotText } from './strings.mjs';
 
@@ -25,12 +25,12 @@ import { MascotText, mascotText } from './strings.mjs';
  * tại chỗ (nhạt); câu chốt (bản rút gọn, "(chi tiết trên Aivin)") thay đúng dòng đó. BE cũ / lượt chạy ở node khác: chỉ có câu chốt như trước.
  *
  * Lệnh gửi cửa sổ: `chat { role: user | assistant | progress | error, id, text, remove? }`, `chat_busy { busy }`, `ask_status { text }`,
- * `ask_choices { options: [{ id, text, icon? }], multiple }` (rỗng = bỏ nút; multiple = tích nhiều mục rồi xác nhận),
+ * `ask_choices { options: [{ id, text, icon? }], multiple }` (rỗng = bỏ nút; multiple = tích nhiều mục rồi xác nhận), `chat_clear` (chat mới),
  * `voice_begin { in_rate, out_rate, state? }`, `voice_play { audio }`, `voice_flush`, `voice_state { state }`, `voice_end { text? }`.
  */
 
 export const ChatRole = Object.freeze({ USER: 'user', ASSISTANT: 'assistant', PROGRESS: 'progress', ERROR: 'error' });
-export const AskCommand = Object.freeze({ CHAT: 'chat', BUSY: 'chat_busy', STATUS: 'ask_status', CHOICES: 'ask_choices', PIN: 'ask_pin' });
+export const AskCommand = Object.freeze({ CHAT: 'chat', BUSY: 'chat_busy', STATUS: 'ask_status', CHOICES: 'ask_choices', PIN: 'ask_pin', CLEAR: 'chat_clear', FILES: 'ask_files' });
 /** Tiền tố id dòng câu hỏi đang chờ (index.mjs gửi lại dòng này khi cửa sổ dựng lại). */
 export const QUESTION_ROW = 'q-';
 export const VoiceCommand = Object.freeze({ BEGIN: 'voice_begin', PLAY: 'voice_play', FLUSH: 'voice_flush', STATE: 'voice_state', END: 'voice_end' });
@@ -38,6 +38,13 @@ export const VoiceState = Object.freeze({ LISTENING: 'listening', THINKING: 'thi
 
 const PROGRESS_ROW = 'progress';
 const ACK_TIMEOUT_MS = 15_000;
+/**
+ * Lượt chat không nghe gì từ BE bấy lâu (BE tự báo `timeout` sau `answer_wait_ms` = 3 phút) → thôi chờ, ô hỏi rảnh lại. Sự kiện tới máy
+ * lúc đang rớt mạng / BE khởi động lại giữa lượt thì không bao giờ tới — trước đây ô hỏi kẹt "đang bận" tới khi khởi động lại daemon.
+ */
+const TURN_SILENCE_MS = 240_000;
+/** Còn câu hỏi ghim → hỏi BE định kỳ câu nào đã đóng (trả lời trên web / máy khác, hết hạn) để bỏ nút. */
+const QUESTION_CHECK_MS = 60_000;
 /** BE mở phiên với nhà cung cấp giọng nói rồi mới báo `ready` — quá lâu thì coi như hỏng. */
 const VOICE_READY_TIMEOUT_MS = 20_000;
 const VOICE_IN_RATE = 16_000;
@@ -72,6 +79,7 @@ const ERROR_TEXT = {
   empty: MascotText.ASK_ERR_NOT_UNDERSTOOD,
   no_question: MascotText.ASK_ERR_NO_QUESTION,
   invalid_answer: MascotText.ASK_ERR_INVALID_ANSWER,
+  cancelled: MascotText.ASK_CANCELLED,
 };
 
 const NOTIFY_LABEL = { [NotifyKind.DONE]: MascotText.NOTIFY_DONE, [NotifyKind.FAILED]: MascotText.NOTIFY_FAILED, [NotifyKind.NEEDS_YOU]: MascotText.NOTIFY_NEEDS_YOU };
@@ -80,7 +88,8 @@ export const QuestionKind = Object.freeze({ CHOICE: 'choice', FORM: 'form', TEXT
 /** id nút "Bỏ qua" của trường không bắt buộc trong biểu mẫu. */
 export const FORM_SKIP_ID = '__skip__';
 const SEEN_NOTIFY_MAX = 50;
-const MAX_ATTACH = 10;
+/** Tệp thả vào bot chờ đi kèm một câu, tối đa (cửa sổ cũng đọc qua config.json: thùng đầy thì từ chối ngay lúc kéo tới). */
+export const MAX_ATTACH = 10;
 /** Câu hỏi chờ tối đa; quá thì bỏ câu cũ nhất sau câu đang hiện nút. */
 const MAX_PENDING = 20;
 
@@ -101,6 +110,8 @@ export function createMascotChat({
 }) {
   const t = (key, vars) => mascotText(lang, key, vars);
   let current = null;
+  /** Năng lực BE (ack của HELLO, `setServerFeatures`): hộp báo + kiểm câu hỏi, dừng lượt, chat mới. */
+  const features = { inbox: false, cancel: false, newChat: false };
   /** Câu hỏi đang chờ theo thứ tự đến: `{ session_id, reply_id, kind, options, text }`; đầu hàng = câu đang có nút. */
   const queue = [];
   const head = () => queue[0] || null;
@@ -108,6 +119,8 @@ export function createMascotChat({
   /** Tệp thả vào bot, chờ đi kèm câu kế tiếp; `attachRow` = dòng "📎" đang hiện. */
   const files = [];
   let attachRow = null;
+  /** Số tệp đang chờ → cửa sổ (thùng trong tay bot + huy hiệu số tệp). */
+  const syncFiles = () => send({ t: AskCommand.FILES, n: files.length });
   /** Cửa sổ chủ máy đang dùng khi hỏi (mascot/index.mjs `userWindow`) của lượt / cuộc nói chuyện gần nhất, hoặc null. */
   let target = null;
   const context = () => (target ? { context: { window: target } } : {});
@@ -138,12 +151,15 @@ export function createMascotChat({
     const at = queue.findIndex((q) => q.reply_id === entry.reply_id);
     if (at >= 0) {
       // BE gửi lại cùng câu hỏi (nối lại / báo chủ động): giữ các trường đã điền.
-      if (entry.fields && queue[at].fields) Object.assign(entry, { values: queue[at].values, step: queue[at].step });
+      // Đang gửi trường cuối (step đã qua hết) / số trường đổi → hỏi lại từ đầu.
+      const old = queue[at];
+      if (entry.fields && old.fields && old.step < entry.fields.length) Object.assign(entry, { values: old.values, step: old.step });
       queue[at] = entry;
       return at === 0 ? showHead() : undefined;
     }
     if (queue.length >= MAX_PENDING) queue.splice(1, 1);
     queue.push(entry);
+    watchQuestions();
     // Câu xếp sau: hiện ngay một dòng thường để chủ máy biết; câu đầu hàng ghi thêm số câu còn chờ.
     if (queue.length > 1) row(ChatRole.ASSISTANT, text);
     showHead();
@@ -197,6 +213,7 @@ export function createMascotChat({
   }
   /** Chữ gõ cho trường hiện tại: trường có lựa chọn phải khớp tên một nút (hoặc "Bỏ qua" khi không bắt buộc). */
   function typeField(q, answer) {
+    if (q.step >= q.fields.length) return refuseBusy();
     const f = q.fields[q.step];
     const options = Array.isArray(f.options) ? f.options : [];
     const key = answer.toLowerCase();
@@ -209,6 +226,8 @@ export function createMascotChat({
   }
   /** Nút của trường hiện tại. */
   function chooseField(q, id) {
+    // Biểu mẫu đang gửi (đã điền hết, chờ ack): chưa có trường nào để chọn.
+    if (q.step >= q.fields.length) return refuseBusy();
     const f = q.fields[q.step];
     if (id === FORM_SKIP_ID && !f.required) return fillField(q, null, t(MascotText.FORM_SKIP));
     const option = (Array.isArray(f.options) ? f.options : []).find((o) => String(o.id) === String(id));
@@ -216,11 +235,29 @@ export function createMascotChat({
   }
 
   const row = (role, text, id = `${role}-${randomUUID()}`, extra = {}) => send({ t: AskCommand.CHAT, role, id, text, ...extra });
-  const setBusy = (busy) => send({ t: AskCommand.BUSY, busy });
+  /** `cancel`: BE dừng được lượt này → cửa sổ đổi nút mic thành nút dừng. */
+  const setBusy = (busy) => send({ t: AskCommand.BUSY, busy, ...(busy && features.cancel ? { cancel: true } : {}) });
   const errorText = (code) => t(ERROR_TEXT[code] || MascotText.ASK_ERR_FAILED);
   /** Dòng chữ chạy của câu trả lời đang viết (id + chữ tới lúc đó) — câu chốt thay vào đúng dòng này. */
   let streaming = null;
+  /** Lượt đã thôi chờ (hết TURN_SILENCE_MS): câu trả lời tới muộn vẫn hiện, không làm gì lượt đang chạy. */
+  let stale = null;
+  let silenceTimer = null;
+  const armSilence = () => {
+    timers.clearTimeout(silenceTimer);
+    const id = current;
+    silenceTimer = timers.setTimeout(() => {
+      if (current !== id) return;
+      stale = id;
+      if (streaming) row(ChatRole.ASSISTANT, streaming.text, streaming.id);
+      streaming = null;
+      finish();
+      row(ChatRole.ASSISTANT, t(MascotText.ASK_NO_REPLY));
+    }, TURN_SILENCE_MS);
+    silenceTimer?.unref?.();
+  };
   const finish = () => {
+    timers.clearTimeout(silenceTimer);
     current = null;
     row(ChatRole.PROGRESS, '', PROGRESS_ROW, { remove: true });
     setBusy(false);
@@ -251,10 +288,11 @@ export function createMascotChat({
     const s = socket();
     if (shown !== null) row(ChatRole.USER, shown);
     if (!s?.connected) return row(ChatRole.ERROR, t(MascotText.ASK_OFFLINE));
-    current = `ask-${randomUUID()}`;
+    const id = `ask-${randomUUID()}`;
+    current = id;
     streaming = null;
     setBusy(true);
-    row(ChatRole.PROGRESS, t(MascotText.ASK_THINKING), PROGRESS_ROW);
+    row(ChatRole.PROGRESS, t(MascotText.ASK_THINKING), PROGRESS_ROW, { typing: true });
     let ack;
     try {
       // `stream`: xin chữ chạy của câu trả lời (`delta`) — BE cũ bỏ qua trường này.
@@ -270,11 +308,15 @@ export function createMascotChat({
       return row(ChatRole.ERROR, errorText(ack?.error));
     }
     if (extra.reply_id) resolve(extra.reply_id);
+    // Sự kiện có thể tới trước ack — lượt đã xong thì không hẹn giờ nữa.
+    if (current === id) armSilence();
   }
 
   /** Tệp / thư mục thả vào bot: giữ tới câu gõ kế tiếp (tối đa MAX_ATTACH), hiện một dòng "📎 tên tệp" trong ô hỏi. */
   function attach(paths) {
     for (const f of paths || []) if (typeof f === 'string' && f && !files.includes(f) && files.length < MAX_ATTACH) files.push(f);
+    // Cửa sổ đã tự cộng số tệp lúc thả — luôn báo lại số thật (trùng / quá giới hạn bị bỏ).
+    syncFiles();
     if (!files.length) return;
     attachRow ||= `attach-${randomUUID()}`;
     row(ChatRole.USER, t(MascotText.ASK_ATTACHED, { names: files.map((f) => path.basename(f.replace(/[\\/]+$/, '')) || f).join(', ') }), attachRow);
@@ -297,6 +339,7 @@ export function createMascotChat({
       if (refuseBusy()) return;
       const sent = files.splice(0);
       attachRow = null;
+      syncFiles();
       const shown = answer || t(MascotText.ASK_FILES_DEFAULT);
       const body = `${shown}\n\n${t(MascotText.ASK_FILES_LABEL)}\n${sent.map((f) => `- ${f}`).join('\n')}`;
       return turn(body, shown, pending ? { session_id: pending.session_id, reply_id: pending.reply_id } : {}, window);
@@ -323,7 +366,11 @@ export function createMascotChat({
 
   /** Sự kiện của lượt đang hỏi (sự kiện của câu cũ / máy khác cùng phòng bị bỏ qua). */
   function onChatEvent(payload) {
-    if (!payload || payload.request_id !== current) return;
+    if (!payload) return;
+    if (stale && payload.request_id === stale && stale !== current) return lateEvent(payload);
+    if (payload.request_id !== current) return;
+    received(payload.notice_id);
+    armSilence();
     const text = typeof payload.text === 'string' ? payload.text : '';
     if (payload.kind === ChatEventKind.PROGRESS) return row(ChatRole.PROGRESS, text, PROGRESS_ROW);
     if (payload.kind === ChatEventKind.DELTA) {
@@ -354,17 +401,137 @@ export function createMascotChat({
     row(ChatRole.ERROR, errorText(text));
   }
 
+  /** Câu chốt của lượt đã thôi chờ: hiện như báo chủ động (dòng mới, không đụng lượt đang chạy); tiến trình / chữ chạy thì bỏ. */
+  function lateEvent(payload) {
+    const text = typeof payload.text === 'string' ? payload.text : '';
+    received(payload.notice_id);
+    if (payload.kind === ChatEventKind.NEEDS_INPUT) {
+      stale = null;
+      setPending(payload.session_id, payload.question, text);
+      return onAlert({ kind: NotifyKind.NEEDS_YOU, text });
+    }
+    if (payload.kind !== ChatEventKind.ANSWER && payload.kind !== ChatEventKind.TIMEOUT) return;
+    stale = null;
+    row(ChatRole.ASSISTANT, payload.more ? `${text} ${t(MascotText.ASK_MORE)}` : text);
+    if (payload.kind === ChatEventKind.ANSWER) onAlert({ kind: NotifyKind.DONE, text });
+  }
+
+  /**
+   * Đã nhận báo `id` (từ `notify`, `inbox`, hay `notice_id` của câu chốt): xác nhận để BE bỏ khỏi hộp báo của máy (BE giữ tới khi máy
+   * nhận — máy offline / rớt mạng lúc gửi thì nối lại vẫn có). Trả `false` khi đã nhận rồi (bỏ trùng: câu chốt tới cả bằng chat_event lẫn
+   * hộp báo khi nối lại).
+   */
+  function received(id) {
+    if (typeof id !== 'string' || !id) return true;
+    if (features.inbox) emitQuiet(DeviceEvent.NOTIFY_ACK, { ids: [id] });
+    if (seenNotify.has(id)) return false;
+    seenNotify.add(id);
+    if (seenNotify.size > SEEN_NOTIFY_MAX) seenNotify.delete(seenNotify.values().next().value);
+    return true;
+  }
+  const emitQuiet = (event, payload) => {
+    const s = socket();
+    if (s?.connected) try { s.emit(event, payload); } catch { /* đã rớt */ }
+  };
+
+  /** Ack của HELLO: BE có gì thì dùng nấy (BE cũ không có hộp báo / nút dừng). */
+  function setServerFeatures(list) {
+    const has = (f) => Array.isArray(list) && list.includes(f);
+    voiceSupported = has(ServerFeature.VOICE);
+    features.inbox = has(ServerFeature.INBOX);
+    features.cancel = has(ServerFeature.CHAT_CANCEL);
+    features.newChat = has(ServerFeature.CHAT_NEW);
+  }
+
+  /**
+   * Nút "Chat mới" trên bảng của linh vật: BE mở phiên mới cho máy (câu kế đi vào đó, phiên cũ vẫn trên Aivin) → xoá hội thoại trong ô
+   * hỏi. Câu hỏi đang chờ (của việc khác) vẫn giữ và hiện lại. Đang chờ lượt / đang nói chuyện thì không đổi giữa chừng.
+   */
+  async function newChat() {
+    if (refuseBusy()) return;
+    const s = socket();
+    if (!s?.connected) return send({ t: AskCommand.STATUS, text: t(MascotText.ASK_OFFLINE) });
+    if (!features.newChat) return send({ t: AskCommand.STATUS, text: t(MascotText.ASK_ERR_UNSUPPORTED) });
+    let ack;
+    try {
+      ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT_NEW, {});
+    } catch (e) {
+      return send({ t: AskCommand.STATUS, text: failedSend(e) });
+    }
+    if (!ack?.ok) return send({ t: AskCommand.STATUS, text: errorText(ack?.error) });
+    streaming = null;
+    stale = null;
+    target = null;
+    files.splice(0);
+    attachRow = null;
+    syncFiles();
+    send({ t: AskCommand.CLEAR });
+    if (queue.length) showHead();
+    send({ t: AskCommand.STATUS, text: t(MascotText.ASK_NEW_CHAT_DONE) });
+  }
+
+  /**
+   * Vừa nối (sau HELLO): lấy báo chưa nhận trong lúc offline — hiện như báo chủ động (đã nhận thì bỏ trùng) — rồi kiểm câu hỏi đang ghim
+   * còn chờ không.
+   */
+  async function syncInbox() {
+    const s = socket();
+    if (!features.inbox || !s?.connected) return;
+    let ack;
+    try {
+      ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.INBOX, {});
+    } catch {
+      return;
+    }
+    for (const notice of Array.isArray(ack?.notices) ? ack.notices : []) onNotify(notice);
+    await checkQuestions();
+  }
+
+  /** Câu hỏi đang ghim đã đóng ở nơi khác (trả lời trên web / máy khác, hết hạn) → bỏ nút, báo một dòng. Đang gửi câu trả lời thì thôi. */
+  async function checkQuestions() {
+    const s = socket();
+    const items = queue.filter((q) => q.session_id).map((q) => ({ session_id: q.session_id, reply_id: q.reply_id }));
+    if (!features.inbox || !s?.connected || !items.length || current) return;
+    let ack;
+    try {
+      ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.QUESTIONS, { items });
+    } catch {
+      return;
+    }
+    // Trong lúc chờ ack chủ máy đã gửi câu trả lời → câu hỏi đóng là do chính máy này.
+    if (current || !Array.isArray(ack?.closed)) return;
+    for (const id of ack.closed) {
+      if (!queue.some((q) => q.reply_id === id)) continue;
+      resolve(id);
+      row(ChatRole.ASSISTANT, t(MascotText.ASK_ANSWERED_ELSEWHERE));
+    }
+  }
+  let questionTimer = null;
+  const watchQuestions = () => {
+    if (questionTimer || !queue.length) return;
+    questionTimer = timers.setTimeout(() => {
+      questionTimer = null;
+      void checkQuestions().finally(watchQuestions);
+    }, QUESTION_CHECK_MS);
+    questionTimer?.unref?.();
+  };
+
+  /** Nút dừng trong ô hỏi: dừng lượt đang chạy (BE huỷ như nút dừng trên web, rồi báo `error` mã `cancelled`). */
+  async function cancel() {
+    const s = socket();
+    if (!current || !features.cancel || !s?.connected) return;
+    try {
+      await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT_CANCEL, { request_id: current });
+    } catch { /* lượt vẫn kết thúc bằng sự kiện của BE, hoặc hết giờ im lặng */ }
+  }
+
   /**
    * Báo chủ động (`device:notify`): việc của chủ máy xong / lỗi / cần trả lời — hiện một dòng trong ô hỏi + bong bóng; có câu hỏi thì
    * thành câu hỏi đang chờ (nút / gõ để trả lời). Máy nối lại có thể nhận lại cùng `id` → bỏ trùng.
    */
   function onNotify(payload) {
     if (!payload || typeof payload.kind !== 'string' || !NOTIFY_LABEL[payload.kind]) return;
-    if (payload.id) {
-      if (seenNotify.has(payload.id)) return;
-      seenNotify.add(payload.id);
-      if (seenNotify.size > SEEN_NOTIFY_MAX) seenNotify.delete(seenNotify.values().next().value);
-    }
+    if (payload.id && !received(payload.id)) return;
     const label = t(NOTIFY_LABEL[payload.kind]);
     const title = typeof payload.title === 'string' ? payload.title.trim() : '';
     const text = typeof payload.text === 'string' ? payload.text.trim() : '';
@@ -595,7 +762,7 @@ export function createMascotChat({
   }
 
   return {
-    ask, reply, choose, attach, onChatEvent, onNotify, busy: () => !!current || !!call, hasPending: () => queue.length > 0, userWindow: () => target,
+    ask, reply, choose, attach, cancel, newChat, onChatEvent, onNotify, syncInbox, checkQuestions, setServerFeatures, busy: () => !!current || !!call, hasPending: () => queue.length > 0, userWindow: () => target,
     voiceStart, voiceAudio, voiceInterrupt, voiceStop, voiceMicLost, voiceDisconnected, onVoiceEvent, setVoiceSupported, inCall: () => !!call,
   };
 }

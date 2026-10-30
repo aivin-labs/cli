@@ -156,9 +156,13 @@ test('cửa sổ có hàng nút lựa chọn + lệnh ask_choices, bấm nút g�
 
 test('thả tệp vào bot: hiện "📎 tên tệp", câu gõ kế tiếp mang đường dẫn đầy đủ; gửi xong thì bỏ tệp', async () => {
   const { chat, sent, socket } = setup();
+  const fileCounts = () => sent.filter((c) => c.t === 'ask_files').map((c) => c.n);
   chat.attach(['C:/Users/a/Bao cao Q3.xlsx', 'D:/Hop dong/', 'C:/Users/a/Bao cao Q3.xlsx']);
   assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text.startsWith('📎 Bao cao Q3.xlsx, Hop dong')));
+  // Thùng trong tay bot: số tệp thật (bỏ trùng) — cửa sổ đã tự cộng 3 lúc thả.
+  assert.deepEqual(fileCounts(), [2]);
   await chat.reply('tóm tắt rồi gửi sếp');
+  assert.deepEqual(fileCounts(), [2, 0], 'gửi đi → thùng cất đi');
   assert.equal(socket.emitted[0].payload.text, 'tóm tắt rồi gửi sếp\n\nTệp trên máy này:\n- C:/Users/a/Bao cao Q3.xlsx\n- D:/Hop dong/');
   assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text === 'tóm tắt rồi gửi sếp'), 'dòng của chủ máy chỉ là câu gõ');
   chat.onChatEvent({ request_id: socket.emitted[0].payload.request_id, kind: 'answer', text: 'ok' });
@@ -229,7 +233,16 @@ test('cửa sổ báo thả tệp → daemon chuyển danh sách đường dẫn
 test('cửa sổ: thả tệp, theo dõi đi vắng, chơi với bot (lắc → chóng mặt, bấm nhanh → cười, vuốt → lim dim), lệnh gesture', () => {
   const ps = hostScript();
   assert.match(ps, /\.AllowDrop = \$true/);
-  assert.match(ps, /Send @\{ t = 'drop'; files = @\(\$files\) \}/);
+  assert.match(ps, /Send @\{ t = 'drop'; files = \$files \}/);
+  // Thùng nhận tệp: kéo tới gần (vùng thả quanh bot, chỉ bật khi đang giữ chuột) → mở; đầy → từ chối; thả → nuốt + ôm; daemon báo số tệp.
+  assert.match(ps, /\[AivinMascot\.DropSense\]::Start\(\(E 'DropZone'\)/);
+  assert.match(ps, /\$script:rig\.Tray\('open', \$script:files\)/);
+  assert.match(ps, /\$script:rig\.Tray\('deny', \$script:files\)/);
+  assert.match(ps, /PlayFace 'gulp' 'hello'/);
+  assert.match(ps, /'ask_files' \{/);
+  assert.match(ps, /public void Tray\(string mode, int count\)/);
+  assert.match(MASCOT_XAML, /x:Name="DropZone"/);
+  assert.match(MASCOT_XAML, /x:Name="TrayCount"/);
   assert.match(ps, /Send @\{ t = 'away' \}/);
   assert.match(ps, /Send @\{ t = 'back' \}/);
   assert.match(ps, /PlayFace 'dizzy' 'dizzy'/);

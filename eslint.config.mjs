@@ -19,5 +19,10 @@ export default [
       'no-unused-vars': ['error', { ignoreRestSiblings: true, varsIgnorePattern: '^_', argsIgnorePattern: '^_', caughtErrors: 'none' }],
     },
   },
+  {
+    // Chạy bằng Bun (`bun scripts/build-binary.mjs`).
+    files: ['scripts/build-binary.mjs'],
+    languageOptions: { globals: { Bun: 'readonly' } },
+  },
   prettier,
 ];

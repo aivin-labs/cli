@@ -40,6 +40,11 @@ export const BOT_RIG = Object.freeze({
   think: { x: 164, y: 12, w: 86, h: 38, dot: 11, gap: 20 },
   /** Tia lấp lánh khi xong việc: bung từ (x, y) ra từ bán kính `from` tới `to` theo các góc (độ, 0 = sang phải, âm = lên trên). */
   sparks: { x: 96, y: 74, from: 30, to: 86, angles: [-165, -125, -85, -45, -10, 195] },
+  /**
+   * Thùng nhận tệp (kéo tệp tới gần bot / tệp đã thả chờ gửi): ôm trước bụng. (x, y) = tâm đáy thùng; `w` / `h` = miệng / chiều cao thân
+   * (đáy hẹp hơn `taper` mỗi bên); nắp hai cánh dài `lid` bản lề ở hai mép trên, mở ra `lidOpen` độ; huy hiệu số tệp góc trên phải.
+   */
+  tray: { x: 96, y: 186, w: 104, h: 54, taper: 7, r: 9, lid: 46, lidOpen: 145, badge: { x: 146, y: 128, r: 21 } },
 });
 
 /** Nét mặt theo trạng thái. */
@@ -251,6 +256,52 @@ const SPARKS_XAML = `<Canvas x:Name="Sparks" Visibility="Collapsed" IsHitTestVis
   </Canvas>`;
 
 /**
+ * Thùng nhận tệp: thân xanh nhạt + vành miệng, hai cánh nắp (rig xoay `TrayFlapL` / `TrayFlapR` quanh bản lề), biểu tượng tải lên cam
+ * (`TrayArrow` + khay `TrayBase`, rig nhún `TrayArrowMove`) hoặc dấu ✕ đỏ khi không nhận được (`TrayNo` + lớp đỏ `TrayDeny`), huy hiệu số tệp `TrayCount`.
+ * Nằm ngoài `Bot` (vẽ đè lên các màn hình 3D, không mờ theo bot); rig chép biến đổi thân vào `TrayBody*` mỗi khung hình.
+ */
+const TR = R.tray;
+const trayTop = TR.y - TR.h, trayL = TR.x - TR.w / 2, trayR = TR.x + TR.w / 2;
+const TRAY_SHAPE = `M${trayL},${trayTop} L${trayR},${trayTop} L${trayR - TR.taper},${TR.y - TR.r} Q${trayR - TR.taper},${TR.y} ${trayR - TR.taper - TR.r},${TR.y} `
+  + `L${trayL + TR.taper + TR.r},${TR.y} Q${trayL + TR.taper},${TR.y} ${trayL + TR.taper},${TR.y - TR.r} Z`;
+const TRAY_INK = '#8EA9E8';
+const trayFlap = (name, hingeX, dir) => `<Rectangle Canvas.Left="${dir > 0 ? hingeX : hingeX - TR.lid}" Canvas.Top="${trayTop - 4.5}" Width="${TR.lid}" Height="9" RadiusX="4.5" RadiusY="4.5" Fill="#EEF3FF" Stroke="${TRAY_INK}" StrokeThickness="2.4">
+    <Rectangle.RenderTransform><RotateTransform x:Name="${name}" CenterX="${dir > 0 ? 0 : TR.lid}" CenterY="4.5"/></Rectangle.RenderTransform>
+   </Rectangle>`;
+const ic = { x: TR.x, y: trayTop + TR.h / 2 + 3 };
+const TB = TR.badge;
+const TRAY_XAML = `<Canvas x:Name="Tray" Visibility="Collapsed" IsHitTestVisible="False">
+   <Canvas.RenderTransform><TransformGroup>
+    <ScaleTransform x:Name="TrayScale" CenterX="${TR.x}" CenterY="${TR.y}"/>
+    <TranslateTransform x:Name="TrayMove"/>
+    <ScaleTransform x:Name="TrayBodyScale" CenterX="${R.ground.x}" CenterY="${R.ground.y}"/>
+    <RotateTransform x:Name="TrayBodyLean" CenterX="${R.ground.x}" CenterY="${R.ground.y}"/>
+    <TranslateTransform x:Name="TrayBodyMove"/>
+   </TransformGroup></Canvas.RenderTransform>
+   <Canvas.Effect><DropShadowEffect BlurRadius="7" ShadowDepth="1.5" Direction="270" Opacity="0.22" Color="#0B1B3F"/></Canvas.Effect>
+   ${trayFlap('TrayFlapL', trayL + 2, 1)}
+   ${trayFlap('TrayFlapR', trayR - 2, -1)}
+   <Path Data="${TRAY_SHAPE}" Stroke="${TRAY_INK}" StrokeThickness="2.6" StrokeLineJoin="Round">
+    <Path.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#FFFFFF" Offset="0"/><GradientStop Color="#D9E5FF" Offset="1"/></LinearGradientBrush></Path.Fill>
+   </Path>
+   <Path x:Name="TrayDeny" Data="${TRAY_SHAPE}" Fill="#F53F3F" Opacity="0"/>
+   <Rectangle Canvas.Left="${trayL - 4}" Canvas.Top="${trayTop - 5}" Width="${TR.w + 8}" Height="10" RadiusX="5" RadiusY="5" Fill="#C9D8FA" Stroke="${TRAY_INK}" StrokeThickness="2.4"/>
+   <Canvas x:Name="TrayArrow">
+    <Canvas.RenderTransform><TranslateTransform x:Name="TrayArrowMove"/></Canvas.RenderTransform>
+    <Path Data="M${ic.x},${ic.y + 9} L${ic.x},${ic.y - 13} M${ic.x - 10},${ic.y - 3} L${ic.x},${ic.y - 13} L${ic.x + 10},${ic.y - 3}" Stroke="#FF7D00" StrokeThickness="6.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+   </Canvas>
+   <Path x:Name="TrayBase" Data="M${ic.x - 17},${ic.y + 5} L${ic.x - 17},${ic.y + 15} L${ic.x + 17},${ic.y + 15} L${ic.x + 17},${ic.y + 5}" Stroke="#FF7D00" StrokeThickness="5" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+   <Path x:Name="TrayNo" Data="M${ic.x - 9},${ic.y - 12} L${ic.x + 9},${ic.y + 6} M${ic.x + 9},${ic.y - 12} L${ic.x - 9},${ic.y + 6}" Stroke="#F53F3F" StrokeThickness="6.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Opacity="0"/>
+   <Canvas x:Name="TrayBadge" Opacity="0">
+    <Canvas.RenderTransform><ScaleTransform x:Name="TrayBadgeScale" CenterX="${TB.x}" CenterY="${TB.y}"/></Canvas.RenderTransform>
+    <Ellipse Canvas.Left="${TB.x - TB.r}" Canvas.Top="${TB.y - TB.r}" Width="${TB.r * 2}" Height="${TB.r * 2}" Fill="#FF7D00" Stroke="White" StrokeThickness="3.5"/>
+    <Grid Canvas.Left="${TB.x - TB.r}" Canvas.Top="${TB.y - TB.r}" Width="${TB.r * 2}" Height="${TB.r * 2}">
+     <TextBlock x:Name="TrayCount" FontSize="${TB.r * 1.25}" FontWeight="Black" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,2"/>
+    </Grid>
+   </Canvas>
+  </Canvas>`;
+
+/**
  * Toàn bộ linh vật (Canvas 192×192). Bóng dưới đất đứng yên (co / nhạt khi bot nhún lên); `Bot` nhún + nghiêng + co giãn quanh đáy;
  * `Head` xoay quanh cổ, chứa ăng-ten (sau mũ), đèn tai, vạch quét và mặt (`FaceLook` = mặt dịch theo hướng nhìn cho cảm giác khối).
  */
@@ -299,6 +350,7 @@ export const BOT_XAML = `<Canvas x:Name="Stage" Width="${S}" Height="${S}">
    </Canvas>
   </Canvas>
   ${SCREENS_XAML}
+  ${TRAY_XAML}
   <!-- Đạo cụ gắn với đầu (zzz, "!", ba chấm, lấp lánh): rig chép biến đổi của Head + Bot vào đây mỗi khung hình → kéo / nghiêng / nhún
        thì đạo cụ đi theo đầu đúng góc. Không nằm trong Bot để khỏi mờ theo bot khi tạm dừng / mất kết nối. -->
   <Canvas x:Name="Props" IsHitTestVisible="False">

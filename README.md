@@ -67,6 +67,7 @@ pieces from your own terminal, on top of whatever editor/CI workflow you already
 - [The Aivin ecosystem](#the-aivin-ecosystem)
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Aivin mascot on Windows](#aivin-mascot-on-windows)
 - [What you get from a scaffold](#what-you-get-from-a-scaffold)
 - [Command overview](#command-overview)
 - [Environment variables](#environment-variables)
@@ -151,6 +152,26 @@ working code from that description in one step. Prefer a blank scaffold you writ
 `aivin create my-plugin` does just the scaffolding, no AI step. Already have a project instead of
 a description? `aivin plugin convert` turns an existing directory into a plugin in place.
 
+## Aivin mascot on Windows
+
+When Aivin Remote is running on Windows, a small animated Aivin mascot can float above your apps.
+It shows whether Aivin is idle, working, thinking, waiting for you, done, paused, offline, or has hit
+an error. Hover or click it to type a question, use its microphone for a live voice conversation,
+right-click for the activity panel, or drop local files onto it to attach them to your next message.
+The mascot stays out of Aivin screenshots and moves aside while the agent controls another window.
+
+```bash
+aivin remote start             # start the listener and mascot
+aivin ui                       # show the mascot and open its ask box
+aivin ui --demo                # preview all mascot animations
+aivin remote mascot off        # turn it off persistently
+aivin remote mascot on         # enable it for the next listener start
+```
+
+Turning it off from the activity panel plays a short fade-and-slide exit animation while the Remote
+listener continues in the background. See the dedicated [Aivin mascot guide](docs/AIVIN_MASCOT.md)
+for interactions, voice and keyboard shortcuts, states, privacy behavior, and troubleshooting.
+
 ## What you get from a scaffold
 
 Both `aivin init` and `aivin create` produce the same project shape (`init` additionally writes
@@ -202,6 +223,8 @@ examples, and behavior notes for each one.
 | `aivin whoami` | Show which account is logged in on this machine |
 | `aivin key` | Manage named API keys (`gen` / `revoke` / `list`) for your account |
 | `aivin browser [mission]` | Run an AI Browser mission, driving a real local or server-side browser |
+| `aivin remote start` | Connect this computer to Aivin and show the Windows mascot when enabled |
+| `aivin ui` | Show the Windows mascot with its ask box, or preview its animations with `--demo` |
 | `aivin do [agentNickname] [mission]` | Have an AI Staff agent work toward a goal in the background |
 | `aivin do job [description]` | Create a recurring automation job from a plain-language description |
 | `aivin task [description]` | Create, list, get, update, or delete tasks in a project |
@@ -228,6 +251,8 @@ Full descriptions and when you'd actually touch each one: [CLI.md#environment-va
 
 ## Documentation
 
+- [docs/AIVIN_MASCOT.md](docs/AIVIN_MASCOT.md) — the Windows mascot: interaction, voice,
+  animation states, shortcuts, privacy, controls, and troubleshooting.
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — the full narrative walkthrough: scaffold,
   write, test, deploy, and use a plugin from the CLI, plus everything else `aivin` drives (tasks,
   AI Browser missions, workspaces, agents).

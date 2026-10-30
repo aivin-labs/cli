@@ -1,7 +1,6 @@
 // Đóng gói CLI thành MỘT tệp chạy (không cần cài Node.js) cho bộ cài `install.ps1` / `install.sh`.
 // Chạy bằng Bun: `npx bun scripts/build-binary.mjs [target...]` — mặc định đủ 8 nền tảng phát hành; ra `dist/` + `dist/SHA256SUMS`.
 // Bun build chéo được mọi nền tảng từ một máy (CI chỉ cần một runner).
-/* global Bun */
 import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';

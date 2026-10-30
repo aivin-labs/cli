@@ -1178,9 +1178,12 @@ aivin remote status | test | logs | reindex | enable | disable | reset-id
   screenshot (`screen.capture`); it only looks when the question needs it. Or click the mic to **talk with Aivin live**, like the mic on the web: it listens all the time, answers
   out loud and both sides show up as text in the box; click the mic while it talks to interrupt, while it listens to end. Its voice
   is not picked up by the mic (your words are ignored while it talks), so interrupt with the button. Right-click it for the detailed activity log and a "Pause AI" button (the same kill switch
-  as `aivin remote pause`). Apart from the open ask box it never takes keyboard focus; it is left out of screenshots and screen sharing,
-  and steps aside while the agent controls an app window. `aivin remote mascot off` (or `on`) for good, `aivin remote start --no-mascot`
-  for one run. Texts follow `AIVIN_LANG` / the system language.
+  as `aivin remote pause`). The activity panel also has **Turn mascot off**: the mascot fades and slides away before its window closes,
+  while the listener keeps running in the background. Run `aivin ui` to bring it back immediately, or use `aivin remote mascot on` and
+  restart the listener. Apart from the open ask box it never takes keyboard focus; it is left out of screenshots and screen sharing,
+  and steps aside while the agent controls an app window. `aivin remote mascot off` turns it off persistently; `aivin remote start --no-mascot`
+  hides it for one run. Texts follow `AIVIN_LANG` / the system language. See the dedicated [Aivin mascot guide](AIVIN_MASCOT.md)
+  for interaction, state, shortcut, privacy and troubleshooting details.
 - **Meeting notes** (Windows): ask the mascot something like "take notes of this meeting, then send my manager a summary". You can also
   run `aivin remote meeting start "<title>" --then "..."` yourself.
   - **What's recorded:** the computer's own sound (what the others say) and your microphone, plus a screenshot whenever the screen

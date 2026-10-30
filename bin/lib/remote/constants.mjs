@@ -76,6 +76,16 @@ export const DeviceEvent = Object.freeze({
    * `{ id, kind: done | failed | needs_you, title, text, session_id?, question? }`.
    */
   NOTIFY: 'device:notify',
+  /** CLI → BE (30/10/2026): báo chủ động chưa nhận (offline / rớt mạng lúc gửi) — ack `{ ok, notices }`; gọi sau HELLO. */
+  INBOX: 'device:inbox',
+  /** CLI → BE: đã nhận các báo `{ ids }` (từ `notify`, `inbox`, hay `notice_id` của `chat_event`) — BE bỏ khỏi hộp. */
+  NOTIFY_ACK: 'device:notify_ack',
+  /** CLI → BE: câu hỏi còn ghim đã đóng chưa `{ items: [{ session_id, reply_id }] }` — ack `{ ok, closed: reply_id[] }`. */
+  QUESTIONS: 'device:questions',
+  /** CLI → BE: dừng lượt chat đang chạy `{ request_id }` — lượt kết thúc bằng `error` mã `cancelled`. */
+  CHAT_CANCEL: 'device:chat_cancel',
+  /** CLI → BE (30/10/2026): mở phiên chat mới cho linh vật — câu hỏi kế đi vào phiên mới (phiên cũ vẫn trên Aivin). Ack `{ ok, error? }`. */
+  CHAT_NEW: 'device:chat_new',
 });
 
 /** Loại báo chủ động (`device:notify`). */
@@ -104,6 +114,12 @@ export const ServerFeature = Object.freeze({
   RESUME: 'resume',
   /** Nói chuyện realtime với linh vật (`device:voice_*`). */
   VOICE: 'voice',
+  /** Hộp báo chủ động (`device:inbox` / `device:notify_ack`) + `device:questions`. */
+  INBOX: 'inbox',
+  /** Dừng lượt chat từ linh vật (`device:chat_cancel`). */
+  CHAT_CANCEL: 'chat_cancel',
+  /** Mở phiên chat mới cho linh vật (`device:chat_new`). */
+  CHAT_NEW: 'chat_new',
 });
 
 /** Nhóm giới hạn song song trên máy — mỗi công cụ thuộc một nhóm. */

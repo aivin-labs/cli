@@ -322,6 +322,8 @@ export async function startRemoteClient(options = {}) {
     // Gõ khi Aivin đang hỏi lại → là câu trả lời; nút lựa chọn → trả lời đúng lựa chọn đó.
     onAsk: (text, window) => { void mascotChat?.reply(text, window); },
     onChoose: (id) => { void mascotChat?.choose(id); },
+    onCancel: () => { void mascotChat?.cancel(); },
+    onNewChat: () => { void mascotChat?.newChat(); },
     // Thả tệp vào bot → đi kèm câu gõ kế tiếp.
     onDrop: (files) => mascotChat?.attach(files),
     // Nói chuyện trực tiếp: mic / loa ở cửa sổ, phiên thoại realtime trên BE (mascot/ask.mjs).
@@ -521,7 +523,9 @@ export async function startRemoteClient(options = {}) {
       if (!multiUser) profile.update = updateProfile({ enabled: autoUpdateEnabled });
       const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash, inflight: ledger.heldIds() });
       serverResume = Array.isArray(hello?.features) && hello.features.includes(ServerFeature.RESUME);
-      mascotChat?.setVoiceSupported(Array.isArray(hello?.features) && hello.features.includes(ServerFeature.VOICE));
+      mascotChat?.setServerFeatures(hello?.features);
+      // Báo chủ động lỡ trong lúc offline + câu hỏi đang ghim đã đóng ở nơi khác (BE có hộp báo).
+      void mascotChat?.syncInbox();
       // Việc máy còn giữ mà BE không còn chờ (đã huỷ / hết giờ lúc máy mất mạng — lệnh huỷ không tới được máy): dừng ngay, bỏ kết quả.
       const orphaned = Array.isArray(hello?.orphaned) ? hello.orphaned.filter((id) => typeof id === 'string') : [];
       if (orphaned.length) {

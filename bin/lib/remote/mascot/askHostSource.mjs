@@ -80,6 +80,9 @@ namespace AivinMascotAsk {
 }
 '@
 (E 'AskHint').Text = $T.ask_hint; (E 'MicBtn').ToolTip = $T.ask_mic
+# "New chat" on the activity panel: the daemon opens a new chat on the server and sends chat_clear; the ask box opens for the first line.
+(E 'NewChatText').Text = $T.new_chat; (E 'NewChatBtn').ToolTip = $T.new_chat_tip
+(E 'NewChatBtn').Add_Click({ Send @{ t = 'new_chat' }; OpenAsk })
 
 function AskShow($name) {
   $script:bubbleTimer.Stop(); (E 'Bubble').Visibility = 'Collapsed'; (E 'Bubble').Opacity = 0
@@ -133,19 +136,39 @@ function ShowBubble($text) { if ($script:askOpen) { (E 'NowText').Text = $text; 
 $script:baseCloseAsk = (Get-Item function:CloseAsk).ScriptBlock
 function CloseAsk {
   $was = $script:askOpen; & $script:baseCloseAsk
-  if ($was -and (E 'Panel').Visibility -ne 'Visible' -and ((IsBusy) -or $script:state -eq 'waiting')) { & $script:baseShowBubble (E 'NowText').Text }
+  if (-not $was -or (E 'Panel').Visibility -eq 'Visible') { return }
+  if ($script:chatBusy -and $script:chatLast) { ChatBubble $script:chatLast }
+  elseif ((IsBusy) -or $script:state -eq 'waiting') { & $script:baseShowBubble (E 'NowText').Text }
+}
+# What the chat turn is doing, short, for the bubble on the bot's head while the box is closed: progress lines, the answer as it is
+# written (its tail), the answer / error. Stays up while the turn runs; once it ends the bubble times out as usual.
+$script:chatLast = ''
+function ChatShort($m) {
+  $text = ([string]$m.text -replace '\s+', ' ').Trim()
+  if ($m.partial -and $text.Length -gt 90) { $text = "$([char]0x2026)" + $text.Substring($text.Length - 89) }
+  $text
+}
+function ChatBubble($text) {
+  if (-not $text -or (E 'Panel').Visibility -eq 'Visible') { return }
+  & $script:baseShowBubble $text
+  if ($script:chatBusy) { $script:bubbleTimer.Stop() } else { $script:bubbleTimer.Stop(); $script:bubbleTimer.Start() }
 }
 # Hover: the box peeks while the mouse is over the bot / the box and slips away shortly after it leaves, unless it is in use.
 $script:askHideTimer = New-Object Windows.Threading.DispatcherTimer
 $script:askHideTimer.Add_Tick({ $script:askHideTimer.Stop(); if (-not (AskInUse)) { CloseAsk } })
-function AskInUse { $w.IsMouseOver -or $script:askFocused -or $script:voiceLive -or $script:chatBusy -or $script:drag -or $script:askPinned }
+# In use = keep the box out: mouse over it, talking, dragging, a pinned question, or focused with unsent text. Waiting on a turn is not
+# in use - the box slips away and the bot shows what it is doing in the bubble on its head (ChatBubble).
+function AskInUse {
+  $w.IsMouseOver -or $script:voiceLive -or $script:drag -or $script:askPinned -or ($script:askFocused -and (E 'AskBox').Text.Trim())
+}
 # Aivin is waiting for an answer (HIL): the box stays out with the question + option buttons until it is answered (no focus taken).
 $script:askPinned = $false
 function HideAskLater($ms) { $script:askHideTimer.Stop(); $script:askHideTimer.Interval = [TimeSpan]::FromMilliseconds($ms); $script:askHideTimer.Start() }
 (E 'Mascot').ToolTip = $null
 (E 'Mascot').Add_MouseEnter({ $script:askHideTimer.Stop(); if ((E 'Panel').Visibility -ne 'Visible' -and -not $script:drag) { PeekAsk } })
 (E 'Ask').Add_MouseEnter({ $script:askHideTimer.Stop() })
-$w.Add_MouseLeave({ if ($script:askOpen) { HideAskLater 600 } })
+# Focused but empty: a longer grace (clicked the bot, then moved the mouse off to type).
+$w.Add_MouseLeave({ if ($script:askOpen) { HideAskLater $(if ($script:askFocused) { 2500 } else { 600 }) } })
 # Clicked somewhere else: give the keyboard back and let the box go once the mouse is away too.
 $w.Add_Deactivated({ if ($script:askFocused) { $script:askFocused = $false; SetActivatable $false; if (-not $w.IsMouseOver) { HideAskLater 600 } } })
 # Clicking into the peeking box = about to type: take keyboard focus.
@@ -153,11 +176,15 @@ $w.Add_Deactivated({ if ($script:askFocused) { $script:askFocused = $false; SetA
 # Right-click on the bot: the activity panel.
 (E 'Mascot').Add_MouseRightButtonUp({ param($s, $e) CloseAsk; TogglePanel; $e.Handled = $true })
 # One button: empty box = mic, typed text = send.
+# Waiting on a turn the server can stop (chat_busy { cancel }): the empty-box button is a stop button instead of the mic.
+function StopMode { $script:chatBusy -and $script:canCancel -and -not $script:voiceLive -and -not (E 'AskBox').Text.Trim() }
 function SyncAction {
   $typed = [bool](E 'AskBox').Text.Trim()
+  $stop = StopMode
   (E 'AskHint').Visibility = if ((E 'AskBox').Text) { 'Collapsed' } else { 'Visible' }
-  (E 'SendIcon').Visibility = if ($typed) { 'Visible' } else { 'Collapsed' }; (E 'MicIcon').Visibility = if ($typed) { 'Collapsed' } else { 'Visible' }
-  (E 'MicBtn').ToolTip = if ($typed) { $T.ask_send } else { $T.ask_mic }
+  (E 'SendIcon').Visibility = if ($typed) { 'Visible' } else { 'Collapsed' }; (E 'MicIcon').Visibility = if ($typed -or $stop) { 'Collapsed' } else { 'Visible' }
+  (E 'StopIcon').Visibility = if ($stop) { 'Visible' } else { 'Collapsed' }
+  (E 'MicBtn').ToolTip = if ($typed) { $T.ask_send } elseif ($stop) { $T.ask_stop } else { $T.ask_mic }
   InputLayout
 }
 # Input row height: two lines for a fresh question; once a conversation is above it (or while talking), one line with the hint and the mic
@@ -181,6 +208,7 @@ function AttendAsk {
 }
 
 $script:chatBusy = $false
+$script:canCancel = $false
 function SubmitAsk {
   $text = (E 'AskBox').Text.Trim(); if (-not $text -or $script:chatBusy -or $script:voiceLive) { return }
   NoteTarget; (E 'AskBox').Text = ''; $script:rig.Play('ack'); Send @{ t = 'ask'; text = $text; window = $script:askTarget }
@@ -193,6 +221,24 @@ function SubmitAsk {
 # Conversation rows: user (right, light brand), assistant (left, grey), one live progress line, errors. Bubbles point at their speaker
 # (the corner on the speaker's side is nearly square, 3 px) and new ones fade + rise in.
 $script:chatRows = @{}
+# "Working on it": three dots bouncing in turn inside an assistant bubble (a staggered key-frame hop, then a rest).
+function TypingDots {
+  $sp = New-Object Windows.Controls.StackPanel; $sp.Orientation = 'Horizontal'; $sp.Margin = '1,5,1,5'
+  for ($i = 0; $i -lt 3; $i++) {
+    $e = New-Object Windows.Shapes.Ellipse; $e.Width = 6; $e.Height = 6; $e.Margin = '2,0,2,0'; $e.Fill = Brush '#9AA0AB'
+    $tt = New-Object Windows.Media.TranslateTransform; $e.RenderTransform = $tt
+    $a = New-Object Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+    $a.Duration = [TimeSpan]::FromMilliseconds(1200); $a.BeginTime = [TimeSpan]::FromMilliseconds(160 * $i)
+    $a.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
+    foreach ($k in @(@(0, 0), @(280, -4.5), @(560, 0), @(1200, 0))) {
+      $f = New-Object Windows.Media.Animation.EasingDoubleKeyFrame ([double]$k[1]), ([Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds($k[0])))
+      $f.EasingFunction = New-Object Windows.Media.Animation.SineEase; [void]$a.KeyFrames.Add($f)
+    }
+    $tt.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $a)
+    [void]$sp.Children.Add($e)
+  }
+  $sp
+}
 function ChatRow($m) {
   $list = E 'ChatList'; $id = [string]$m.id
   $row = $null; if ($id) { $row = $script:chatRows[$id] }
@@ -222,6 +268,10 @@ function ChatRow($m) {
   $row.box.Background = Brush $bg; $row.text.Foreground = Brush $fg
   $row.text.FontStyle = if ($role -eq 'progress') { 'Italic' } else { 'Normal' }
   $row.text.Text = [string]$m.text
+  if ($m.typing) {
+    if (-not $row.dots) { $row.dots = TypingDots }
+    $row.box.Child = $row.dots; $row.box.Background = Brush '#F4F6FA'; $row.box.CornerRadius = '10,10,10,3'
+  } elseif ($row.dots -and $row.box.Child -ne $row.text) { $row.box.Child = $row.text }
   # Words the owner is still saying: lighter until the sentence is settled (the box's own opacity is the fade-in).
   $row.text.Opacity = if ($m.partial) { 0.55 } else { 1 }
   (E 'ChatScroll').ScrollToEnd()
@@ -366,7 +416,11 @@ function VoiceToggle {
   elseif ($script:voiceLive) { StopVoice }
   elseif (-not $script:chatBusy) { PeekAsk; StartVoice }
 }
-(E 'MicBtn').Add_Click({ if (-not $script:voiceLive -and (E 'AskBox').Text.Trim()) { SubmitAsk } else { VoiceToggle } })
+(E 'MicBtn').Add_Click({
+  if (-not $script:voiceLive -and (E 'AskBox').Text.Trim()) { SubmitAsk }
+  elseif (StopMode) { $script:canCancel = $false; (E 'MicBtn').Opacity = 0.5; SyncAction; Send @{ t = 'cancel' } }
+  else { VoiceToggle }
+})
 # A hotkey anywhere = the mic button (no need to reach for the bot): the first free of Ctrl+Alt+Space, Win+Alt+Space, Ctrl+Alt+V
 # (other apps often hold the first one). Shown in the mic button's tooltip; none free -> no hotkey.
 $w.Add_ContentRendered({
@@ -388,11 +442,24 @@ $w.Add_ContentRendered({
 $script:baseHandle = (Get-Item function:Handle).ScriptBlock
 function Handle($m) {
   switch ($m.t) {
-    'chat' { ChatRow $m; return }
+    'chat' {
+      ChatRow $m
+      if (-not $m.remove -and [string]$m.role -ne 'user' -and $m.text) {
+        $script:chatLast = ChatShort $m
+        if (-not $script:askOpen) { ChatBubble $script:chatLast }
+      }
+      return
+    }
+    'chat_clear' { (E 'ChatList').Children.Clear(); $script:chatRows.Clear(); (E 'ChatScroll').Visibility = 'Collapsed'; InputLayout; return }
     'chat_busy' {
-      $script:chatBusy = [bool]$m.busy; (E 'MicBtn').Opacity = if ($script:chatBusy) { 0.5 } else { 1 }
+      $script:chatBusy = [bool]$m.busy; $script:canCancel = [bool]$m.cancel
+      (E 'MicBtn').Opacity = if ($script:chatBusy -and -not $script:canCancel) { 0.5 } else { 1 }
+      SyncAction
       # Answer arrived while the user looked elsewhere: leave it readable a while, then tuck the box away.
       if (-not $script:chatBusy -and $script:askOpen -and -not $script:askFocused -and -not $w.IsMouseOver) { HideAskLater 8000 }
+      # Turn over with the box closed: the answer / error stays in the bubble a while, then the bubble times out.
+      if (-not $script:chatBusy -and -not $script:askOpen -and (E 'Bubble').Visibility -eq 'Visible') { $script:bubbleTimer.Stop(); $script:bubbleTimer.Start() }
+      if ($script:chatBusy) { $script:chatLast = '' }
       return
     }
     'ask_status' { AskStatus $m.text; return }

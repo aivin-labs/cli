@@ -23,6 +23,8 @@ import { BOT_BLINKS, BOT_EYES, BOT_MOTION, BOT_MOUTHS, BOT_RIG, BOT_SPINS, SCREE
  * - Sống trong trạng thái dài: thưa thớt (ngẫu nhiên 22–42 s, không khi đang rê chuột / kéo / ngay sau một phản ứng) — đang làm lâu thì nheo
  *   mắt tập trung hoặc gật gù; chờ lâu thì nghiêng đầu nhìn về con trỏ như hỏi, mỗi lần đậm hơn một chút (có trần).
  * - Đạo cụ theo trạng thái: "!" nảy khi chờ xác nhận, bong bóng ba chấm khi nghĩ, tia lấp lánh bung ra khi xong việc.
+ * - Thùng nhận tệp (Tray, cửa sổ gọi): kéo tệp tới gần → thùng bật ra trước bụng, nắp mở, mũi tên nhún; không nhận được → nắp đóng, ✕ đỏ,
+ *   lắc; thả → "nuốt" (Play gulp); tệp chờ gửi → ôm thùng nhỏ có số tệp; gửi đi → thùng nhấc lên rồi biến mất.
  * - Ngủ gật (Doze, cửa sổ gọi khi rảnh lâu): mắt nhắm, đầu gục, zzz, thỉnh thoảng giật mình ngẩng lên; thức dậy thì nhổm lên + lắc ăng-ten.
  * - Cử chỉ khi vào trạng thái (`enter`): hop (nhảy + nén / giãn), shake (lắc đầu tắt dần), nod (gật), perk (nhổm lên chú ý, lặp khi chờ).
  * - Cửa sổ ẩn → bỏ qua khung hình (không tốn CPU / GPU).
@@ -37,6 +39,7 @@ const V = BOT_RIG.visor;
 const Z = BOT_RIG.zzz;
 const SCREENS = BOT_RIG.screens;
 const SP = BOT_RIG.sparks;
+const TR = BOT_RIG.tray;
 
 export const RIG_CS = String.raw`
   public sealed class Motion {
@@ -146,6 +149,15 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
     readonly SolidColorBrush tintBrush = new SolidColorBrush();
     Color colorFrom, colorTo; double colorAt = -10; bool hasColor;
     const double COLOR_S = 0.45;
+    // Tray (Tray()): files dragged near the bot / dropped and waiting. Mode, files waiting, when the mode / a drop / a hand-over began.
+    readonly System.Windows.UIElement tray, trayArrow, trayBase, trayNo, trayDeny, trayBadge;
+    readonly ScaleTransform trayScale, trayBodyScale, trayBadgeScale;
+    readonly RotateTransform trayFlapL, trayFlapR, trayBodyLean;
+    readonly TranslateTransform trayMove, trayArrowMove, trayBodyMove;
+    readonly System.Windows.Controls.TextBlock trayCount;
+    readonly Spring trayPop = new Spring(0), trayLid = new Spring(0), badgePop = new Spring(0);
+    string trayMode = "off"; int trayN; double trayAt = -10, gulpAt = -10, giveAt = -10, denyK;
+    const double LID_OPEN = ${n(TR.lidOpen)};
 
     T Get<T>(string name) where T : class {
       var o = w.FindName(name) as T;
@@ -186,6 +198,30 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       foreach (var name in new[] { ${BOT_MOUTHS.map((e) => `"${e}"`).join(', ')} }) mouthEls[name] = Get<System.Windows.UIElement>("Mouth_" + name);
       eyeMorphL = Get<ScaleTransform>("EyeMorphL"); eyeMorphR = Get<ScaleTransform>("EyeMorphR"); mouthMorph = Get<ScaleTransform>("MouthMorph");
       tint.Fill = tintBrush; halo.Fill = tintBrush;
+      tray = Get<System.Windows.UIElement>("Tray"); trayArrow = Get<System.Windows.UIElement>("TrayArrow"); trayBase = Get<System.Windows.UIElement>("TrayBase"); trayNo = Get<System.Windows.UIElement>("TrayNo");
+      trayDeny = Get<System.Windows.UIElement>("TrayDeny"); trayBadge = Get<System.Windows.UIElement>("TrayBadge");
+      trayScale = Get<ScaleTransform>("TrayScale"); trayBodyScale = Get<ScaleTransform>("TrayBodyScale"); trayBadgeScale = Get<ScaleTransform>("TrayBadgeScale");
+      trayFlapL = Get<RotateTransform>("TrayFlapL"); trayFlapR = Get<RotateTransform>("TrayFlapR"); trayBodyLean = Get<RotateTransform>("TrayBodyLean");
+      trayMove = Get<TranslateTransform>("TrayMove"); trayArrowMove = Get<TranslateTransform>("TrayArrowMove"); trayBodyMove = Get<TranslateTransform>("TrayBodyMove");
+      trayCount = Get<System.Windows.Controls.TextBlock>("TrayCount");
+    }
+
+    /**
+     * The tray in the bot's arms. "open" = files dragged near the bot: held up a bit bigger, lid flaps swing open, upload arrow bounces;
+     * "deny" = it cannot take them: lid shut, red cross, the box and the head shake; "hold" = dropped files wait for the next question:
+     * smaller, lid shut, count badge; "off" = put away (coming from "hold": handed over - lifts up while it shrinks). count = files
+     * waiting (the badge; it pops when the count goes up).
+     */
+    public void Tray(string mode, int count) {
+      double t = Now;
+      if (mode != trayMode) {
+        if (mode == "open") { trayAt = t; perkAt = t; antA.V -= 120; }
+        else if (mode == "deny") { trayAt = t; shakeAt = t; }
+        else if (mode == "off" && trayMode == "hold") giveAt = t;
+        trayMode = mode;
+      }
+      if (count > trayN) badgePop.V += 9;
+      trayN = Math.Max(0, count); trayCount.Text = trayN > 99 ? "99+" : trayN.ToString();
     }
 
     /**
@@ -274,6 +310,8 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
         case "small": hopAt = -10; nodAt = t; break;
         case "ack": nodAt = t; antA.V -= 80; break;
         case "yawn": yawnAt = t; break;
+        // Files dropped into the tray: it gulps them (squash, lid snaps shut), a nod and a little sparkle.
+        case "gulp": gulpAt = t; nodAt = t + 0.12; sparkAt = t; antA.V += 110; break;
       }
       reactAt = t;
     }
@@ -537,6 +575,32 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       }
       mouthOpen.ScaleY = 1 + Math.Sin(t * 3.4) * 0.1; mouthOpen.ScaleX = 1 - Math.Sin(t * 3.4) * 0.05;
       talk.ScaleY = 0.45 + 0.55 * Math.Abs(Math.Sin(t * 12));
+
+      // 12) Tray: pops up in front of the body (rides its bob / lean / squash), held up while files hover near; the lid flutters open, the
+      //     arrow bounces; a drop gulps (squash + lid snaps shut); a refusal shakes the box; handed over = lifts up as it shrinks away.
+      bool open = trayMode == "open";
+      trayPop.Step(open ? 1.06 : trayMode == "deny" ? 1 : trayMode == "hold" ? 0.9 : 0, 230, 17, dt);
+      double tpv = Math.Max(0, trayPop.X);
+      var tvis = tpv > 0.01 ? Visibility.Visible : Visibility.Collapsed; if (tray.Visibility != tvis) tray.Visibility = tvis;
+      if (tpv > 0.01) {
+        trayBodyScale.ScaleX = botScale.ScaleX; trayBodyScale.ScaleY = botScale.ScaleY; trayBodyLean.Angle = botLean.Angle;
+        trayBodyMove.X = botMove.X; trayBodyMove.Y = botMove.Y;
+        double gulp = Bump(t - gulpAt, 0.32);
+        trayScale.ScaleX = tpv * (1 + gulp * 0.14); trayScale.ScaleY = tpv * (1 - gulp * 0.2);
+        double du = t - trayAt, jolt = trayMode == "deny" && du < 0.7 ? Math.Exp(-du * 5) * Math.Sin(du * 42) * 6 : 0;
+        double give = trayMode == "off" ? Clamp((t - giveAt) / 0.4, 0, 1) : 0;
+        trayMove.X = jolt; trayMove.Y = (open ? -3 + Math.Sin(t * 4.2) * 1.6 : 0) - give * 34;
+        tray.Opacity = Clamp(tpv, 0, 1);
+        trayLid.Step(open ? 1 : 0, open ? 140 : 520, open ? 9 : 34, dt);
+        double lid = trayLid.X * LID_OPEN + (open ? Math.Sin(t * 9) * 7 * trayLid.X : 0);
+        trayFlapL.Angle = -lid; trayFlapR.Angle = lid;
+        denyK = Ease(denyK, trayMode == "deny" ? 1 : 0, 12, dt);
+        trayDeny.Opacity = denyK * 0.16; trayNo.Opacity = denyK; trayArrow.Opacity = trayBase.Opacity = 1 - denyK;
+        trayArrowMove.Y = open ? -Math.Abs(Math.Sin(t * 5.5)) * 8 : 0;
+        badgePop.Step(trayN > 0 ? 1 : 0, 320, 13, dt);
+        double bp = Clamp(badgePop.X, 0, 1.5);
+        trayBadge.Opacity = Clamp(bp, 0, 1); trayBadgeScale.ScaleX = bp; trayBadgeScale.ScaleY = bp;
+      }
     }
   }
 `;

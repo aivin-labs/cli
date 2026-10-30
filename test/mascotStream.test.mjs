@@ -64,3 +64,36 @@ test('chữ chạy: câu hỏi lại / lỗi → bỏ dòng dở; hết giờ ch
   c.chat.onChatEvent({ request_id: c.emitted[0].payload.request_id, kind: 'answer', text: '4' });
   assert.deepEqual(assistantRows(c.sent).map((r) => r.text), ['4']);
 });
+
+test('lượt im lặng quá lâu (sự kiện mất khi rớt mạng / BE khởi động lại) → thôi chờ, ô hỏi rảnh; câu trả lời tới muộn vẫn hiện', async () => {
+  const sent = [];
+  const emitted = [];
+  const alerts = [];
+  const pendingTimers = new Set();
+  const timers = {
+    setTimeout: (fn) => { const h = { fn }; pendingTimers.add(h); return h; },
+    clearTimeout: (h) => pendingTimers.delete(h),
+  };
+  const fire = () => { const all = [...pendingTimers]; pendingTimers.clear(); all.forEach((h) => h.fn()); };
+  const socket = { connected: true, timeout() { return this; }, async emitWithAck(event, payload) { emitted.push({ event, payload }); return { ok: true }; } };
+  const chat = createMascotChat({ socket: () => socket, send: (c) => sent.push(c), lang: 'vi', timers, onAlert: (a) => alerts.push(a) });
+
+  await chat.ask('Việc A');
+  const stale = emitted[0].payload.request_id;
+  chat.onChatEvent({ request_id: stale, kind: 'delta', text: 'Đang viết' });
+  fire();
+  assert.equal(chat.busy(), false, 'ô hỏi rảnh lại');
+  assert.ok(assistantRows(sent).some((r) => r.text === 'Đang viết' && !r.partial), 'giữ phần đã viết');
+  assert.ok(assistantRows(sent).at(-1).text.startsWith('Chưa nghe Aivin trả lời'));
+
+  await chat.ask('Việc B');
+  const now = emitted[1].payload.request_id;
+  chat.onChatEvent({ request_id: stale, kind: 'delta', text: 'chữ cũ' });
+  chat.onChatEvent({ request_id: stale, kind: 'answer', text: 'Kết quả A' });
+  assert.equal(chat.busy(), true, 'câu trả lời muộn không kết thúc lượt B');
+  assert.ok(assistantRows(sent).some((r) => r.text === 'Kết quả A'));
+  assert.ok(!rows(sent).some((r) => r.text === 'chữ cũ'));
+  chat.onChatEvent({ request_id: now, kind: 'answer', text: 'Kết quả B' });
+  assert.equal(chat.busy(), false);
+  assert.deepEqual(alerts.map((a) => a.text), ['Kết quả A', 'Kết quả B']);
+});

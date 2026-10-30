@@ -8,7 +8,7 @@ import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
 import { MASCOT_LAYERS } from './assets.mjs';
 import { MASCOT_GLYPHS, MASCOT_PALETTE, MASCOT_PS1, MASCOT_XAML } from './hostSource.mjs';
 import { ASK_PS1 } from './askHostSource.mjs';
-import { AskCommand, QUESTION_ROW } from './ask.mjs';
+import { AskCommand, MAX_ATTACH, QUESTION_ROW } from './ask.mjs';
 
 const ASK_HOOK = '# @ASK_HOOK';
 import { describeStep } from './labels.mjs';
@@ -45,7 +45,7 @@ export function requestMascotShow(file = MASCOT_SHOW_FILE) {
   fs.writeFileSync(file, String(Date.now()));
 }
 export const HostEvent = Object.freeze({
-  READY: 'ready', POS: 'pos', PAUSE: 'pause', RESUME: 'resume', HIDE: 'hide', OFF: 'off', ASK: 'ask', CHOOSE: 'choose',
+  READY: 'ready', POS: 'pos', PAUSE: 'pause', RESUME: 'resume', HIDE: 'hide', OFF: 'off', ASK: 'ask', CHOOSE: 'choose', CANCEL: 'cancel', NEW_CHAT: 'new_chat',
   DROP: 'drop', AWAY: 'away', BACK: 'back',
   VOICE_START: 'voice_start', VOICE_AUDIO: 'voice_audio', VOICE_INTERRUPT: 'voice_interrupt', VOICE_STOP: 'voice_stop', VOICE_MIC_LOST: 'voice_mic_lost',
 });
@@ -94,7 +94,7 @@ export function writeHostFiles({ dir, lang, settings }) {
   for (const [name, body] of Object.entries(MASCOT_LAYERS)) if (!fs.existsSync(path.join(home, name))) fs.writeFileSync(path.join(home, name), Buffer.from(body, 'base64'));
   if (!fs.existsSync(path.join(home, 'logo.png'))) fs.writeFileSync(path.join(home, 'logo.png'), Buffer.from(AIVIN_LOGO_PNG_BASE64, 'base64'));
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
-    strings: windowStrings(lang), palette: MASCOT_PALETTE, glyphs: MASCOT_GLYPHS, x: settings.x ?? null, y: settings.y ?? null,
+    strings: windowStrings(lang), palette: MASCOT_PALETTE, glyphs: MASCOT_GLYPHS, x: settings.x ?? null, y: settings.y ?? null, max_files: MAX_ATTACH,
   }));
   for (const name of fs.readdirSync(dir)) {
     if (name !== hash && /^[0-9a-f]{12}$/.test(name)) fs.rmSync(path.join(dir, name), { recursive: true, force: true });
@@ -119,12 +119,13 @@ export function userWindow(w) {
 /**
  * `onPause` / `onResume`: nút trên bảng nhật ký bật / tắt công tắc ngắt (như `aivin remote pause|resume`). `onVoice(msg)`: sự kiện nói
  * chuyện của cửa sổ (`voice_*`, xem ask.mjs); cửa sổ chết giữa chừng → `voice_stop`. `onChoose(id | ids)`: bấm nút trả lời câu Aivin hỏi (câu chọn nhiều: mảng id đã tích).
+ * `onCancel()`: bấm nút dừng lượt chat đang chạy. `onNewChat()`: nút "Phiên chat mới" trên bảng nhật ký.
  * `onAsk(text, window)`: câu gõ trong ô hỏi + cửa sổ chủ máy đang dùng (`userWindow`). `pid()`: tiến trình của cửa sổ linh vật (null khi
  * chưa chạy). `spawnImpl`, `timers`, `now`, `dir`, `settingsFile`, các mốc `*Ms`: cho test.
  */
 export function createMascot({
   enabled = true, platform = process.platform, env = process.env, onPause = () => {}, onResume = () => {}, say = () => {},
-  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onDrop = () => {},
+  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onDrop = () => {},
   spawnImpl = spawn, dir = MASCOT_DIR, settingsFile = MASCOT_SETTINGS_FILE, showFile = MASCOT_SHOW_FILE, now = Date.now, timers = { setTimeout, clearTimeout },
   thinkMs = THINK_MS, resultMs = RESULT_MS, mainThrottleMs = MAIN_THROTTLE_MS, restartDelaysMs = RESTART_DELAYS_MS, awayWaveMs = AWAY_WAVE_MS,
 } = {}) {
@@ -151,12 +152,15 @@ export function createMascot({
   let lastQuestion = null;
   let lastChoices = null;
   let lastPin = null;
+  // Tệp thả vào bot đang chờ: cửa sổ dựng lại vẫn ôm thùng có số tệp.
+  let lastFiles = null;
   const send = (msg) => {
     if (msg.t === HostCommand.STATE) lastState = msg;
     if (msg.t === HostCommand.MAIN) lastMain = msg;
     if (msg.t === AskCommand.CHAT && String(msg.id || '').startsWith(QUESTION_ROW)) lastQuestion = msg;
     if (msg.t === AskCommand.CHOICES) lastChoices = msg;
     if (msg.t === AskCommand.PIN) lastPin = msg;
+    if (msg.t === AskCommand.FILES) lastFiles = msg;
     if (ready) return write(msg);
     if (msg.t === HostCommand.LOG) {
       pending.push(msg);
@@ -173,6 +177,7 @@ export function createMascot({
       if (lastChoices) write(lastChoices);
       write(lastPin);
     }
+    if (lastFiles?.n) write(lastFiles);
     if (openAskOnReady) { openAskOnReady = false; write({ t: HostCommand.OPEN_ASK }); }
   };
 
@@ -192,6 +197,10 @@ export function createMascot({
       if (Array.isArray(msg.ids) && msg.ids.length && msg.ids.every((x) => typeof x === 'string')) return onChoose(msg.ids);
       if (typeof msg.id === 'string') return onChoose(msg.id);
     }
+    // Nút dừng (nút mic khi đang chờ lượt chat): dừng lượt đang chạy.
+    if (msg.t === HostEvent.CANCEL) return onCancel();
+    // Nút "Chat mới" trên bảng: phiên chat mới cho linh vật.
+    if (msg.t === HostEvent.NEW_CHAT) return onNewChat();
     if (msg.t === HostEvent.DROP && Array.isArray(msg.files)) return onDrop(msg.files.filter((f) => typeof f === 'string' && f));
     if (msg.t === HostEvent.AWAY) { away = { since: now(), done: 0, failed: 0, needs: 0 }; return; }
     if (msg.t === HostEvent.BACK) return welcomeBack();

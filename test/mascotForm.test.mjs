@@ -101,3 +101,22 @@ test('gõ tên nút hoặc "bỏ qua" cũng được ở trường biểu mẫu'
   await chat.reply('Bỏ qua');
   assert.deepEqual(socket.emitted[0].payload.fields, { tone: 'formal' });
 });
+
+test('biểu mẫu đang gửi (chờ ack): gõ / bấm thêm → báo bận, không lỗi; BE gửi lại câu hỏi → hỏi lại từ trường đầu', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const { chat, sent, socket } = setup(async () => { await gate; return { ok: false, error: 'invalid_answer' }; });
+  const one = { reply_id: 'f5', kind: 'form', question: 'Q', fields: [FORM.fields[0]] };
+  notify(chat, one);
+  const submitting = chat.reply('an@aivin.vn');
+  await chat.reply('gõ thêm');
+  await chat.choose('x');
+  assert.equal(socket.emitted.length, 1);
+  assert.ok(sent.some((c) => c.t === AskCommand.STATUS), 'báo bận trong ô hỏi');
+  notify(chat, one);
+  release();
+  await submitting;
+  // Bị từ chối → câu hỏi còn đó, điền lại được từ trường đầu.
+  await chat.reply('binh@aivin.vn');
+  assert.deepEqual(socket.emitted.at(-1).payload.fields, { to: 'binh@aivin.vn' });
+});
