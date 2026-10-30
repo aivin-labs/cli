@@ -154,11 +154,17 @@ a description? `aivin plugin convert` turns an existing directory into a plugin 
 
 ## Aivin mascot on Windows
 
+<p align="center">
+  <img src="docs/media/aivin-mascot-live.gif" alt="The current live Aivin mascot showing chat, file drag and attached-file states" width="480" />
+</p>
+
 When Aivin Remote is running on Windows, a small animated Aivin mascot can float above your apps.
 It shows whether Aivin is idle, working, thinking, waiting for you, done, paused, offline, or has hit
 an error. Hover or click it to type a question, use its microphone for a live voice conversation,
 right-click for the activity panel, or drop local files onto it to attach them to your next message.
 The mascot stays out of Aivin screenshots and moves aside while the agent controls another window.
+The animation above is captured from the current WPF interface: it shows a chat, the drag target and
+the tray holding files already attached to the next message.
 
 ```bash
 aivin remote start             # start the listener and mascot
@@ -171,6 +177,16 @@ aivin remote mascot on         # enable it for the next listener start
 Turning it off from the activity panel plays a short fade-and-slide exit animation while the Remote
 listener continues in the background. See the dedicated [Aivin mascot guide](docs/AIVIN_MASCOT.md)
 for interactions, voice and keyboard shortcuts, states, privacy behavior, and troubleshooting.
+
+### How Remote connects Aivin to computers
+
+![Aivin Platform routes authenticated work to listeners on selected computers; each listener applies local policy and returns progress and results](docs/media/aivin-remote-architecture.svg)
+
+Each paired computer opens its own authenticated outbound connection to Aivin Platform. The
+platform routes a chat or mission to the selected computer; its listener applies local policy,
+requests approval for protected actions, runs the allowed local tools, and sends progress and
+results back. The mascot talks to the listener on the same computer—it is not a separate remote
+control channel.
 
 ## What you get from a scaffold
 

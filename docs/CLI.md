@@ -1221,7 +1221,7 @@ Preview all eight mascot animations locally without pairing or starting the list
 aivin ui --demo
 ```
 
-Recording of the demo (idle, working, thinking, waiting, done, error, paused, offline): [media/aivin-mascot-states.mp4](media/aivin-mascot-states.mp4)
+Current live-interface capture showing chat, file drag and attached files: [media/aivin-mascot-live.gif](media/aivin-mascot-live.gif)
 
 ## `aivin desktop`
 

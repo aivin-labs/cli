@@ -1,6 +1,20 @@
 # Aivin mascot
 
+<p align="center">
+  <img src="media/aivin-mascot-live.gif" alt="The current live Aivin mascot showing chat, file drag and attached-file states" width="480" />
+</p>
+
 The Aivin mascot is the floating Windows interface for Aivin Remote. It shows what the agent is doing, accepts typed or spoken questions, and gives access to recent activity without opening the web app.
+
+The animation above is rendered from the current WPF visual tree. It demonstrates the real chat box, the file-drag target and the tray badge after two files have been attached.
+
+## How it connects to Aivin
+
+![Aivin Remote architecture: the platform routes work to listeners on selected computers, which enforce local policy and return results](media/aivin-remote-architecture.svg)
+
+The mascot is a local interface to the Aivin listener running on the same computer. It sends typed questions, voice events and user choices to that listener; the listener maintains the authenticated outbound connection to Aivin Platform. Work coming back from the platform passes through local policy and approval checks before any tool or app is used. Status, questions and results then travel back over the same connection.
+
+This design supports multiple paired computers without exposing an inbound remote-control port. A chat or mission targets a selected computer, and each computer keeps its own identity, capabilities, policy and local execution boundary.
 
 ## Requirements
 

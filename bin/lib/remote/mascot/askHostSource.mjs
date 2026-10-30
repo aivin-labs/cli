@@ -489,6 +489,16 @@ function Handle($m) {
     'open_ask' { $script:userHidden = $false; ApplyVisibility; if (-not $script:askFocused) { OpenAsk }; return }
     # Debug only (AIVIN_MASCOT_DEBUG): show the ask box WITHOUT taking keyboard focus, to look at it / screenshot it.
     'ask_preview' { if ($env:AIVIN_MASCOT_DEBUG) { PeekAsk }; return }
+    # Debug/docs preview of the real file-drag UI, using the same tray, face and hint code as DragEnter without requiring Explorer.
+    'drop_preview' {
+      if ($env:AIVIN_MASCOT_DEBUG) {
+        $script:userHidden = $false; ApplyVisibility; AskHide 'Panel'; CloseAsk
+        $script:dragFiles = @('bao-cao.xlsx', 'anh-man-hinh.png'); $script:rig.Hover = $true; $script:rig.Tray('open', $script:files); SetFace 'waiting'
+        DropHint ($T.drop_many.Replace('{n}', '2'))
+      }
+      return
+    }
+    'drop_preview_end' { if ($env:AIVIN_MASCOT_DEBUG) { DragEnd }; return }
     # Debug only: start talking as if the mic was clicked (end-to-end voice test without clicking / taking focus).
     'voice_preview' { if ($env:AIVIN_MASCOT_DEBUG -and -not $script:voiceLive) { VoiceToggle }; return }
     # Debug only: render the ask box (not the screen) to a PNG, to look at the design without screenshots.
@@ -503,6 +513,14 @@ function Handle($m) {
       $vb.ViewboxUnits = 'Absolute'; $vb.Viewbox = New-Object Windows.Rect 0, 0, $el.ActualWidth, $el.ActualHeight
       $dc.DrawRectangle($vb, $null, (New-Object Windows.Rect 6, 6, $el.ActualWidth, $el.ActualHeight)); $dc.Close()
       $bmp.Render($vis); $enc = New-Object Windows.Media.Imaging.PngBitmapEncoder; $enc.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($bmp))
+      $fs = [IO.File]::Create([string]$m.file); $enc.Save($fs); $fs.Close(); return
+    }
+    # Debug/docs only: render the complete live WPF visual tree (bot + every visible box), not the static seed artwork.
+    'snap_full' {
+      if (-not $env:AIVIN_MASCOT_DEBUG -or -not $m.file) { return }
+      $el = E 'Root'; $el.UpdateLayout(); $dpi = 2
+      $bmp = New-Object Windows.Media.Imaging.RenderTargetBitmap ([int]($el.ActualWidth * $dpi)), ([int]($el.ActualHeight * $dpi)), (96 * $dpi), (96 * $dpi), ([Windows.Media.PixelFormats]::Pbgra32)
+      $bmp.Render($el); $enc = New-Object Windows.Media.Imaging.PngBitmapEncoder; $enc.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($bmp))
       $fs = [IO.File]::Create([string]$m.file); $enc.Save($fs); $fs.Close(); return
     }
   }
