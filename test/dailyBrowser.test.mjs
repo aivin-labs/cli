@@ -149,7 +149,7 @@ test('bộ chia: chặn lệnh hại trình duyệt của người dùng; tab c�
   for (const method of ['Network.getAllCookies', 'Network.getCookies', 'Network.setCookie', 'DOM.setFileInputFiles']) {
     assert.ok((await c.call(method, {}, own)).error, `${method} trên tab AI vẫn bị chặn (kho cookie / tệp trên đĩa của người dùng)`);
   }
-  await c.call('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: 'C:\Windows\System32' }, own);
+  await c.call('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: String.raw`C:\Windows\System32` }, own);
   assert.equal(chrome.seen.messages.find((m) => m.method === 'Page.setDownloadBehavior').params.downloadPath, DL, 'thư mục tải luôn ép về thư mục của Aivin');
   assert.ok((await c.call('Target.closeTarget', { targetId })).result, 'đóng được tab của AI');
   mux.close();

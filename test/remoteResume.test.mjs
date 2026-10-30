@@ -120,7 +120,7 @@ test('giữ máy thức: chỉ bật khi bận đủ lâu, thả sau khi rảnh,
   assert.equal(keepAwakeCommand('linux', { linuxInhibit: () => true }).cmd, 'systemd-inhibit');
 
   const spawned = [];
-  const spawnImpl = (cmd, args) => {
+  const spawnImpl = () => {
     const child = new EventEmitter();
     child.stdin = { end: () => { child.ended = true; } };
     child.kill = () => { child.killed = true; child.emit('exit'); };

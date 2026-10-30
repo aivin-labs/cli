@@ -45,7 +45,7 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
   }
 
   function load() {
-    let rows = [];
+    let rows;
     try { rows = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
     const t = now();
     for (const r of Array.isArray(rows) ? rows : []) {

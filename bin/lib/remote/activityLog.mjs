@@ -63,6 +63,6 @@ export function clearLogs() {
     }
     return { success: true };
   } catch (err) {
-    throw new Error(`Không thể xóa nhật ký hoạt động: ${err.message}`);
+    throw new Error(`Không thể xóa nhật ký hoạt động: ${err.message}`, { cause: err });
   }
 }

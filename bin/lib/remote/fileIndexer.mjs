@@ -123,7 +123,7 @@ async function walk(root, limit, skip = new Set()) {
 function priorityDirsOf(roots) {
   const out = [];
   for (const root of roots) {
-    let names = [];
+    let names;
     try { names = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); } catch { continue; }
     for (const want of PRIORITY_DIRS) {
       for (const name of names) if (name === want || name.startsWith(`${want} -`)) out.push(path.join(root, name));

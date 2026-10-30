@@ -14,6 +14,10 @@ export default [
       sourceType: 'module',
       globals: globals.node,
     },
+    rules: {
+      // `{ secret: _s, ...rest }` bỏ trường khỏi bản sao — có chủ ý; tham số / biến tên `_x` = cố ý không dùng.
+      'no-unused-vars': ['error', { ignoreRestSiblings: true, varsIgnorePattern: '^_', argsIgnorePattern: '^_', caughtErrors: 'none' }],
+    },
   },
   prettier,
 ];

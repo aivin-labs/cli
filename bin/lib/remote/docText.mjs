@@ -103,7 +103,7 @@ export async function extractDocText(abs, size, maxChars = 600) {
 }
 
 function clean(text, maxChars) {
-  const t = String(text || '').replace(/\u0000/g, '').replace(/\s+/g, ' ').trim();
+  const t = String(text || '').replaceAll(String.fromCharCode(0), '').replace(/\s+/g, ' ').trim();
   return wellFormed(t.length > maxChars ? `${t.slice(0, maxChars)}…` : t);
 }
 

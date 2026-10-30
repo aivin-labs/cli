@@ -61,7 +61,7 @@ export function createIdemLog(file, { now = () => Date.now() } = {}) {
 
   /** Đọc sổ cũ: trả các khoá còn hạn (đã xong / bị ngắt), viết gọn tệp. */
   function load() {
-    let raw = '';
+    let raw;
     try { raw = fs.readFileSync(file, 'utf8'); } catch { return entries; }
     const t = now();
     for (const line of raw.split('\n')) {
