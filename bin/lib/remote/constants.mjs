@@ -193,6 +193,10 @@ export const DeviceErrorCode = Object.freeze({
   GUI_PASSWORD_FIELD: 'GUI_PASSWORD_FIELD',
   /** Màn hình đang khoá / hộp bảo mật đang hiện. */
   GUI_LOCKED: 'GUI_LOCKED',
+  /** `gui.wait_for` hết giờ mà giao diện chưa tới trạng thái chờ. */
+  GUI_WAIT_TIMEOUT: 'GUI_WAIT_TIMEOUT',
+  /** OCR của Windows không dùng được (không có gói ngôn ngữ OCR / WinRT lỗi) — observe vẫn trả cây + ảnh. */
+  GUI_OCR_UNAVAILABLE: 'GUI_OCR_UNAVAILABLE',
 });
 
 export const MemoryKind = Object.freeze({

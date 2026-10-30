@@ -11,6 +11,10 @@ import { createWindowsHost } from './windowsHost.mjs';
  * nghèo; thao tác theo "pattern" (Invoke / Value / Toggle…) trước, chuột / phím giả lập sau. Mọi thao tác ghi trả bằng chứng đọc lại
  * sau khi làm (giá trị mới, tiêu đề cửa sổ, phần tử còn / mất).
  *
+ * Đợt 2 (30/10/2026): cây nghèo → host đọc chữ trên ảnh bằng OCR có sẵn của Windows (chạy trên máy), mỗi cụm chữ thành node `<snap>.t<k>`
+ * click / gõ được — BE tìm "nút Ghi sổ" theo chữ thay vì nhờ VLM đoán toạ độ; `gui.wait_for` chờ phần tử / cửa sổ hiện ra hoặc mất đi
+ * thay cho observe lặp.
+ *
  * Sàn cứng trên máy (BE không đổi được): không gõ vào ô mật khẩu (host chặn), không điều khiển ứng dụng nhạy cảm (`BLOCKED_PROCESSES`),
  * máy chỉ mở thư mục (không toàn quyền) thì không điều khiển cửa sổ dòng lệnh / registry — không lách vùng thư mục bằng cách gõ lệnh
  * vào terminal; người dùng đang dùng chuột / phím → dừng (`GUI_USER_ACTIVE`).
@@ -31,6 +35,7 @@ const EXECUTABLE_EXT = /\.(exe|com|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|msi|m
 const OBSERVE_MAX_NODES = 300;
 const APPS_CACHE_MS = 10 * 60_000;
 const OPEN_WAIT_MS = 10_000;
+const WAIT_MAX_MS = 60_000;
 /** Báo người dùng "AI đang điều khiển" một lần mỗi quãng này (lần thao tác ghi đầu tiên). */
 const NOTIFY_EVERY_MS = 5 * 60_000;
 
@@ -132,6 +137,7 @@ export function createGuiController({
       max_nodes: Math.min(Number(args.max_nodes) || OBSERVE_MAX_NODES, 1500),
       include_image: !!args.include_image,
       image_when_poor: args.image_when_poor !== false,
+      ocr: typeof args.ocr === 'boolean' ? args.ocr : undefined,
       image_max_width: Number(args.image_max_width) || 1366,
       image_quality: Number(args.image_quality) || 70,
     }, ctx);
@@ -139,6 +145,17 @@ export function createGuiController({
     snapshotWindows.set(String(res.snapshot), res.window);
     if (snapshotWindows.size > 20) snapshotWindows.delete(snapshotWindows.keys().next().value);
     return res;
+  }
+
+  /** Chờ phần tử / cửa sổ hiện ra hoặc mất đi — chỉ đọc. Chờ trong một cửa sổ thì cửa sổ đó phải được phép điều khiển. */
+  async function waitFor(args, ctx) {
+    const elementWait = !!(args.name || args.automation_id);
+    if (elementWait || args.window) assertWindowAllowed(await windowInfoOf(args, ctx), { fullAccess });
+    return host.call('wait_for', {
+      ...(elementWait || args.window ? target(args) : {}),
+      until: args.until, name: args.name, automation_id: args.automation_id, role: args.role, title_contains: args.title_contains,
+      timeout_ms: Math.min(Number(args.timeout_ms) || 10_000, WAIT_MAX_MS),
+    }, ctx);
   }
 
   async function focus(args, ctx) {
@@ -217,7 +234,7 @@ export function createGuiController({
     return { opened: app.name, window: win, hint: win ? undefined : 'App started but no new window yet — call gui.windows in a moment' };
   }
 
-  return { windows, observe, focus, act, openApp, close: () => host.close() };
+  return { windows, observe, waitFor, focus, act, openApp, close: () => host.close() };
 }
 
 /** Công cụ GUI cho danh mục của Planner. */
@@ -231,13 +248,23 @@ export function buildGuiTools(gui) {
       description: 'List open desktop windows: title, app process, handle, position, which is focused/minimized. blocked = the AI may not control it.',
       input_schema: schema({ include_dialogs: bool('also list owned dialogs') }) },
     { name: 'gui.observe', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.observe(a, c),
-      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached automatically (or set include_image). Ids are only valid until the next observe of that window.',
-      input_schema: schema({ window: target.window, include_image: bool('attach a screenshot even when the tree is good'), max_nodes: num('default 300') }) },
+      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window.',
+      input_schema: schema({
+        window: target.window, include_image: bool('attach a screenshot even when the tree is good'), max_nodes: num('default 300'),
+        ocr: bool('read the text on the window even when the tree is good (default: only when poor)'),
+      }) },
+    { name: 'gui.wait_for', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.waitFor(a, c),
+      description: 'Wait until the UI reaches a state instead of observing again and again: an element (name contains / automation_id, optional role) appears or is gone in a window, or a window whose title contains some text appears or is gone (no window = any window). Returns met + waited_ms + the match; GUI_WAIT_TIMEOUT if it did not happen in time.',
+      input_schema: schema({
+        until: str('appears (default) | gone'), window: target.window, name: str('element name contains this text (case-insensitive)'),
+        automation_id: str('element AutomationId (exact)'), role: str('element role, e.g. button, menuitem, edit, window'),
+        title_contains: str('wait on a window title instead of an element'), timeout_ms: num('default 10000, max 60000'),
+      }) },
     { name: 'gui.focus', group: ToolGroup.GUI, handler: (a, c) => gui.focus(a, c),
       description: 'Bring a window to the front (restores it if minimized).',
       input_schema: schema({ window: target.window }, ['window']) },
     { name: 'gui.act', group: ToolGroup.GUI, handler: (a, c) => gui.act(a, c),
-      description: 'Do one action on an element (node_id) or at a point of the last screenshot: click, double_click, right_click, set_value (replace a field\'s text), type (keystrokes into the focused element), key (shortcut like "ctrl+s", "alt+f4", "enter"), scroll, select (option of a list/combo), toggle, expand, collapse, drag. Uses accessibility actions first (works even when the window is behind), real mouse/keyboard otherwise. Returns evidence: the element\'s new value/state, window title change, focused element. Stops with GUI_USER_ACTIVE if the person is using the mouse/keyboard.',
+      description: 'Do one action on an element (node_id) or at a point of the last screenshot: click, double_click, right_click, set_value (replace a field\'s text), type (keystrokes into the focused element), key (shortcut like "ctrl+s", "alt+f4", "enter"), scroll, select (option of a list/combo), toggle, expand, collapse, drag. Uses accessibility actions first (works even when the window is behind), real mouse/keyboard otherwise. Returns evidence: the element\'s new value/state, window title change, focused element. OCR text nodes ("4.t2") take click / double_click / right_click, or set_value / type (clicks there, then types). Stops with GUI_USER_ACTIVE if the person is using the mouse/keyboard.',
       input_schema: schema({
         action: str(Object.values(GuiAction).join(' | ')), ...target, text: str('text for set_value / type'), keys: str('for key: e.g. "ctrl+s", several separated by spaces'),
         option: str('for select: the option name'), state: str('for toggle: on | off'), direction: str('for scroll: up | down | left | right'), amount: num('scroll steps, default 3'),

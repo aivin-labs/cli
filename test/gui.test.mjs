@@ -134,3 +134,38 @@ test('không nói cửa sổ: host được báo tiến trình linh vật + cử
   assert.deepEqual(args('window_info').at(-1), { window: 'notepad' });
   assert.deepEqual(args('focus')[0], { window: 'notepad' });
 });
+
+test('wait_for: chờ phần tử cần cửa sổ được phép + chuyển đủ tham số; chờ tiêu đề không nói cửa sổ thì không hỏi window_info', async () => {
+  const host = fakeHost({ window_info: NOTEPAD, wait_for: (a) => ({ met: true, until: a.until || 'appears', waited_ms: 5 }) });
+  const gui = createGuiController({ host, notify: () => {} });
+  const res = await gui.waitFor({ window: 'notepad', name: 'Save', role: 'button', until: 'gone', timeout_ms: 999_999 }, {});
+  assert.equal(res.met, true);
+  const sent = host.calls.find((c) => c.op === 'wait_for').args;
+  assert.deepEqual({ window: sent.window, name: sent.name, role: sent.role, until: sent.until, timeout_ms: sent.timeout_ms },
+    { window: 'notepad', name: 'Save', role: 'button', until: 'gone', timeout_ms: 60_000 });
+
+  host.calls.length = 0;
+  await gui.waitFor({ title_contains: 'Save As' }, {});
+  assert.equal(host.calls.some((c) => c.op === 'window_info'), false);
+  assert.equal(host.calls[0].args.window, undefined);
+
+  const blocked = fakeHost({ window_info: { ...NOTEPAD, process: 'KeePass' }, wait_for: { met: true } });
+  const g2 = createGuiController({ host: blocked, notify: () => {} });
+  await assert.rejects(g2.waitFor({ name: 'Unlock' }, {}), (e) => e.code === 'GUI_BLOCKED_APP');
+  assert.equal(blocked.calls.some((c) => c.op === 'wait_for'), false);
+});
+
+test('node chữ OCR ("<snap>.t<k>"): act kiểm ứng dụng theo cửa sổ của lần observe đó; ocr chỉ gửi khi nói rõ', async () => {
+  const host = fakeHost({
+    observe: { snapshot: 9, window: NOTEPAD, nodes: [{ id: '9.t0', role: 'text', name: 'Lưu', source: 'ocr' }], tree_quality: 'poor' },
+    act: (a) => ({ action: a.action, method: 'mouse' }),
+  });
+  const gui = createGuiController({ host, notify: () => {} });
+  await gui.observe({}, {});
+  assert.equal(host.calls[0].args.ocr, undefined);
+  await gui.observe({ ocr: true }, {});
+  assert.equal(host.calls[1].args.ocr, true);
+  const res = await gui.act({ action: 'click', node_id: '9.t0' }, {});
+  assert.equal(res.method, 'mouse');
+  await assert.rejects(gui.act({ action: 'click', node_id: '8.t0' }, {}), (e) => e.code === 'GUI_STALE_NODE');
+});

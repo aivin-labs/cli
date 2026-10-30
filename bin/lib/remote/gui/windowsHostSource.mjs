@@ -87,6 +87,8 @@ namespace AivinGui {
     /** Ảnh chụp của lần observe: node_id = "<snap>.<idx>" → phần tử. Giữ vài lần gần nhất, cũ hơn → GUI_STALE_NODE. */
     static readonly Dictionary<int, Dictionary<int, AutomationElement>> Snapshots = new Dictionary<int, Dictionary<int, AutomationElement>>();
     static readonly Dictionary<int, IntPtr> SnapshotWindow = new Dictionary<int, IntPtr>();
+    /** Chữ OCR của lần observe: node_id = "<snap>.t<k>" → khung chữ (pixel, so với góc trái trên cửa sổ). */
+    static readonly Dictionary<int, List<System.Windows.Rect>> OcrSnapshots = new Dictionary<int, List<System.Windows.Rect>>();
     static int snapSeq = 0;
     const int KEEP_SNAPSHOTS = 6;
     /** Mốc lần cuối chính tiến trình này phát input (chuột / phím) — để phân biệt với input của người dùng. */
@@ -160,6 +162,7 @@ namespace AivinGui {
           return new Dictionary<string, object> { { "sent_to_back", true }, { "focus_returned_to_user", restored } };
         }
         case "act": return Act(a);
+        case "wait_for": return WaitFor(a);
         case "office": return Office.Run(a);
         case "idle": return new Dictionary<string, object> { { "idle_ms", IdleMs() }, { "user_idle_ms", UserIdleMs() } };
         default: throw new GuiError("INVALID_ARGS", "Unknown op: " + op);
@@ -460,7 +463,7 @@ namespace AivinGui {
       while (Snapshots.Count > KEEP_SNAPSHOTS) {
         int oldest = int.MaxValue;
         foreach (var k in Snapshots.Keys) if (k < oldest) oldest = k;
-        Snapshots.Remove(oldest); SnapshotWindow.Remove(oldest);
+        Snapshots.Remove(oldest); SnapshotWindow.Remove(oldest); OcrSnapshots.Remove(oldest);
       }
       // Cây nghèo: ít phần tử có tên / thao tác được (ứng dụng vẽ tay, canvas, Electron tắt trợ năng) → cần ảnh để định vị.
       string quality = (interactive >= 3 && named >= 5) ? "good" : "poor";
@@ -470,42 +473,79 @@ namespace AivinGui {
         { "dpi", (long)SafeDpi(h) },
       };
       bool wantImage = Bool(a, "include_image", false) || (quality == "poor" && Bool(a, "image_when_poor", true));
-      if (wantImage) {
+      // Cây nghèo → đọc chữ trên ảnh (OCR của Windows, chạy trên máy): mỗi cụm chữ thành một node "text" có toạ độ, thang quyết định đích
+      // ở BE tìm được "nút Lưu" theo chữ như với phần tử thật thay vì đoán toạ độ trên ảnh.
+      bool wantOcr = Bool(a, "ocr", quality == "poor");
+      if (wantImage || wantOcr) {
         var sw2 = Stopwatch.StartNew();
-        res["image"] = CaptureWindow(h, Int(a, "image_max_width", 1366), Int(a, "image_quality", 70));
-        res["image_ms"] = sw2.ElapsedMilliseconds;
+        using (var bmp = GrabWindow(h)) {
+          if (wantImage) {
+            res["image"] = EncodeImage(bmp, Int(a, "image_max_width", 1366), Int(a, "image_quality", 70));
+            res["image_ms"] = sw2.ElapsedMilliseconds;
+          }
+          if (wantOcr) AddOcrNodes(res, nodes, snap, bmp, Str(a, "ocr_lang"), Int(a, "ocr_max_nodes", 200));
+        }
       }
       return res;
     }
 
     static uint SafeDpi(IntPtr h) { try { return Native.GetDpiForWindow(h); } catch { return 96; } }
 
-    static Dictionary<string, object> CaptureWindow(IntPtr h, int maxWidth, int quality) {
+    static Bitmap GrabWindow(IntPtr h) {
       Native.RECT r; Native.GetWindowRect(h, out r);
       int w = Math.Max(1, r.Right - r.Left), ht = Math.Max(1, r.Bottom - r.Top);
-      using (var bmp = new Bitmap(w, ht, PixelFormat.Format32bppArgb)) {
-        bool ok = false;
-        using (var g = Graphics.FromImage(bmp)) {
-          IntPtr hdc = g.GetHdc();
-          try { ok = Native.PrintWindow(h, hdc, 2); } finally { g.ReleaseHdc(hdc); }
-          // PrintWindow trả ảnh đen với vài ứng dụng GPU → chụp vùng màn hình (cửa sổ phải đang hiện trên cùng).
-          if (!ok || IsMostlyBlack(bmp)) g.CopyFromScreen(r.Left, r.Top, 0, 0, new Size(w, ht));
+      var bmp = new Bitmap(w, ht, PixelFormat.Format32bppArgb);
+      bool ok = false;
+      using (var g = Graphics.FromImage(bmp)) {
+        IntPtr hdc = g.GetHdc();
+        try { ok = Native.PrintWindow(h, hdc, 2); } finally { g.ReleaseHdc(hdc); }
+        // PrintWindow trả ảnh đen với vài ứng dụng GPU → chụp vùng màn hình (cửa sổ phải đang hiện trên cùng).
+        if (!ok || IsMostlyBlack(bmp)) g.CopyFromScreen(r.Left, r.Top, 0, 0, new Size(w, ht));
+      }
+      return bmp;
+    }
+
+    static Dictionary<string, object> EncodeImage(Bitmap bmp, int maxWidth, int quality) {
+      int w = bmp.Width, ht = bmp.Height;
+      double scale = w > maxWidth ? (double)maxWidth / w : 1.0;
+      int ow = Math.Max(1, (int)(w * scale)), oh = Math.Max(1, (int)(ht * scale));
+      using (var outBmp = new Bitmap(ow, oh, PixelFormat.Format24bppRgb)) {
+        using (var g2 = Graphics.FromImage(outBmp)) {
+          g2.InterpolationMode = InterpolationMode.HighQualityBicubic;
+          g2.DrawImage(bmp, 0, 0, ow, oh);
         }
-        double scale = w > maxWidth ? (double)maxWidth / w : 1.0;
-        int ow = Math.Max(1, (int)(w * scale)), oh = Math.Max(1, (int)(ht * scale));
-        using (var outBmp = new Bitmap(ow, oh, PixelFormat.Format24bppRgb)) {
-          using (var g2 = Graphics.FromImage(outBmp)) {
-            g2.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g2.DrawImage(bmp, 0, 0, ow, oh);
-          }
-          var codec = Array.Find(ImageCodecInfo.GetImageEncoders(), c => c.MimeType == "image/jpeg");
-          var ep = new EncoderParameters(1);
-          ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)Math.Max(30, Math.Min(quality, 95)));
-          using (var ms = new MemoryStream()) {
-            outBmp.Save(ms, codec, ep);
-            return new Dictionary<string, object> { { "mime", "image/jpeg" }, { "base64", Convert.ToBase64String(ms.ToArray()) }, { "width", ow }, { "height", oh }, { "scale", scale } };
-          }
+        var codec = Array.Find(ImageCodecInfo.GetImageEncoders(), c => c.MimeType == "image/jpeg");
+        var ep = new EncoderParameters(1);
+        ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)Math.Max(30, Math.Min(quality, 95)));
+        using (var ms = new MemoryStream()) {
+          outBmp.Save(ms, codec, ep);
+          return new Dictionary<string, object> { { "mime", "image/jpeg" }, { "base64", Convert.ToBase64String(ms.ToArray()) }, { "width", ow }, { "height", oh }, { "scale", scale } };
         }
+      }
+    }
+
+    static void AddOcrNodes(Dictionary<string, object> res, List<object> nodes, int snap, Bitmap bmp, string lang, int max) {
+      var sw = Stopwatch.StartNew();
+      try {
+        string used;
+        var segments = Ocr.Read(bmp, lang, out used);
+        var rects = new List<System.Windows.Rect>();
+        foreach (var s in segments) {
+          if (rects.Count >= Math.Max(0, max)) break;
+          var r = s.Rect;
+          nodes.Add(new Dictionary<string, object> {
+            { "id", snap + ".t" + rects.Count }, { "role", "text" }, { "name", s.Text }, { "source", "ocr" },
+            { "rect", new Dictionary<string, object> { { "x", (int)r.X }, { "y", (int)r.Y }, { "w", (int)r.Width }, { "h", (int)r.Height } } },
+          });
+          rects.Add(r);
+        }
+        OcrSnapshots[snap] = rects;
+        var info = new Dictionary<string, object> { { "lang", used }, { "count", rects.Count }, { "ms", sw.ElapsedMilliseconds } };
+        if (!used.StartsWith("vi", StringComparison.OrdinalIgnoreCase)) info["hint"] = "No Vietnamese OCR on this PC — Vietnamese text loses its accents. Settings → Time & language → Language → add Vietnamese (Optical character recognition)";
+        res["ocr"] = info;
+        res["node_count"] = nodes.Count;
+      } catch (Exception e) {
+        res["ocr"] = new Dictionary<string, object> { { "error", (e is GuiError ? e.Message : e.GetType().Name + ": " + e.Message) } };
       }
     }
 
@@ -578,7 +618,16 @@ namespace AivinGui {
       if (!InteractiveDesktop()) throw new GuiError("GUI_LOCKED", "The screen is locked or a secure prompt is showing");
       AutomationElement el = null;
       IntPtr window = IntPtr.Zero;
-      if (!string.IsNullOrEmpty(nodeId)) el = NodeOf(nodeId, out window);
+      ocrPoint = null;
+      if (!string.IsNullOrEmpty(nodeId) && nodeId.Contains(".t")) {
+        ocrPoint = OcrPointOf(nodeId, out window);
+        if (action != "click" && action != "double_click" && action != "right_click" && action != "set_value" && action != "type") {
+          throw new GuiError("INVALID_ARGS", "Text read from the screenshot (OCR) supports click / double_click / right_click / set_value / type only");
+        }
+        // Chữ OCR không phải ô nhập: gõ vào nó = click vào chỗ đó trước rồi gõ bằng bàn phím.
+        if (action == "set_value" || action == "type") { MouseAt(null, window, a, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1); method = "mouse"; }
+      }
+      else if (!string.IsNullOrEmpty(nodeId)) el = NodeOf(nodeId, out window);
       else window = ResolveWindow(a);
       string beforeTitle = window == IntPtr.Zero ? "" : WindowText(window);
       if (el != null) {
@@ -801,8 +850,96 @@ namespace AivinGui {
       return new System.Windows.Point(sx, sy);
     }
 
+    /**
+     * Chờ giao diện tới trạng thái mong đợi thay vì Planner observe lặp: phần tử (tên chứa chữ / AutomationId, lọc vai trò) hiện ra hoặc mất
+     * đi trong cửa sổ, hoặc cửa sổ có tiêu đề chứa chữ hiện ra / đóng (không nói cửa sổ = tìm trong mọi cửa sổ). Hỏi lại mỗi ~250 ms.
+     */
+    static object WaitFor(Dictionary<string, object> a) {
+      string until = (Str(a, "until") ?? "appears").ToLowerInvariant();
+      bool gone = until == "gone" || until == "disappears";
+      string name = Str(a, "name"), aid = Str(a, "automation_id"), role = Str(a, "role"), title = Str(a, "title_contains");
+      bool windowLevel = string.IsNullOrEmpty(name) && string.IsNullOrEmpty(aid);
+      if (windowLevel && string.IsNullOrEmpty(title)) throw new GuiError("INVALID_ARGS", "Give name / automation_id (an element) or title_contains (a window)");
+      int timeout = Math.Max(200, Math.Min(Int(a, "timeout_ms", 10000), 60000));
+      IntPtr h = (!windowLevel || !string.IsNullOrEmpty(Str(a, "window"))) ? ResolveWindow(a) : IntPtr.Zero;
+      if (!windowLevel && h == IntPtr.Zero) throw new GuiError("NOT_FOUND", "No window is focused");
+      var sw = Stopwatch.StartNew();
+      while (true) {
+        bool alive = h == IntPtr.Zero || Native.IsWindow(h);
+        Dictionary<string, object> match = null;
+        if (windowLevel) {
+          if (h != IntPtr.Zero) {
+            if (alive && WindowText(h).IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0) match = WindowInfo(h, Native.GetForegroundWindow());
+          } else {
+            foreach (Dictionary<string, object> info in ListWindows(false)) {
+              if (Convert.ToString(info["title"]).IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0) { match = info; break; }
+            }
+          }
+        } else if (alive) {
+          match = FindElement(h, name, aid, role);
+        }
+        if (gone ? match == null : match != null) {
+          var res = new Dictionary<string, object> { { "met", true }, { "until", gone ? "gone" : "appears" }, { "waited_ms", sw.ElapsedMilliseconds } };
+          if (match != null) res["match"] = match;
+          if (!alive) res["window_closed"] = true;
+          return res;
+        }
+        if (!alive) throw new GuiError("GUI_WINDOW_GONE", "The window closed while waiting for the element to appear");
+        if (sw.ElapsedMilliseconds >= timeout) {
+          throw new GuiError("GUI_WAIT_TIMEOUT", "Still " + (gone ? "present" : "not there") + " after " + sw.ElapsedMilliseconds + " ms — observe to see what the window shows instead");
+        }
+        Thread.Sleep(250);
+      }
+    }
+
+    /** Phần tử đầu tiên khớp (AutomationId trùng hẳn, hoặc tên chứa chữ — không phân biệt hoa thường), có lọc vai trò. */
+    static Dictionary<string, object> FindElement(IntPtr h, string name, string aid, string role) {
+      AutomationElement root;
+      try { root = AutomationElement.FromHandle(h); } catch { return null; }
+      var cache = new CacheRequest();
+      cache.Add(AutomationElement.NameProperty); cache.Add(AutomationElement.ControlTypeProperty); cache.Add(AutomationElement.AutomationIdProperty);
+      cache.Add(AutomationElement.IsOffscreenProperty);
+      cache.AutomationElementMode = AutomationElementMode.None;
+      Condition cond = string.IsNullOrEmpty(aid) ? Condition.TrueCondition : new PropertyCondition(AutomationElement.AutomationIdProperty, aid);
+      AutomationElementCollection all;
+      try { using (cache.Activate()) { all = root.FindAll(TreeScope.Descendants, cond); } } catch (ElementNotAvailableException) { return null; }
+      foreach (AutomationElement e in all) {
+        string n = Cached(e, AutomationElement.NameProperty) as string ?? "";
+        var ct = Cached(e, AutomationElement.ControlTypeProperty) as ControlType;
+        string r = ct == null ? "" : ct.ProgrammaticName.Replace("ControlType.", "").ToLowerInvariant();
+        if (!string.IsNullOrEmpty(name) && n.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0) continue;
+        if (!string.IsNullOrEmpty(role) && !string.Equals(r, role, StringComparison.OrdinalIgnoreCase)) continue;
+        if (true.Equals(Cached(e, AutomationElement.IsOffscreenProperty)) && string.IsNullOrEmpty(aid)) continue;
+        var m = new Dictionary<string, object> { { "role", r }, { "name", Clip(n, 120) } };
+        string id = Cached(e, AutomationElement.AutomationIdProperty) as string;
+        if (!string.IsNullOrEmpty(id)) m["automation_id"] = id;
+        return m;
+      }
+      return null;
+    }
+
+    /** Điểm màn hình của node chữ OCR của thao tác đang chạy (null = không phải node OCR). */
+    static System.Windows.Point? ocrPoint = null;
+
+    static System.Windows.Point OcrPointOf(string nodeId, out IntPtr window) {
+      window = IntPtr.Zero;
+      int dot = nodeId.IndexOf(".t");
+      int snap, idx;
+      if (!int.TryParse(nodeId.Substring(0, dot), out snap) || !int.TryParse(nodeId.Substring(dot + 2), out idx)) throw new GuiError("INVALID_ARGS", "Bad node id: " + nodeId);
+      List<System.Windows.Rect> rects;
+      if (!OcrSnapshots.TryGetValue(snap, out rects)) throw new GuiError("GUI_STALE_NODE", "Node " + nodeId + " is from an old observation — observe again");
+      if (idx < 0 || idx >= rects.Count) throw new GuiError("NOT_FOUND", "No node " + nodeId);
+      window = SnapshotWindow[snap];
+      if (!Native.IsWindow(window)) throw new GuiError("GUI_STALE_NODE", "The window of " + nodeId + " is closed — observe again");
+      // Khung chữ tính theo góc cửa sổ lúc observe → cộng vị trí cửa sổ HIỆN TẠI (người dùng có thể đã kéo cửa sổ đi).
+      Native.RECT wr; Native.GetWindowRect(window, out wr);
+      var r = rects[idx];
+      return new System.Windows.Point(wr.Left + r.X + r.Width / 2, wr.Top + r.Y + r.Height / 2);
+    }
+
     static System.Windows.Point PointFor(AutomationElement el, IntPtr window, Dictionary<string, object> a) {
       if (el != null) return CenterOf(el);
+      if (ocrPoint.HasValue) return ocrPoint.Value;
       var pt = Get(a, "point") as Dictionary<string, object>;
       if (pt == null) throw new GuiError("INVALID_ARGS", "Give node_id or point {x,y}");
       return WindowPoint(window, a, pt);
@@ -886,6 +1023,110 @@ namespace AivinGui {
         Send(list.ToArray());
         Thread.Sleep(40);
       }
+    }
+  }
+
+  /** Một cụm chữ OCR liền nhau trên cùng dòng (một nút / nhãn), khung theo pixel của ảnh. */
+  public class OcrSegment {
+    public string Text;
+    public System.Windows.Rect Rect;
+  }
+
+  /**
+   * OCR có sẵn của Windows 10+ (Windows.Media.Ocr, chạy trên máy, không gửi ảnh đi đâu). Gọi WinRT qua reflection — Add-Type (CodeDom,
+   * C# 5) không tham chiếu được .winmd. Lần đầu ~0,1 s, các lần sau ~15 ms. Ưu tiên tiếng Việt nếu máy có gói OCR tiếng Việt, rồi ngôn
+   * ngữ hồ sơ người dùng.
+   */
+  public static class Ocr {
+    const string WRT = "System.Runtime.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089";
+    static readonly Dictionary<string, object> Engines = new Dictionary<string, object>();
+    static MethodInfo asTask;
+
+    static Type WinRT(string name, string asm) { return Type.GetType(name + ", " + asm + ", ContentType=WindowsRuntime", true); }
+
+    /** Chờ một IAsyncOperation<T> của WinRT: kiểu T lấy từ kiểu trả về KHAI BÁO (đối tượng COM lúc chạy không lộ interface). */
+    static object Call(MethodInfo mi, object target, params object[] args) {
+      object op = mi.Invoke(target, args);
+      if (asTask == null) {
+        foreach (var m in Type.GetType("System.WindowsRuntimeSystemExtensions, " + WRT, true).GetMethods()) {
+          var ps = m.GetParameters();
+          if (m.Name == "AsTask" && m.IsGenericMethod && ps.Length == 1 && ps[0].ParameterType.GetGenericTypeDefinition().FullName == "Windows.Foundation.IAsyncOperation" + (char)96 + "1") { asTask = m; break; }
+        }
+        if (asTask == null) throw new GuiError("GUI_OCR_UNAVAILABLE", "WinRT async bridge not found");
+      }
+      var task = (System.Threading.Tasks.Task)asTask.MakeGenericMethod(mi.ReturnType.GetGenericArguments()[0]).Invoke(null, new[] { op });
+      if (!task.Wait(15000)) throw new GuiError("GUI_OCR_UNAVAILABLE", "OCR timed out");
+      return task.GetType().GetProperty("Result").GetValue(task, null);
+    }
+
+    static object Engine(string lang, out string used) {
+      var engineT = WinRT("Windows.Media.Ocr.OcrEngine", "Windows.Media");
+      var tries = new List<string>();
+      if (!string.IsNullOrEmpty(lang)) tries.Add(lang);
+      tries.Add("vi");
+      tries.Add("");
+      foreach (var t in tries) {
+        object e;
+        if (Engines.TryGetValue(t, out e) && e != null) { used = Tag(e); return e; }
+        if (t.Length == 0) {
+          e = engineT.GetMethod("TryCreateFromUserProfileLanguages").Invoke(null, null);
+        } else {
+          var langT = WinRT("Windows.Globalization.Language", "Windows.Globalization");
+          object l;
+          try { l = Activator.CreateInstance(langT, t); } catch { continue; }
+          e = engineT.GetMethod("TryCreateFromLanguage").Invoke(null, new[] { l });
+        }
+        Engines[t] = e;
+        if (e != null) { used = Tag(e); return e; }
+      }
+      throw new GuiError("GUI_OCR_UNAVAILABLE", "No OCR language is installed on this PC");
+    }
+
+    static string Tag(object engine) {
+      var l = engine.GetType().GetProperty("RecognizerLanguage").GetValue(engine, null);
+      return Convert.ToString(l.GetType().GetProperty("LanguageTag").GetValue(l, null));
+    }
+
+    static double D(object o, string p) { return Convert.ToDouble(o.GetType().GetProperty(p).GetValue(o, null)); }
+
+    public static List<OcrSegment> Read(Bitmap bmp, string lang, out string used) {
+      try {
+        return ReadInner(bmp, lang, out used);
+      } catch (TargetInvocationException e) {
+        throw new GuiError("GUI_OCR_UNAVAILABLE", "OCR failed: " + (e.InnerException != null ? e.InnerException.Message : e.Message));
+      } catch (AggregateException e) {
+        throw new GuiError("GUI_OCR_UNAVAILABLE", "OCR failed: " + e.InnerException.Message);
+      }
+    }
+
+    static List<OcrSegment> ReadInner(Bitmap bmp, string lang, out string used) {
+      object engine = Engine(lang, out used);
+      var engineT = engine.GetType();
+      byte[] png;
+      using (var ms = new MemoryStream()) { bmp.Save(ms, ImageFormat.Png); png = ms.ToArray(); }
+      var ras = Type.GetType("System.IO.WindowsRuntimeStreamExtensions, " + WRT, true)
+        .GetMethod("AsRandomAccessStream", new[] { typeof(Stream) }).Invoke(null, new object[] { new MemoryStream(png) });
+      var decT = WinRT("Windows.Graphics.Imaging.BitmapDecoder", "Windows.Graphics");
+      var decoder = Call(decT.GetMethod("CreateAsync", new[] { WinRT("Windows.Storage.Streams.IRandomAccessStream", "Windows.Storage") }), null, ras);
+      var soft = Call(decT.GetMethod("GetSoftwareBitmapAsync", Type.EmptyTypes), decoder);
+      var result = Call(WinRT("Windows.Media.Ocr.OcrEngine", "Windows.Media").GetMethod("RecognizeAsync"), engine, soft);
+      var segments = new List<OcrSegment>();
+      foreach (var line in (System.Collections.IEnumerable)result.GetType().GetProperty("Lines").GetValue(result, null)) {
+        // Một dòng OCR hay gộp nhiều nút cạnh nhau ("Save As   Cancel") → tách thành cụm khi khoảng trống giữa hai từ lớn hơn ~1 chiều cao chữ.
+        OcrSegment cur = null;
+        double lastRight = 0;
+        foreach (var w in (System.Collections.IEnumerable)line.GetType().GetProperty("Words").GetValue(line, null)) {
+          var r = w.GetType().GetProperty("BoundingRect").GetValue(w, null);
+          var rect = new System.Windows.Rect(D(r, "X"), D(r, "Y"), D(r, "Width"), D(r, "Height"));
+          string text = Convert.ToString(w.GetType().GetProperty("Text").GetValue(w, null));
+          if (cur != null && rect.X - lastRight > Math.Max(8, Math.Max(rect.Height, cur.Rect.Height))) { segments.Add(cur); cur = null; }
+          if (cur == null) cur = new OcrSegment { Text = text, Rect = rect };
+          else { cur.Text += " " + text; cur.Rect = System.Windows.Rect.Union(cur.Rect, rect); }
+          lastRight = rect.Right;
+        }
+        if (cur != null) segments.Add(cur);
+      }
+      return segments;
     }
   }
 }
