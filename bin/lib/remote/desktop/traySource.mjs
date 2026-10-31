@@ -204,7 +204,7 @@ namespace AivinDesktop {
     Config cfg;
     NotifyIcon tray;
     Icon colorIcon, greyIcon, shownIcon;
-    ToolStripMenuItem status, versionItem, updateItem, open, pause, startup, mascot, quit;
+    ToolStripMenuItem status, updateItem, open, pause, startup, mascot, quit;
     System.Windows.Forms.Timer timer;
     Control invoker;
     EventWaitHandle openEvent, quitEvent;
@@ -236,37 +236,37 @@ namespace AivinDesktop {
       menu.MinimumSize = new Size(256, 0);
       menu.Padding = new Padding(4, 8, 4, 8);
 
+      open = Item("", delegate { OpenAivin(); });
+      open.Font = new Font("Segoe UI", 10.0f, FontStyle.Bold);
+      open.Height = 36;
+
+      mascot = Item(cfg.T("mascot"), delegate { ToggleMascot(); });
+      pause = Item("", delegate { TogglePause(); });
+      startup = Item(cfg.T("startup"), delegate { SetStartup(!StartupEnabled()); Refresh(); });
+      updateItem = Item("", delegate { CheckOrApplyUpdate(); });
+
       status = new ToolStripMenuItem();
       status.Enabled = false;
       status.AutoSize = false;
-      status.Height = 30;
+      status.Height = 24;
       status.TextAlign = ContentAlignment.MiddleLeft;
       status.Padding = new Padding(16, 0, 16, 0);
-      status.Margin = new Padding(4, 2, 4, 0);
-      status.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+      status.Margin = new Padding(4, 0, 4, 2);
+      status.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
 
-      versionItem = new ToolStripMenuItem();
-      versionItem.Enabled = false;
-      versionItem.AutoSize = false;
-      versionItem.Height = 22;
-      versionItem.TextAlign = ContentAlignment.MiddleLeft;
-      versionItem.Padding = new Padding(16, 0, 16, 0);
-      versionItem.Margin = new Padding(4, 0, 4, 4);
-      versionItem.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
-
-      updateItem = Item("", delegate { CheckOrApplyUpdate(); });
-
-      open = Item("", delegate { OpenAivin(); });
-      open.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
-
-      pause = Item("", delegate { TogglePause(); });
-      startup = Item(cfg.T("startup"), delegate { SetStartup(!StartupEnabled()); Refresh(); });
-      mascot = Item(cfg.T("mascot"), delegate { ToggleMascot(); });
       quit = Item(cfg.T("quit"), delegate { Quit(); });
 
       menu.Items.AddRange(new ToolStripItem[] {
-        status, versionItem, updateItem, new ToolStripSeparator(),
-        open, pause, startup, mascot, new ToolStripSeparator(), quit
+        open,
+        new ToolStripSeparator(),
+        mascot,
+        pause,
+        new ToolStripSeparator(),
+        startup,
+        updateItem,
+        status,
+        new ToolStripSeparator(),
+        quit
       });
       menu.Opening += delegate { Refresh(); };
 
@@ -487,7 +487,7 @@ namespace AivinDesktop {
       bool running = Running();
       string state = !paired ? cfg.T(pairing ? "connecting" : "notPaired")
         : !running ? cfg.T("stopped") : paused ? cfg.T("paused") : cfg.T("running");
-      status.Text = state;
+      status.Text = "●  " + state;
       string tip = "Aivin - " + state;
       tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
       Icon want = paired && running && !paused ? colorIcon : greyIcon;
@@ -495,7 +495,7 @@ namespace AivinDesktop {
 
       // Phiên bản hiện tại
       string ver = !string.IsNullOrEmpty(cfg.Version) ? cfg.Version : "1.0.13";
-      versionItem.Text = cfg.T("version").Replace("{version}", "v" + ver.TrimStart('v'));
+      if (!ver.StartsWith("v", StringComparison.OrdinalIgnoreCase)) ver = "v" + ver;
 
       // Đọc update-status.json
       string siteLatest = null;
@@ -512,11 +512,11 @@ namespace AivinDesktop {
         updateItem.Text = cfg.T("updateUpdating");
         updateItem.Enabled = false;
       } else if (!string.IsNullOrEmpty(siteLatest) && !siteLatest.TrimStart('v').Equals(ver.TrimStart('v'), StringComparison.OrdinalIgnoreCase)) {
-        updateItem.Text = cfg.T("updateAvailable").Replace("{version}", siteLatest);
+        updateItem.Text = "★  " + cfg.T("updateAvailable").Replace("{version}", siteLatest);
         updateItem.Font = new Font(updateItem.Font, FontStyle.Bold);
         updateItem.Enabled = true;
       } else {
-        updateItem.Text = cfg.T("updateUpToDate") + " (" + cfg.T("updateCheckNow") + ")";
+        updateItem.Text = cfg.T("updateCheckNow") + " (" + ver + ")";
         updateItem.Font = new Font(updateItem.Font, FontStyle.Regular);
         updateItem.Enabled = true;
       }
@@ -533,7 +533,7 @@ namespace AivinDesktop {
       bool startupOn = StartupEnabled();
       startup.Text = (startupOn ? "✓  " : "    ") + cfg.T("startup");
       bool mascotOn = IsMascotEnabled();
-      mascot.Text = (mascotOn ? "✓  " : "    ") + cfg.T(mascotOn ? "mascotHide" : "mascotShow");
+      mascot.Text = (mascotOn ? "✓  " : "    ") + cfg.T("mascot");
     }
 
     bool IsMascotEnabled() {

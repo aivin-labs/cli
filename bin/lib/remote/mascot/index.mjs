@@ -37,7 +37,7 @@ export const HostCommand = Object.freeze({ STATE: 'state', MAIN: 'main', LOG: 'l
 /** `aivin ui` (terminal khác) chạm tệp này → daemon đang chạy hiện linh vật + mở ô hỏi (mascot/ui.mjs). */
 export const MASCOT_SHOW_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-show');
 export const MASCOT_HIDE_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-hide');
-const SHOW_POLL_MS = 1000;
+const SHOW_POLL_MS = 250;
 const SHOW_REQUEST_GRACE_MS = 30_000;
 
 /** Ghi yêu cầu hiện linh vật cho daemon đang chạy (hoặc sắp chạy). */
@@ -240,6 +240,7 @@ export function createMascot({
   function wake() {
     if (closed) return;
     hiddenUntilWork = false;
+    try { saveMascotSettings({ enabled: true }, settingsFile); } catch {}
     if (dormant || !child) {
       dormant = false;
       restarts = 0;
@@ -252,7 +253,7 @@ export function createMascot({
   }
 
   // Yêu cầu hiện/ẩn linh vật từ khay hệ thống hoặc lệnh `aivin ui`: tệp đánh dấu đổi giờ sửa.
-  let showSeenAt = now() - SHOW_REQUEST_GRACE_MS;
+  let showSeenAt = 0;
   let hideSeenAt = now() - SHOW_REQUEST_GRACE_MS;
   const showWatch = setInterval(() => {
     try {
