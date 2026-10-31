@@ -10,6 +10,8 @@ import {
 } from './sandbox.mjs';
 import { deleteMemoryItems, getMemoryItem, listMemoryItems, putMemoryItems, searchMemory } from './deviceMemory.mjs';
 import { extractDocText, isDocFile } from './docText.mjs';
+import { osFileSearch } from './osSearch.mjs';
+import { tokenize } from './textIndex.mjs';
 import { showOSNotification } from './notify.mjs';
 import { accountEnv, withProcessCap } from './multiUser.mjs';
 import { buildGuiTools } from './gui/index.mjs';
@@ -223,10 +225,52 @@ async function fsList(args, ctx, env) {
   };
 }
 
-function fsFind(args, _ctx, env) {
+const withoutAbs = ({ abs: _abs, ...rest }) => rest;
+
+async function fsFind(args, _ctx, env) {
   if (!env.fileIndex) throw new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, 'File index not ready');
+  const query = requireArg(args.query, 'query');
+  const limit = Math.min(Number(args.limit) || 15, 100);
   // `vector`: BE tự gắn vector bge-m3 của câu hỏi (Planner chỉ viết query) → gộp xếp hạng ngữ nghĩa.
-  return { results: env.fileIndex.search(requireArg(args.query, 'query'), Math.min(Number(args.limit) || 15, 100), args.vector), stats: env.fileIndex.stats() };
+  const local = env.fileIndex.search(query, limit, args.vector);
+  // Chỉ mục cố ý bỏ nhiều thứ (thư mục gộp, kho code, ngoài thư mục nhà) và khớp BẤT KỲ từ nào → thiếu kết quả hoặc kết quả yếu (tốt nhất
+  // không chứa đủ các từ, hay chỉ ra thư mục gộp) thì hỏi thêm bộ tìm của hệ điều hành (khớp ĐỦ mọi từ) — "ảnh chụp màn hình 21/8/2026" ra
+  // đúng `Screenshot 2026-08-21 ….png` trong thư mục gộp thay vì 15 tệp chỉ trùng chữ "2026".
+  const weak = !coversQuery(local[0], query) || local.some((r) => r.type === 'folder');
+  if (env.osSearch === false || (local.length >= limit && !weak)) return { results: local.map(withoutAbs), stats: env.fileIndex.stats() };
+  const seen = new Set(local.map((r) => r.abs));
+  const osSearch = typeof env.osSearch === 'function' ? env.osSearch : osFileSearch;
+  const fromOs = (await osSearch(query, { roots: env.roots, limit }))
+    .filter((r) => !seen.has(r.abs))
+    .map((r) => ({ path: displayPath(env.roots, r.abs), ...(r.size !== undefined ? { size: r.size } : {}), modified: r.modified, source: 'os' }));
+  const results = weak ? [...fromOs, ...local.map(withoutAbs)] : [...local.map(withoutAbs), ...fromOs];
+  return { results: results.slice(0, limit), stats: env.fileIndex.stats() };
+}
+
+/** Kết quả chứa đủ mọi từ của câu hỏi (tên, đường dẫn, đoạn đầu — đã bỏ dấu). */
+function coversQuery(hit, query) {
+  if (!hit) return false;
+  const have = new Set(tokenize(`${hit.abs || hit.path} ${hit.preview || ''} ${hit.note || ''}`));
+  const words = tokenize(query);
+  return words.length > 0 && words.every((w) => have.has(w) || [...have].some((h) => h.startsWith(w)));
+}
+
+/** Thư mục làm việc người dùng chỉ ra (qua chat): lập chỉ mục đầy đủ ngay (kể cả code), theo dõi thay đổi; `remove` để bỏ. */
+async function fsIndexFolder(args, _ctx, env) {
+  if (!env.fileIndex) throw new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, 'File index not ready');
+  const abs = resolveInRoots(env.roots, requireArg(args.path, 'path'));
+  if (args.remove) {
+    const res = await env.fileIndex.removeFolder(abs);
+    return { folder: displayPath(env.roots, abs), removed: true, working_folders: res.folders.map((f) => displayPath(env.roots, f)) };
+  }
+  const stat = await fs.promises.stat(abs).catch(() => null);
+  if (!stat?.isDirectory()) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `Not a folder: ${displayPath(env.roots, abs)}`);
+  const res = await env.fileIndex.addFolder(abs);
+  return {
+    folder: displayPath(env.roots, abs), indexed_items: res.indexed, done: res.done,
+    working_folders: res.folders.map((f) => displayPath(env.roots, f)),
+    ...(res.done ? {} : { note: 'Still indexing in the background - fs.find already returns what is indexed so far.' }),
+  };
 }
 
 const PREVIEW_MAX_PATHS = 10;
@@ -596,7 +640,7 @@ function contextRecall(args, _ctx, env) {
   return {
     memory: memory.search({ query, vector: args.vector, kinds: memoryKinds, limit }),
     procedures: memory.search({ query, vector: args.vector, kinds: [MemoryKind.PROCEDURE], limit: 3 }),
-    files: env.fileIndex ? env.fileIndex.search(query, 10, args.vector) : [],
+    files: env.fileIndex ? env.fileIndex.search(query, 10, args.vector).map(withoutAbs) : [],
     projects: env.projects || [],
   };
 }
@@ -622,8 +666,11 @@ export function buildTools(env) {
         sort: str('name | modified | size'), order: str('asc | desc'),
       }) },
     { name: 'fs.find', group: ToolGroup.FS_READ, read_only: true, handler: fsFind,
-      description: 'Instant search over the on-device file index: file names, path words, identifiers near the top of files and the opening text of documents (docx/xlsx/pptx/txt), ranked by words AND meaning. Describe the file in natural words ("office lease contract 2026"); results include size, modified date and a preview. Use to locate files before reading.',
+      description: 'Instant search over the on-device file index: file names, path words, identifiers near the top of files and the opening text of documents (docx/xlsx/pptx/txt), ranked by words AND meaning. Describe the file in natural words ("office lease contract 2026"); results include size, modified date and a preview. Bulk folders (screenshots, logs), app folders and code projects are one result each (type: folder - open them with fs.list / fs.grep). When the index has too few results, the operating system file search adds more (source: os). Use to locate files before reading.',
       input_schema: schema({ query: str('what the file is about, in natural words'), limit: num('max results, default 15') }, ['query']) },
+    { name: 'fs.index_folder', group: ToolGroup.FS_READ, read_only: true, handler: fsIndexFolder,
+      description: 'Make a folder a working folder: index it fully right now (including the code inside a git project) and keep it updated, so fs.find finds everything in it instantly. Call it when the user says where they work ("my project is in D:/work/shop", "work in this folder"). remove: true stops indexing it.',
+      input_schema: schema({ path: str('folder path'), remove: bool('stop treating it as a working folder') }, ['path']) },
     { name: 'fs.preview', group: ToolGroup.FS_READ, read_only: true, handler: fsPreview,
       description: 'Preview up to 10 files at once: size, modified date and their opening text (also inside docx/xlsx/pptx). Use to tell close candidates apart before choosing one.',
       input_schema: schema({ paths: { type: 'array', items: { type: 'string' }, description: 'file paths' }, maxChars: num('preview length per file, default 800') }, ['paths']) },
@@ -732,7 +779,7 @@ export function buildTools(env) {
   // Clipboard (chữ; Windows thêm ảnh + tệp đã copy) — máy cá nhân có màn hình.
   if (env.clipboard) tools.push(...buildClipboardTools(env.clipboard));
   // Máy tính tổ chức không lập chỉ mục tệp (nhiều người chung một máy) — Planner tìm bằng fs.list / fs.grep trong thư mục của mình.
-  return env.fileIndex ? tools : tools.filter((t) => t.name !== 'fs.find');
+  return env.fileIndex ? tools : tools.filter((t) => t.name !== 'fs.find' && t.name !== 'fs.index_folder');
 }
 
 /** Bảng tra theo tên cho bộ điều phối. */

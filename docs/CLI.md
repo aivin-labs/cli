@@ -1208,6 +1208,26 @@ aivin remote status | test | logs | reindex | enable | disable | reset-id
   (`clipboard.write`). On Windows it can also read images and files copied in Explorer; on macOS (`pbpaste`) and Linux (`wl-paste`,
   `xclip` or `xsel`) only text. Anything a password manager marks private when copying (KeePass, 1Password, Bitwarden…) is never
   read. Windows' own clipboard history skips the same content.
+- **Controlling app windows** (Windows): when a job has no file, command or app API to go through (an accounting or ERP app, a
+  settings dialog, Save As), the agent can read and use app windows like you do.
+  - **How it sees:** it reads the window's accessibility tree, the same list of buttons, fields and menus that screen readers use
+    (`gui.observe`, `gui.find` for big windows). When an app draws its own interface and the tree is nearly empty, it takes a
+    screenshot and reads the text on it with Windows' built-in OCR, on this computer. Install the Vietnamese OCR language pack
+    (Settings → Time & language → Language & region → Vietnamese) for Vietnamese text.
+  - **How it acts:** clicks, fills fields, ticks boxes, picks list items, scrolls, presses shortcuts (`gui.act`), opens installed apps
+    or documents in the allowed folders (`gui.open_app`), and waits for a dialog or button to appear (`gui.wait_for`). It uses the
+    app's accessibility actions first, so most steps work while the window stays behind yours. Only when an app needs the real
+    mouse or keyboard does it bring the window to the front. Windows it opens are sent behind yours.
+  - **You stay in control:** touch the mouse or keyboard and the agent stops before its next real mouse/keyboard step and asks you.
+    The first time it controls a window (then at most every 5 minutes) you get a notification. `aivin remote pause` or the mascot's
+    "Pause AI" stops everything.
+  - **What it never does:** type into password fields, control password managers, UAC prompts, the lock screen or Windows Security,
+    or open programs and scripts by path. Unless the computer was started with `--full-access`, it also leaves terminals,
+    Registry Editor, Task Manager, code editors (VS Code, Cursor, JetBrains…) and agent apps (Claude, ChatGPT…) alone, because
+    typing commands there would get around the allowed folders.
+  - **When it asks first:** paying, deleting for good, signing out, or pressing Send / Post when you did not ask for it to be sent.
+    Other clicks don't ask, unless the agent's own rules say so.
+  - Excel, Word and Outlook go through the apps directly (`office.*`), without clicking. `--no-gui` turns window control off.
 
 ## `aivin ui`
 

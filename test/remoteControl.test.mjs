@@ -163,7 +163,7 @@ test('công cụ: đọc theo dòng, sửa, ghi ngoài gốc bị chặn, chạy
   fs.writeFileSync(path.join(root, 'src', 'AuthService.ts'), 'export class AuthService { login() {} }');
   const fileIndex = remote.createFileIndex([root]);
   await fileIndex.build();
-  const env = { roots: [root], binaries: [], projects: [], fileIndex };
+  const env = { roots: [root], binaries: [], projects: [], fileIndex, osSearch: false };
   const tools = new Map(remote.buildTools(env).map((t) => [t.name, t]));
   const ctx = { signal: new AbortController().signal };
 
@@ -179,7 +179,7 @@ test('công cụ: đọc theo dòng, sửa, ghi ngoài gốc bị chặn, chạy
   assert.equal(exec.exitCode, 0);
   assert.match(exec.stdout, /device-ok/);
 
-  const found = tools.get('fs.find').handler({ query: 'auth service login' }, ctx, env);
+  const found = await tools.get('fs.find').handler({ query: 'auth service login' }, ctx, env);
   assert.ok(found.results[0].path.includes('AuthService.ts'));
   fileIndex.close();
 });

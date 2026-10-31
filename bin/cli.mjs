@@ -94,6 +94,7 @@ import {
   resetDeviceId,
   loadDeviceCredentials,
   pairDevice,
+  pairWithCodeOnly,
   listDevices,
   unpairDevice,
   isRemotePaused,
@@ -107,6 +108,9 @@ import {
   deleteMemoryItems,
   clearDeviceMemory,
   createFileIndex,
+  loadIndexFolders,
+  saveIndexFolders,
+  resolveInRoots,
   indexRootsFor,
   runRemoteMission,
   MemoryKind,
@@ -1174,8 +1178,18 @@ remoteCommand
   .description('Pair (or re-pair) this computer with your account without starting the listener')
   .option('--dir <path>', 'Folder the agent may work in (default: current folder)')
   .option('--name <name>', 'Name shown for this computer (default: hostname)')
+  .option('--code <code>', 'Pair with a one-time code from Aivin (chat box → Browser ▾ → Add this computer) - no `aivin login` needed')
+  .option('--server <url>', 'Aivin server the code belongs to')
+  .option('--full-access', 'Let the agent work anywhere on this computer (with --code)')
   .action(async (options) => {
     try {
+      if (options.code) {
+        // Bộ cài (đã có khay): chỉ ghép — khay mở listener ngay khi thấy máy đã ghép.
+        const { creds, stopped } = await pairWithCodeOnly(options);
+        console.log(chalk.green(`✅ Đã kết nối máy "${creds.name}" với tài khoản Aivin của bạn — quay lại Aivin để chọn máy này.`));
+        if (stopped) console.log(chalk.gray('   Đã dừng phiên nhận việc cũ — Aivin mở lại bằng kết nối mới.'));
+        return;
+      }
       const roots = [path.resolve(options.dir || process.cwd())];
       const creds = await pairDevice({ serverUrl: missionServerUrl(), apiKey: process.env.API_KEY, roots, name: options.name, profile: buildDeviceProfile(roots) });
       console.log(chalk.green(`✅ Đã ghép máy "${creds.name}" (${creds.device_id})`));
@@ -1459,6 +1473,33 @@ remoteCommand
       const stats = await index.build();
       index.close();
       console.log(chalk.green(`✅ Chỉ mục: ${stats.files} tệp (${stats.updated} cập nhật, ${stats.removed} bỏ) trong ${stats.ms} ms`));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('index [action] [folder]')
+  .description('Working folders indexed fully (code too) so agents find everything in them instantly: list (default) | add <folder> | remove <folder>. Agents add one themselves when you tell them in chat where you work')
+  .action((action = 'list', folder) => {
+    try {
+      const creds = loadDeviceCredentials();
+      if (action === 'list') {
+        const folders = loadIndexFolders();
+        if (!folders.length) return console.log(chalk.gray('Chưa có thư mục làm việc nào. Thêm: aivin remote index add <thư mục>'));
+        return folders.forEach((f) => console.log(`📁 ${f}`));
+      }
+      if (!['add', 'remove'].includes(action) || !folder) throw new Error('Dùng: aivin remote index [list | add <thư mục> | remove <thư mục>]');
+      // Chỉ trong thư mục máy cho phép — chỉ mục ngoài đó trả về tệp mà agent không mở được.
+      const abs = creds?.roots?.length ? resolveInRoots(creds.roots, folder) : path.resolve(folder);
+      if (action === 'add') {
+        if (!fs.statSync(abs, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`Không phải thư mục: ${abs}`);
+        saveIndexFolders([...loadIndexFolders(), abs]);
+        console.log(chalk.green(`✅ Đã thêm thư mục làm việc ${abs} — listener đang chạy sẽ lập chỉ mục trong vài giây.`));
+      } else {
+        saveIndexFolders(loadIndexFolders().filter((f) => f !== abs));
+        console.log(chalk.green(`✅ Đã bỏ thư mục làm việc ${abs}`));
+      }
     } catch (error) {
       remoteFail(error);
     }

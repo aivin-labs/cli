@@ -91,10 +91,11 @@ function Install-AivinCli {
         if ($LASTEXITCODE -ne 0 -or -not $installedVersion) { Fail "The $asset build does not start on this machine ($cpu). Please report this to Aivin." }
 
         New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-        # A running copy (still taking jobs) keeps the file locked - move it aside, then copy the new one in.
+        # A running copy (still taking jobs) keeps the file locked - move it aside under a fresh name (a copy moved aside by an earlier
+        # install may still be running and locked too), then copy the new one in. aivin deletes *.trash copies once they are unlocked.
         if (Test-Path $target) {
-            $old = "$target.old"
-            if (Test-Path $old) { Remove-Item $old -Force -ErrorAction SilentlyContinue }
+            Get-ChildItem -Path $installDir -Filter 'aivin.exe*' | Where-Object { $_.Name -match '\.(old|trash)$' } | Remove-Item -Force -ErrorAction SilentlyContinue
+            $old = "$target-$([DateTime]::UtcNow.Ticks).trash"
             try { Move-Item $target $old -Force } catch { Fail 'Could not replace the installed copy. Close the window running aivin and try again.' }
         }
         Copy-Item $exe $target -Force
@@ -127,14 +128,20 @@ function Install-AivinCli {
     }
 
     if ($env:AIVIN_PAIR_CODE) {
-        $argsList = @('remote', 'start', '--code', $env:AIVIN_PAIR_CODE)
+        # With the tray app: only pair here - the tray starts taking work as soon as this computer is paired, so this window can close.
+        # Without it (servers, CI): pair and keep taking work in this window.
+        $argsList = @('remote', $(if ($desktop) { 'pair' } else { 'start' }), '--code', $env:AIVIN_PAIR_CODE)
         if ($env:AIVIN_SERVER) { $argsList += @('--server', $env:AIVIN_SERVER) }
         if ($env:AIVIN_FULL_ACCESS) { $argsList += @('--full-access') }
         elseif ($env:AIVIN_DIR) { $argsList += @('--dir', $env:AIVIN_DIR) }
-        if ($desktop) { Write-Step 'Connecting this computer to Aivin - once connected you can close this window, Aivin keeps running from the system tray.' }
+        if ($desktop) { Write-Step 'Connecting this computer to Aivin ...' }
         else { Write-Step 'Connecting this computer to Aivin - keep this window open so the AI can work here.' }
         Write-Host ''
         & $target @argsList
+        if ($desktop -and $LASTEXITCODE -eq 0) {
+            Write-Host ''
+            Write-Step 'Done - Aivin runs from the system tray and starts with Windows. You can close this window.'
+        }
     } else {
         Write-Host ''
         Write-Host '  Next: create a code in Aivin (chat box -> Browser menu -> Add this computer), then' -ForegroundColor Gray

@@ -62,6 +62,8 @@ test('chỉ mục: quét thư mục người dùng, bỏ AppData; tìm theo nộ
   fs.mkdirSync(path.join(root, 'Documents', 'hd'), { recursive: true });
   fs.mkdirSync(path.join(root, 'AppData', 'Local'), { recursive: true });
   fs.writeFileSync(path.join(root, 'AppData', 'Local', 'hop-dong-cache.txt'), 'hop dong');
+  fs.mkdirSync(path.join(root, '.claude', 'file-history'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.claude', 'file-history', 'hop-dong-ban-sao.txt'), 'hop dong'); // thư mục ẩn: không lập chỉ mục
   fs.writeFileSync(path.join(root, 'Documents', 'hd', 'HD_thue_VP_2026.docx'), zip({ 'word/document.xml': '<w:p><w:t>Văn phòng tầng 5</w:t></w:p>' }));
   fs.writeFileSync(path.join(root, 'Documents', 'bao-gia-thue-xe.txt'), 'bao gia thue xe du lich');
   const index = remote.createFileIndex([root]);
@@ -87,6 +89,42 @@ test('chỉ mục: quét thư mục người dùng, bỏ AppData; tìm theo nộ
   assert.match(hybrid[0].path, /HD_thue_VP_2026\.docx$/);
   assert.ok(hybrid[0].similarity > 0.9);
   index.close();
+});
+
+test('chỉ mục SQLite: chép bản chụp gzip cũ (kèm vector) rồi xoá; quét lại bỏ tệp đã xoá; tiền tố; đổi gốc thì làm lại', async () => {
+  const home = process.env.AIVIN_REMOTE_HOME;
+  const root = sandboxDir();
+  const keep = path.join(root, 'AuthenticationService.ts');
+  const gone = path.join(root, 'old-notes.md');
+  fs.writeFileSync(keep, 'export class AuthenticationService {}');
+  fs.writeFileSync(gone, 'ghi chu cu');
+  const st = fs.statSync(keep);
+  const mtime = Math.floor(st.mtimeMs);
+  const legacy = path.join(home, 'file-index.json.gz');
+  const legacyVectors = path.join(home, 'file-vectors.json.gz');
+  fs.writeFileSync(legacy, zlib.gzipSync(JSON.stringify({ version: 3, roots: [path.resolve(root)], entries: [[keep, mtime, st.size, 'AuthenticationService'], [gone, 1, 10, '']] })));
+  fs.writeFileSync(legacyVectors, zlib.gzipSync(JSON.stringify({ vectors: [[keep, `${mtime}:${st.size}`, q8([1, 0, 0])], [gone, 'stale:0', q8([0, 1, 0])]] })));
+
+  const index = remote.createFileIndex([root]);
+  fs.rmSync(gone);
+  const built = await index.build();
+  assert.equal(built.from_snapshot, 2);
+  assert.equal(built.removed, 1); // có trong bản chụp, không còn trên đĩa
+  assert.equal(built.files, 1);
+  assert.equal(built.updated, 0); // mtime / size khớp bản chụp → không đọc lại
+  assert.ok(!fs.existsSync(legacy) && !fs.existsSync(legacyVectors));
+  assert.ok(fs.existsSync(path.join(home, 'file-index.db')));
+  assert.equal(index.stats().vectors, 1); // vector cũ chuyển sang, không phải tính lại
+  assert.match(index.search('authent')[0].path, /AuthenticationService\.ts$/); // khớp tiền tố
+  assert.equal(index.search('ghi chu').length, 0);
+  index.close();
+
+  const other = sandboxDir();
+  fs.writeFileSync(path.join(other, 'bao-cao.txt'), 'bao cao');
+  const second = remote.createFileIndex([other]);
+  assert.equal((await second.build()).files, 1); // gốc khác → không giữ tệp của gốc cũ
+  assert.equal(second.search('authentication').length, 0);
+  second.close();
 });
 
 test('fs.preview: nhiều tệp một lần, đọc docx, tệp không có báo exists=false', async () => {

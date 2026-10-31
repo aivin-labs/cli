@@ -4,6 +4,7 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { execFileSync, spawn } from 'child_process';
 import { REMOTE_CONFIG_DIR } from '../constants.mjs';
+import { lockHolder } from '../daemonLock.mjs';
 import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
 import { TRAY_CS } from './traySource.mjs';
 import { trayStrings } from './strings.mjs';
@@ -232,6 +233,37 @@ export function isDesktopInstalled() {
  */
 export const TrayLaunch = Object.freeze({ OPEN: 'open', AUTOSTART: 'autostart', INSTALLED: 'installed' });
 
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+function trayRunning() {
+  try {
+    const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq Aivin.exe', '/FI', `USERNAME eq ${os.userInfo().username}`, '/NH'], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+    return /Aivin\.exe/i.test(out);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Khay bản cũ đang chạy (vừa biên dịch bản mới): bảo nó thoát (dừng luôn listener nó giữ) và chờ — không thì bản mới mở lên gặp mutex
+ * một-bản-chạy, thoát im lặng, khay cũ chạy mã cũ tới lần đăng nhập sau.
+ */
+export function quitRunningTray({ exe = launcherExePath(), wait = sleepSync } = {}) {
+  if (!trayRunning()) return false;
+  try { execFileSync(exe, ['--quit'], { stdio: 'ignore', windowsHide: true, timeout: 10_000 }); } catch { /* không chạy */ }
+  for (let i = 0; i < 40 && trayRunning(); i++) wait(250);
+  return true;
+}
+
+/**
+ * Khay vẫn là bản này nhưng aivin vừa được cài lại / nâng bản: listener đang chạy vẫn giữ mã cũ trong bộ nhớ tới lần khởi động máy sau —
+ * dừng nó, khay mở lại bằng tệp mới sau ~2 s.
+ */
+function restartListener() {
+  const pid = lockHolder();
+  if (pid) try { process.kill(pid); } catch { /* vừa tự thoát */ }
+}
+
 export function launchTray({ exe = launcherExePath(), mode = TrayLaunch.OPEN } = {}) {
   const args = mode === TrayLaunch.OPEN ? [] : [`--${mode}`];
   spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
@@ -250,12 +282,14 @@ export function installDesktop({ argv, rollback = null, lang = 'en', autostart =
   fs.rmSync(legacyStartMenuShortcutPath(), { force: true });
   if (built || !fs.existsSync(lnk)) ensureStartMenuShortcut({ exe, lnk, lang });
   if (autostart) registerStartup(exe);
+  if (launch && built) quitRunningTray({ exe });
+  else if (launch) restartListener();
   if (launch) launchTray({ exe, mode: launchMode });
   return { exe, shortcut: lnk, built, autostart: startupState().enabled };
 }
 
 /** Gỡ: đóng khay (dừng daemon nó đang giữ), xoá mục khởi động, lối tắt, Aivin.exe, desktop\. */
-export function uninstallDesktop({ wait = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) } = {}) {
+export function uninstallDesktop({ wait = sleepSync } = {}) {
   const exe = launcherExePath();
   if (fs.existsSync(exe)) {
     try { execFileSync(exe, ['--quit'], { stdio: 'ignore', windowsHide: true, timeout: 10_000 }); } catch { /* không chạy */ }

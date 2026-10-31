@@ -140,7 +140,9 @@ namespace AivinDesktop {
     Process child;
     DateTime childStarted;
     DateTime nextStart = DateTime.MinValue;
-    int delay = 10;
+    // Listener sập: mở lại sau 2 s, rồi gấp đôi (tối đa 5 phút) nếu sập liên tục.
+    const int FirstDelay = 2;
+    int delay = FirstDelay;
     int fast = 0;
     bool pairing = false;
     bool wasPaired;
@@ -203,8 +205,13 @@ namespace AivinDesktop {
       try { invoker.BeginInvoke(action); } catch { }
     }
 
+    // Windows 10+ lấy icon khay lúc gửi làm logo của thông báo → tạm dùng icon màu để thông báo không bị xám, gửi xong trả lại icon trạng thái.
     void Balloon(string text, ToolTipIcon icon) {
-      try { tray.ShowBalloonTip(6000, "AIVIN Bot CLI", text, icon); } catch { }
+      try {
+        tray.Icon = colorIcon;
+        tray.ShowBalloonTip(6000, "AIVIN Bot CLI", text, icon);
+      } catch { }
+      try { tray.Icon = shownIcon; } catch { }
     }
 
     // --- Trình giữ chạy --------------------------------------------------------------------------------------------------------------
@@ -271,10 +278,17 @@ namespace AivinDesktop {
         return;
       }
       if (rc != 0 && rc != RestartCode && RollBack(secs)) rc = RestartCode;
-      // 0 = dừng có chủ đích (thu hồi, đã có cửa sổ khác nhận việc) → chỉ chạy lại khi vẫn còn ghép máy và không ai giữ khoá.
-      if (rc == 0) { nextStart = DateTime.Now.AddSeconds(60); return; }
+      // 0 = dừng có chủ đích (thu hồi, ghép lại, cửa sổ khác nhận việc) → Tick chỉ chạy lại khi vẫn còn ghép máy và không ai giữ khoá:
+      // chờ ngắn để máy vừa ghép lại / cửa sổ cài vừa đóng có người nhận việc ngay. Thoát 0 liền nhau (hai máy dùng chung token đẩy nhau)
+      // thì giãn dần như khi sập.
+      if (rc == 0) {
+        if (secs < 30) { Backoff(); return; }
+        delay = FirstDelay;
+        nextStart = DateTime.Now.AddSeconds(FirstDelay);
+        return;
+      }
       if (rc == RestartCode) { nextStart = DateTime.Now.AddSeconds(1); return; }
-      if (secs > 300) delay = 10;
+      if (secs > 300) delay = FirstDelay;
       Backoff();
     }
 
@@ -374,7 +388,7 @@ namespace AivinDesktop {
       } catch { }
       if (child == null && LockHolder() == 0) {
         nextStart = DateTime.MinValue;
-        delay = 10;
+        delay = FirstDelay;
         Tick();
       }
     }

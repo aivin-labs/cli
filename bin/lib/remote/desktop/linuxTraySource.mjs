@@ -17,6 +17,8 @@ import time
 
 HOME = @@HOME@@
 CREDS = os.path.join(HOME, 'device-credentials.json')
+# Listener sập: mở lại sau 2 s, rồi gấp đôi (tối đa 5 phút) nếu sập liên tục.
+FIRST_DELAY = 2
 LOCK = os.path.join(HOME, 'remote-daemon.lock')
 PAUSED = os.path.join(HOME, 'remote-paused')
 DESK = os.path.join(HOME, 'desktop')
@@ -84,7 +86,7 @@ class Supervisor:
         self.child_pid = 0
         self.started = 0
         self.next_start = 0
-        self.delay = 10
+        self.delay = FIRST_DELAY
         self.pairing = False
         self.was_paired = os.path.exists(CREDS)
         self.seen_open = mtime(OPEN_REQ)
@@ -140,12 +142,17 @@ class Supervisor:
             notify(self.t('pairFailed'))
             return
         if rc == 0:
-            self.next_start = time.time() + 60
+            # Dừng có chủ đích (thu hồi, ghép lại, cửa sổ khác nhận việc): chờ ngắn; thoát 0 liền nhau (hai máy chung token) thì giãn dần.
+            if secs < 30:
+                self.backoff()
+            else:
+                self.delay = FIRST_DELAY
+                self.next_start = time.time() + FIRST_DELAY
         elif rc == RESTART_CODE:
             self.next_start = time.time() + 1
         else:
             if secs > 300:
-                self.delay = 10
+                self.delay = FIRST_DELAY
             self.backoff()
 
     def kill(self):
@@ -164,7 +171,7 @@ class Supervisor:
     def start_now(self):
         if self.child is None and not self.lock_held():
             self.next_start = 0
-            self.delay = 10
+            self.delay = FIRST_DELAY
 
     def tick(self):
         if mtime(QUIT_REQ) > self.seen_quit:

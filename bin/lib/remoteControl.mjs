@@ -7,7 +7,7 @@
  *  - scheduler.mjs     : song song theo nhóm công cụ, khoá theo đường dẫn khi ghi, huỷ / hết giờ.
  *  - sandbox.mjs       : sàn cứng — thư mục gốc (realpath), lọc biến môi trường, chặn lệnh thảm hoạ, công tắc ngắt.
  *  - deviceMemory.mjs  : bộ nhớ trên máy (YAML người đọc/sửa được + vector), tìm kết hợp BM25 + cosine.
- *  - fileIndexer.mjs   : chỉ mục tệp trong RAM, quét tăng dần + theo dõi thay đổi.
+ *  - fileIndexer.mjs   : chỉ mục tệp (SQLite trên đĩa, FTS5 + vector), quét tăng dần + theo dõi thay đổi.
  *  - mission.mjs       : `aivin remote do` — giao thẳng việc cho Device Agent.
  *  - activityLog.mjs / autoStart.mjs : nhật ký hoạt động, tự khởi động cùng máy.
  */

@@ -16,7 +16,7 @@ import { ensureMemoryLoaded, memoryStats, stopWatchingMemory, watchMemoryDir } f
 import { buildCatalog, buildDeviceProfile } from './deviceProfile.mjs';
 import { createFileIndex, indexRootsFor } from './fileIndexer.mjs';
 import { createScheduler } from './scheduler.mjs';
-import { acquireDaemonLock } from './daemonLock.mjs';
+import { acquireDaemonLock, lockHolder } from './daemonLock.mjs';
 import { randomUUID } from 'crypto';
 import { DeviceToolError, fullAccessRoots, isRemotePaused, setRemotePaused } from './sandbox.mjs';
 import { createMascot, HostEvent as MascotHostEvent } from './mascot/index.mjs';
@@ -139,6 +139,24 @@ async function ensurePaired({ serverUrl, apiKey, code, roots, rootsGiven, name, 
     saveDeviceCredentials(creds);
   }
   return creds;
+}
+
+/**
+ * `aivin remote pair --code`: chỉ ghép máy, không nhận việc — bộ cài dùng khi đã có khay (khay thấy máy đã ghép là mở listener ngay,
+ * người dùng đóng được cửa sổ cài). Listener đang chạy bằng token cũ thì dừng nó để khay mở lại bằng token mới. Trả pid đã dừng (hoặc null).
+ */
+export async function pairWithCodeOnly(options) {
+  const serverUrl = resolveServerUrl(options, loadDeviceCredentials());
+  configureProxy({ explicit: options.proxy });
+  const fullAccess = !options.dir && !!options.fullAccess;
+  const roots = (fullAccess ? fullAccessRoots() : [options.dir || process.cwd()]).map((r) => path.resolve(r));
+  const access = fullAccess ? DeviceAccess.FULL : DeviceAccess.FOLDERS;
+  const profile = { ...buildDeviceProfile(fullAccess ? [os.homedir()] : roots), roots, access };
+  const creds = await pairDeviceWithCode({ serverUrl, code: options.code, roots, name: options.name, profile });
+  saveDeviceCredentials({ ...creds, access });
+  const stale = lockHolder();
+  if (stale) try { process.kill(stale); } catch { /* vừa tự thoát */ }
+  return { creds, stopped: stale };
 }
 
 /**
