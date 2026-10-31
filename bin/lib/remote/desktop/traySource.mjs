@@ -99,6 +99,61 @@ namespace AivinDesktop {
     }
   }
 
+  class ModernMenuRenderer : ToolStripProfessionalRenderer {
+    static readonly Color ClrBorder = Color.FromArgb(229, 230, 235);
+    static readonly Color ClrHover = Color.FromArgb(242, 243, 245);
+    static readonly Color ClrText = Color.FromArgb(29, 33, 41);
+    static readonly Color ClrMuted = Color.FromArgb(134, 144, 156);
+
+    public ModernMenuRenderer() : base(new ModernColorTable()) { }
+
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
+      if (e.Item.Selected && e.Item.Enabled) {
+        Rectangle rc = new Rectangle(4, 1, e.Item.Width - 8, e.Item.Height - 2);
+        using (SolidBrush b = new SolidBrush(ClrHover)) {
+          e.Graphics.FillRectangle(b, rc);
+        }
+      }
+    }
+
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
+      if (!e.Item.Enabled) {
+        e.TextColor = ClrMuted;
+      } else {
+        e.TextColor = ClrText;
+      }
+      base.OnRenderItemText(e);
+    }
+
+    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
+      using (Pen p = new Pen(ClrBorder)) {
+        int y = e.Item.Height / 2;
+        e.Graphics.DrawLine(p, 14, y, e.Item.Width - 14, y);
+      }
+    }
+
+    protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) {
+      using (Pen p = new Pen(ClrBorder)) {
+        e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+      }
+    }
+  }
+
+  class ModernColorTable : ProfessionalColorTable {
+    public override Color ToolStripDropDownBackground { get { return Color.White; } }
+    public override Color ImageMarginGradientBegin { get { return Color.White; } }
+    public override Color ImageMarginGradientMiddle { get { return Color.White; } }
+    public override Color ImageMarginGradientEnd { get { return Color.White; } }
+    public override Color MenuBorder { get { return Color.FromArgb(229, 230, 235); } }
+    public override Color MenuItemBorder { get { return Color.Transparent; } }
+    public override Color MenuItemSelected { get { return Color.FromArgb(242, 243, 245); } }
+    public override Color MenuStripGradientBegin { get { return Color.White; } }
+    public override Color MenuStripGradientEnd { get { return Color.White; } }
+    public override Color CheckBackground { get { return Color.Transparent; } }
+    public override Color CheckSelectedBackground { get { return Color.Transparent; } }
+    public override Color CheckPressedBackground { get { return Color.Transparent; } }
+  }
+
   class TrayApp : ApplicationContext {
     const int RestartCode = 75;
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -160,17 +215,34 @@ namespace AivinDesktop {
       LoadIcons();
 
       ContextMenuStrip menu = new ContextMenuStrip();
+      menu.ShowImageMargin = false;
+      menu.ShowCheckMargin = false;
+      menu.BackColor = Color.White;
+      menu.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+      menu.Renderer = new ModernMenuRenderer();
+      menu.Padding = new Padding(2, 6, 2, 6);
+
       status = new ToolStripMenuItem();
       status.Enabled = false;
+      status.Padding = new Padding(14, 6, 14, 4);
+      status.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+
       versionItem = new ToolStripMenuItem();
       versionItem.Enabled = false;
+      versionItem.Padding = new Padding(14, 2, 14, 6);
+      versionItem.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+
       updateItem = Item("", delegate { CheckOrApplyUpdate(); });
+      updateItem.Padding = new Padding(14, 6, 14, 6);
+
       open = Item("", delegate { OpenAivin(); });
-      open.Font = new Font(open.Font, FontStyle.Bold);
+      open.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+
       pause = Item("", delegate { TogglePause(); });
       startup = Item(cfg.T("startup"), delegate { SetStartup(!StartupEnabled()); Refresh(); });
       mascot = Item(cfg.T("mascot"), delegate { ToggleMascot(); });
       quit = Item(cfg.T("quit"), delegate { Quit(); });
+
       menu.Items.AddRange(new ToolStripItem[] {
         status, versionItem, updateItem, new ToolStripSeparator(),
         open, pause, startup, mascot, new ToolStripSeparator(), quit
@@ -207,6 +279,7 @@ namespace AivinDesktop {
 
     ToolStripMenuItem Item(string text, EventHandler onClick) {
       ToolStripMenuItem item = new ToolStripMenuItem(text);
+      item.Padding = new Padding(14, 6, 14, 6);
       item.Click += onClick;
       return item;
     }
@@ -432,10 +505,10 @@ namespace AivinDesktop {
       open.Text = cfg.T(paired ? "open" : "connect");
       pause.Text = cfg.T(paused ? "resume" : "pause");
       pause.Visible = paired;
-      startup.Checked = StartupEnabled();
+      bool startupOn = StartupEnabled();
+      startup.Text = (startupOn ? "✓  " : "    ") + cfg.T("startup");
       bool mascotOn = IsMascotEnabled();
-      mascot.Checked = mascotOn;
-      mascot.Text = cfg.T(mascotOn ? "mascotHide" : "mascotShow");
+      mascot.Text = (mascotOn ? "✓  " : "    ") + cfg.T(mascotOn ? "mascotHide" : "mascotShow");
     }
 
     bool IsMascotEnabled() {
