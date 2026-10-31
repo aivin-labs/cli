@@ -101,7 +101,7 @@ export function rankGuiNodes(nodes, query, role = '') {
   const wantedRole = String(role || '').toLowerCase();
   if (!words.length) return [];
   return (nodes || [])
-    .filter((n) => (!wantedRole || String(n.role || '').toLowerCase() === wantedRole) && !n.disabled && !n.offscreen)
+    .filter((n) => (!wantedRole || String(n.role || '').toLowerCase() === wantedRole || n.source === 'ocr') && !n.disabled && !n.offscreen)
     .map((node, order) => {
       const name = normalizeName(node.name);
       const aid = normalizeName(node.automation_id);
@@ -158,9 +158,10 @@ function runPowerShellJson(script, signal) {
  * Bộ điều khiển GUI của máy. `env.fullAccess` quyết định có cho điều khiển terminal không. `host` truyền vào được (test dùng host giả).
  */
 export function createGuiController({
-  fullAccess = false, host = createWindowsHost(), notify = showOSNotification, say = () => {}, background = true, defaultWindow = () => null,
+  fullAccess = false, host = createWindowsHost(), notify = showOSNotification, say = () => {}, background = true, defaultWindow = () => null, fetchApps = (signal) => runPowerShellJson('Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress', signal),
 } = {}) {
   let appsCache = null;
+  let appsInflight = null;
   let lastNotifyAt = 0;
   /** Cửa sổ của từng lần observe — để kiểm ứng dụng bị chặn ở thao tác theo node_id. */
   const snapshotWindows = new Map();
@@ -217,13 +218,9 @@ export function createGuiController({
     const pool = all.length ? all : scored.filter((x) => x.hits === scored[0]?.hits);
     const picked = pool.slice(0, max);
     const margin = picked.length > 1 ? picked[0].score - picked[1].score : picked.length ? picked[0].score : 0;
-    return {
-      ...res,
-      nodes: picked.map((x) => x.node),
-      query: String(args.query), matched: all.length || scored.length, exact: all.length > 0,
-      confidence: !picked.length ? 'none' : margin >= 15 || picked.length === 1 ? 'high' : margin >= 5 ? 'medium' : 'low',
-      ambiguous: picked.length > 1 && margin < 5 || undefined,
-    };
+    const out = { ...res, nodes: picked.map((x) => x.node), query: String(args.query), matched: all.length || scored.length, exact: all.length > 0, confidence: !picked.length ? 'none' : margin >= 15 || picked.length === 1 ? 'high' : margin >= 5 ? 'medium' : 'low', ambiguous: picked.length > 1 && margin < 5 || undefined };
+    Object.defineProperty(out, '_raw_observation', { value: res, enumerable: false });
+    return out;
   }
 
   /**
@@ -249,16 +246,23 @@ export function createGuiController({
 
     const query = String(args.target || '').trim();
     if (!query) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give target');
-    const found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES }, ctx);
+    let found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES }, ctx);
+    if (!found.nodes.length && !found.ocr && found.tree_quality !== 'poor') {
+      found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, ocr: true }, ctx);
+    }
     if (!found.nodes.length) throw new DeviceToolError(DeviceErrorCode.GUI_TARGET_NOT_FOUND, `No enabled visible target matched "${query}"`);
     if (found.ambiguous) {
       return {
         ok: false, code: DeviceErrorCode.GUI_AMBIGUOUS_TARGET,
         choices: found.nodes.map((n) => ({ ref: n.id, label: [n.name || n.automation_id || n.role, n.role].filter(Boolean).join(' — ') })),
+        observation: found._raw_observation,
       };
     }
 
     const node = found.nodes[0];
+    if (command === 'fill' && node.password) {
+      throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'AI may not fill password or secret fields — ask the user to enter it');
+    }
     const result = await act({
       action, node_id: node.id,
       text: command === 'fill' ? args.value : undefined,
@@ -316,10 +320,14 @@ export function createGuiController({
 
   async function listApps(signal) {
     if (appsCache && Date.now() - appsCache.at < APPS_CACHE_MS) return appsCache.apps;
-    const rows = await runPowerShellJson('Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress', signal).catch(() => []);
-    const apps = rows.filter((r) => r?.Name && r?.AppID).map((r) => ({ name: String(r.Name), app_id: String(r.AppID) }));
-    appsCache = { at: Date.now(), apps };
-    return apps;
+    if (appsInflight && !signal) return appsInflight;
+    const task = Promise.resolve().then(() => fetchApps(signal)).catch(() => []).then((rows) => {
+      const apps = (rows || []).filter((r) => r?.Name && r?.AppID).map((r) => ({ name: String(r.Name), app_id: String(r.AppID) }));
+      if (apps.length) appsCache = { at: Date.now(), apps };
+      return apps.length ? apps : (appsCache?.apps || []);
+    }).finally(() => { if (appsInflight === task) appsInflight = null; });
+    if (!signal) appsInflight = task;
+    return task;
   }
 
   async function waitNewWindow(before, ctx, hint) {
@@ -369,7 +377,7 @@ export function createGuiController({
     return { opened: app.name, window: win, hint: win ? undefined : 'App started but no new window yet — call gui.windows in a moment' };
   }
 
-  return { windows, observe, find, waitFor, focus, act, semanticDo, openApp, close: () => host.close() };
+  return { windows, observe, find, waitFor, focus, act, semanticDo, openApp, prewarm: () => listApps(), close: () => host.close() };
 }
 
 /** Công cụ GUI cho danh mục của Planner. */

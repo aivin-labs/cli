@@ -27,6 +27,8 @@ import { decodeInt8, int8Cosine, tokenize } from './textIndex.mjs';
 const DB_FILE = path.join(REMOTE_CONFIG_DIR, 'file-index.db');
 /** Thư mục làm việc người dùng chỉ định (qua chat — công cụ fs.index_folder — hoặc `aivin remote index add`). */
 const INDEX_FOLDERS_FILE = path.join(REMOTE_CONFIG_DIR, 'index-folders.json');
+/** Mẫu loại trừ người dùng chỉ định (`aivin remote index-exclude add`). */
+const INDEX_EXCLUDES_FILE = path.join(REMOTE_CONFIG_DIR, 'index-excludes.json');
 /** Bản chụp gzip của bản giữ chỉ mục trong RAM (≤ 1.0.11) — chép sang SQLite lần đầu rồi xoá. */
 const LEGACY_SNAPSHOT_FILE = path.join(REMOTE_CONFIG_DIR, 'file-index.json.gz');
 const LEGACY_VECTORS_FILE = path.join(REMOTE_CONFIG_DIR, 'file-vectors.json.gz');
@@ -114,7 +116,7 @@ async function mapLimit(items, limit, fn) {
  * `full` (thư mục làm việc người dùng chỉ định): kho git bên trong cũng lập chỉ mục đầy đủ. Gốc của lần duyệt không bị gộp.
  * → `{ files: [{ abs, repo }], folders: [{ abs, kind, mtime, count, note, words }] }` (`repo` = nằm trong kho git → chỉ giữ tài liệu).
  */
-async function walk(root, limit, { skip = new Set(), full = false } = {}) {
+async function walk(root, limit, { skip = new Set(), full = false, excludes = null } = {}) {
   const files = [];
   const folders = [];
   const queue = [{ dir: root, repo: false }];
@@ -141,8 +143,8 @@ async function walk(root, limit, { skip = new Set(), full = false } = {}) {
         const abs = path.join(dir, entry.name);
         if (isProtectedPath(abs) || skip.has(abs)) continue;
         if (entry.isDirectory()) {
-          if (!skipDir(entry.name)) queue.push({ dir: abs, repo: inRepo });
-        } else if (entry.isFile() && !skipFile(entry.name) && (!(bulk || inRepo) || isDocFile(entry.name))) {
+          if (!skipDir(entry.name, excludes)) queue.push({ dir: abs, repo: inRepo });
+        } else if (entry.isFile() && !skipFile(entry.name, excludes) && (!(bulk || inRepo) || isDocFile(entry.name))) {
           files.push({ abs, repo: inRepo });
         }
       }
@@ -179,6 +181,36 @@ export function saveIndexFolders(folders) {
   const list = [...new Set(folders.map((f) => path.resolve(f)))];
   fs.writeFileSync(INDEX_FOLDERS_FILE, JSON.stringify({ folders: list }, null, 2));
   return list;
+}
+
+/** Mẫu loại trừ người dùng chỉ định (`index-excludes.json`). */
+export function loadIndexExcludes() {
+  try {
+    const data = JSON.parse(fs.readFileSync(INDEX_EXCLUDES_FILE, 'utf8'));
+    return Array.isArray(data?.excludes) ? data.excludes.filter((e) => typeof e === 'string' && e.trim().length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveIndexExcludes(excludes) {
+  fs.mkdirSync(REMOTE_CONFIG_DIR, { recursive: true });
+  const list = [...new Set(excludes.map((e) => String(e).trim()).filter(Boolean))];
+  fs.writeFileSync(INDEX_EXCLUDES_FILE, JSON.stringify({ excludes: list }, null, 2));
+  return list;
+}
+
+/** Đọc các mẫu loại trừ từ tệp `.aivinignore` trong thư mục (nếu có). */
+export function loadIgnoreFile(dir) {
+  const ignorePath = path.join(dir, '.aivinignore');
+  try {
+    return fs.readFileSync(ignorePath, 'utf8')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('#'));
+  } catch {
+    return [];
+  }
 }
 
 const within = (dir, abs) => abs === dir || abs.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
@@ -224,6 +256,15 @@ export function createFileIndex(roots) {
   let lastBuild = null;
   let priorityDirs = [];
   let indexFolders = loadIndexFolders();
+  let indexExcludes = loadIndexExcludes();
+  const rootIgnores = resolvedRoots.flatMap(loadIgnoreFile);
+  let activeExcludes = new Set([...indexExcludes, ...rootIgnores].map((s) => s.toLowerCase()));
+
+  const reloadExcludes = () => {
+    indexExcludes = loadIndexExcludes();
+    const updatedRoots = resolvedRoots.flatMap(loadIgnoreFile);
+    activeExcludes = new Set([...indexExcludes, ...updatedRoots].map((s) => s.toLowerCase()));
+  };
   /** Thư mục gộp đã biết (từ chỉ mục) — để bộ theo dõi không lập chỉ mục lẻ từng ảnh chụp màn hình mới. */
   let collapsed = [];
   let watching = false;
@@ -239,7 +280,7 @@ export function createFileIndex(roots) {
     const root = resolvedRoots.find((r) => within(r, abs));
     if (!root) return true;
     const segs = path.relative(root, abs).split(path.sep);
-    return segs.slice(0, -1).some(skipDir) || skipFile(segs[segs.length - 1]);
+    return segs.slice(0, -1).some((d) => skipDir(d, activeExcludes)) || skipFile(segs[segs.length - 1], activeExcludes);
   };
 
   function ensureOpen() {
@@ -383,7 +424,7 @@ export function createFileIndex(roots) {
 
   /** Lập chỉ mục một cây (gốc / thư mục ưu tiên / thư mục làm việc) → số tệp cập nhật; ghi nhận mọi đường đã thấy vào `found`. */
   async function indexTree(dir, { found, limit, skip, full }) {
-    const { files, folders } = await walk(dir, limit, { skip, full });
+    const { files, folders } = await walk(dir, limit, { skip, full, excludes: activeExcludes });
     let updated = 0;
     for (const f of folders) {
       if (found.has(f.abs)) continue;
@@ -409,6 +450,7 @@ export function createFileIndex(roots) {
     const startedAt = Date.now();
     const first = !lastBuild;
     await ensureOpen();
+    reloadExcludes();
     priorityDirs = priorityDirsOf(resolvedRoots);
     indexFolders = loadIndexFolders();
     const found = new Set();
@@ -444,7 +486,7 @@ export function createFileIndex(roots) {
     const base = folder || resolvedRoots.find((r) => within(r, abs));
     if (!base || isProtectedPath(abs)) return null;
     const segs = path.relative(base, abs).split(path.sep);
-    if (segs.slice(0, -1).some(skipDir) || skipFile(segs[segs.length - 1])) return null;
+    if (segs.slice(0, -1).some((d) => skipDir(d, activeExcludes)) || skipFile(segs[segs.length - 1], activeExcludes)) return null;
     let repo = false;
     for (const c of collapsed) {
       // Chỉ thư mục gộp nằm GIỮA gốc và tệp; gộp bao trùm cả gốc (thư mục làm việc nằm trong một kho git…) không tính.
@@ -513,6 +555,11 @@ export function createFileIndex(roots) {
     // `aivin remote index add|remove` (tiến trình khác) sửa danh sách → quét lại tăng dần.
     fs.watchFile(INDEX_FOLDERS_FILE, { interval: INDEX_FOLDERS_POLL_MS, persistent: false }, () => {
       if (JSON.stringify(loadIndexFolders()) === JSON.stringify(indexFolders)) return;
+      void build().then(() => rewatch()).catch(() => undefined);
+    });
+    // `aivin remote index-exclude` sửa danh sách mẫu loại trừ → quét lại tăng dần.
+    fs.watchFile(INDEX_EXCLUDES_FILE, { interval: INDEX_FOLDERS_POLL_MS, persistent: false }, () => {
+      if (JSON.stringify(loadIndexExcludes()) === JSON.stringify(indexExcludes)) return;
       void build().then(() => rewatch()).catch(() => undefined);
     });
   }
@@ -608,7 +655,10 @@ export function createFileIndex(roots) {
     if (rescanTimer) { clearInterval(rescanTimer); rescanTimer = null; }
     for (const w of watchers.values()) { try { w.close(); } catch { /* đã đóng */ } }
     watchers.clear();
-    if (watching) fs.unwatchFile(INDEX_FOLDERS_FILE);
+    if (watching) {
+      fs.unwatchFile(INDEX_FOLDERS_FILE);
+      fs.unwatchFile(INDEX_EXCLUDES_FILE);
+    }
     watching = false;
     clearTimeout(vectorTimer);
     try { db?.close(); } catch { /* đã đóng */ }
@@ -639,8 +689,18 @@ export function createFileIndex(roots) {
   function search(query, limit = 10, vector) {
     if (!db) return [];
     const depth = Math.max(limit, RANK_DEPTH);
-    const expr = matchExpr(query);
-    const lexical = expr ? st.lexical.all(expr, depth).map((r) => r.id) : [];
+    const words = [...new Set(tokenize(query))];
+    let lexical = [];
+    if (words.length > 1) {
+      const andExpr = words.map((t) => `"${t}"${t.length >= PREFIX_MIN ? '*' : ''}`).join(' AND ');
+      const orExpr = words.map((t) => `"${t}"${t.length >= PREFIX_MIN ? '*' : ''}`).join(' OR ');
+      const andHits = st.lexical.all(andExpr, depth).map((r) => r.id);
+      const orHits = st.lexical.all(orExpr, depth).map((r) => r.id);
+      lexical = [...new Set([...andHits, ...orHits])].slice(0, depth);
+    } else if (words.length === 1) {
+      const expr = matchExpr(query);
+      lexical = expr ? st.lexical.all(expr, depth).map((r) => r.id) : [];
+    }
     const q = vector ? decodeInt8(vector) : null;
     const semantic = q ? nearest(q, RANK_DEPTH) : [];
     const similarity = new Map(semantic);
@@ -663,9 +723,20 @@ export function createFileIndex(roots) {
   return {
     build, watch, close, search, refreshFile, vectorize, setEmbedder, addFolder, removeFolder,
     folders: () => [...indexFolders],
+    excludes: () => [...activeExcludes],
+    addExclude: async (pattern) => {
+      saveIndexExcludes([...loadIndexExcludes(), pattern]);
+      reloadExcludes();
+      return build();
+    },
+    removeExclude: async (pattern) => {
+      saveIndexExcludes(loadIndexExcludes().filter((e) => e.toLowerCase() !== pattern.toLowerCase()));
+      reloadExcludes();
+      return build();
+    },
     stats: () => ({
       files: db ? st.fileCount.get().n : 0, folders: db ? st.folderCount.get().n : 0, vectors: db ? st.vectorCount.get().n : 0,
-      index_folders: [...indexFolders], last_build: lastBuild,
+      index_folders: [...indexFolders], index_excludes: [...activeExcludes], last_build: lastBuild,
     }),
   };
 }

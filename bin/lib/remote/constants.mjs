@@ -86,6 +86,18 @@ export const DeviceEvent = Object.freeze({
   CHAT_CANCEL: 'device:chat_cancel',
   /** CLI → BE (30/10/2026): mở phiên chat mới cho linh vật — câu hỏi kế đi vào phiên mới (phiên cũ vẫn trên Aivin). Ack `{ ok, error? }`. */
   CHAT_NEW: 'device:chat_new',
+  /** BE → CLI: yêu cầu bắt đầu phát hình màn hình máy tính trực tiếp (scenecast). */
+  DESKTOP_CAST_START: 'device:desktop_cast_start',
+  /** BE → CLI: yêu cầu dừng phát hình màn hình máy tính trực tiếp. */
+  DESKTOP_CAST_STOP: 'device:desktop_cast_stop',
+  /** CLI → BE: một khung hình màn hình máy tính (JPEG base64) kèm kích thước. */
+  DESKTOP_CAST_FRAME: 'device:desktop_cast_frame',
+  /** BE → CLI: thao tác điều khiển chuột / bàn phím từ xa. */
+  DESKTOP_CAST_INPUT: 'device:desktop_cast_input',
+  /** BE → CLI: cập nhật cấu hình chất lượng / tốc độ khung hình (FPS, quality). */
+  DESKTOP_CAST_CONFIG: 'device:desktop_cast_config',
+  DESKTOP_CAST_SIGNAL: 'device:desktop_cast_signal',
+  DESKTOP_CAST_STATUS: 'device:desktop_cast_status',
 });
 
 /** Loại báo chủ động (`device:notify`). */
@@ -215,6 +227,8 @@ export const DeviceErrorCode = Object.freeze({
   GUI_LOCKED: 'GUI_LOCKED',
   /** `gui.wait_for` hết giờ mà giao diện chưa tới trạng thái chờ. */
   GUI_WAIT_TIMEOUT: 'GUI_WAIT_TIMEOUT',
+  /** Cửa sổ ứng dụng đích bị treo (Not Responding) — không gọi UI Automation để tránh đơ host. */
+  GUI_WINDOW_HUNG: 'GUI_WINDOW_HUNG',
   /** OCR của Windows không dùng được (không có gói ngôn ngữ OCR / WinRT lỗi) — observe vẫn trả cây + ảnh. */
   GUI_OCR_UNAVAILABLE: 'GUI_OCR_UNAVAILABLE',
 });

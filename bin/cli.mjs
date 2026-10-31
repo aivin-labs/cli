@@ -110,6 +110,8 @@ import {
   createFileIndex,
   loadIndexFolders,
   saveIndexFolders,
+  loadIndexExcludes,
+  saveIndexExcludes,
   resolveInRoots,
   indexRootsFor,
   runRemoteMission,
@@ -1499,6 +1501,30 @@ remoteCommand
       } else {
         saveIndexFolders(loadIndexFolders().filter((f) => f !== abs));
         console.log(chalk.green(`✅ Đã bỏ thư mục làm việc ${abs}`));
+      }
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('index-exclude [action] [pattern]')
+  .description('Custom exclude rules for file indexing: list (default) | add <name/pattern> | remove <name/pattern>')
+  .action((action = 'list', pattern) => {
+    try {
+      if (action === 'list') {
+        const excludes = loadIndexExcludes();
+        if (!excludes.length) return console.log(chalk.gray('Chưa có mẫu loại trừ tuỳ biến nào. Thêm: aivin remote index-exclude add <tên_hoặc_mẫu>'));
+        return excludes.forEach((e) => console.log(`🚫 ${e}`));
+      }
+      if (!['add', 'remove'].includes(action) || !pattern) throw new Error('Dùng: aivin remote index-exclude [list | add <mẫu> | remove <mẫu>]');
+      const item = String(pattern).trim();
+      if (action === 'add') {
+        saveIndexExcludes([...loadIndexExcludes(), item]);
+        console.log(chalk.green(`✅ Đã thêm mẫu loại trừ "${item}" — listener đang chạy sẽ áp dụng trong vài giây.`));
+      } else {
+        saveIndexExcludes(loadIndexExcludes().filter((e) => e.toLowerCase() !== item.toLowerCase()));
+        console.log(chalk.green(`✅ Đã xoá mẫu loại trừ "${item}"`));
       }
     } catch (error) {
       remoteFail(error);

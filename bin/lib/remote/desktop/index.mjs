@@ -32,7 +32,7 @@ export function launcherExePath(env = process.env) {
 }
 
 /** Tên hiện ở Start menu / Task Manager → Startup apps (mô tả của Aivin.exe) / khay: "AIVIN Bot CLI" (30/10/2026; trước là "Aivin"). */
-export const DISPLAY_NAME = 'AIVIN Bot CLI';
+export const DISPLAY_NAME = 'AIVIN Bot';
 const startMenuDir = (env) => path.join(env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
 
 export function startMenuShortcutPath(env = process.env) {
@@ -40,8 +40,11 @@ export function startMenuShortcutPath(env = process.env) {
 }
 
 /** Lối tắt tên cũ ("Aivin.lnk") — dọn khi cài / gỡ để Start menu không có hai mục. */
+export function legacyStartMenuShortcutPaths(env = process.env) {
+  return [path.join(startMenuDir(env), 'Aivin.lnk'), path.join(startMenuDir(env), 'AIVIN Bot CLI.lnk')];
+}
 export function legacyStartMenuShortcutPath(env = process.env) {
-  return path.join(startMenuDir(env), 'Aivin.lnk');
+  return legacyStartMenuShortcutPaths(env)[0];
 }
 
 /** Mã C# của Aivin.exe cho thư mục cấu hình này (gắn cứng: lối tắt / khoá Run không mang biến môi trường AIVIN_REMOTE_HOME theo). */
@@ -279,7 +282,7 @@ export function installDesktop({ argv, rollback = null, lang = 'en', autostart =
   fs.writeFileSync(LOGO_FILE, Buffer.from(AIVIN_LOGO_PNG_BASE64, 'base64'));
   const { exe, built } = ensureLauncher();
   const lnk = startMenuShortcutPath();
-  fs.rmSync(legacyStartMenuShortcutPath(), { force: true });
+  for (const p of legacyStartMenuShortcutPaths()) fs.rmSync(p, { force: true });
   if (built || !fs.existsSync(lnk)) ensureStartMenuShortcut({ exe, lnk, lang });
   if (autostart) registerStartup(exe);
   if (launch && built) quitRunningTray({ exe });
@@ -296,7 +299,7 @@ export function uninstallDesktop({ wait = sleepSync } = {}) {
   }
   unregisterStartup();
   fs.rmSync(startMenuShortcutPath(), { force: true });
-  fs.rmSync(legacyStartMenuShortcutPath(), { force: true });
+  for (const p of legacyStartMenuShortcutPaths()) fs.rmSync(p, { force: true });
   for (let i = 0; i < 20 && fs.existsSync(exe); i++) {
     try { fs.rmSync(exe, { force: true }); } catch { wait(250); }
   }

@@ -245,6 +245,16 @@ test('gui.do: hậu điều kiện fill sai → GUI_NO_EFFECT', async () => {
   await assert.rejects(gui.semanticDo({ do: 'fill', target: 'Amount', value: '100' }, {}, {}), (e) => e.code === 'GUI_NO_EFFECT');
 });
 
+test('gui.do: không bao giờ điền trường mật khẩu', async () => {
+  const host = fakeHost({
+    observe: { snapshot: 21, window: NOTEPAD, tree_quality: 'good', nodes: [{ id: '21.1', role: 'edit', name: 'Password', password: true }] },
+    act: { action: 'set_value', method: 'value', target: { exists: true } },
+  });
+  const gui = createGuiController({ host, notify: () => {} });
+  await assert.rejects(gui.semanticDo({ do: 'fill', target: 'Password', value: 'secret' }, {}, {}), (e) => e.code === 'INVALID_ARGS');
+  assert.equal(host.calls.some((c) => c.op === 'act'), false);
+});
+
 test('trình soạn code / ứng dụng agent (VS Code, Cursor, Claude…) chỉ điều khiển / mở được khi máy toàn quyền', async () => {
   for (const proc of ['Code', 'Cursor', 'claude', 'devenv', 'idea64']) {
     assert.throws(() => assertWindowAllowed({ process: proc }, { fullAccess: false }), /full device access/, proc);
@@ -257,4 +267,76 @@ test('trình soạn code / ứng dụng agent (VS Code, Cursor, Claude…) chỉ
   }
   for (const name of ['Excel', 'Notepad', 'MISA SME', 'Zalo']) assert.doesNotThrow(() => assertAppAllowed(name, { fullAccess: false }), name);
   assert.throws(() => assertAppAllowed('KeePassXC', { fullAccess: true }), /not allowed/);
+});
+
+test('windowsHost: huỷ wait_for gửi { cancel: id } qua stdin mà không giết tiến trình host', async () => {
+  const { EventEmitter } = await import('events');
+  const { PassThrough } = await import('stream');
+  const { createWindowsHost } = await import('../bin/lib/remote/gui/windowsHost.mjs');
+  const written = [];
+  let killed = false;
+  const host = createWindowsHost({
+    spawnImpl: (cmd) => {
+      if (cmd === 'taskkill') { killed = true; return new EventEmitter(); }
+      const proc = new EventEmitter();
+      proc.pid = 9999;
+      proc.stdin = new PassThrough();
+      proc.stdout = new PassThrough();
+      proc.stderr = new PassThrough();
+      proc.stdin.on('data', (chunk) => {
+        for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) {
+          written.push(JSON.parse(line));
+        }
+      });
+      setImmediate(() => proc.stdout.write(`${JSON.stringify({ ready: true })}\n`));
+      return proc;
+    },
+  });
+  const ac = new AbortController();
+  const pending = host.call('wait_for', { name: 'Save' }, { signal: ac.signal });
+  await new Promise((r) => setTimeout(r, 20));
+  ac.abort(new Error('aborted_wait'));
+  await assert.rejects(pending, /aborted_wait/);
+  assert.equal(killed, false, 'không taskkill host khi chỉ huỷ wait_for');
+  assert.equal(host.running(), true);
+  assert.deepEqual(written.at(-1), { cancel: '1' });
+});
+
+test('gui.do: không thấy trong cây UIA thường thì tự thử lại với OCR; khi mơ hồ đính kèm luôn observation cho BE', async () => {
+  const obsList = [
+    { snapshot: 30, window: NOTEPAD, tree_quality: 'good', nodes: [{ id: '30.1', role: 'button', name: 'Cancel' }] },
+    { snapshot: 31, window: NOTEPAD, tree_quality: 'good', ocr: { lang: 'vi', count: 1, ms: 12 }, nodes: [
+      { id: '31.1', role: 'button', name: 'Cancel' },
+      { id: '31.t0', role: 'text', name: 'Ghi sổ', source: 'ocr' },
+    ] },
+  ];
+  const host = fakeHost({
+    observe: () => obsList.shift(),
+    act: (a) => ({ action: a.action, method: 'mouse', target: { exists: true } }),
+  });
+  const gui = createGuiController({ host, notify: () => {} });
+  const clicked = await gui.semanticDo({ do: 'click', target: 'Ghi sổ', role: 'button' }, {}, {});
+  assert.equal(clicked.ok, true);
+  assert.equal(host.calls.filter((c) => c.op === 'observe').length, 2);
+  assert.equal(host.calls.filter((c) => c.op === 'observe')[1].args.ocr, true);
+  assert.equal(host.calls.find((c) => c.op === 'act').args.node_id, '31.t0');
+});
+
+test('gui.prewarm: làm ấm trước danh sách ứng dụng, các lời gọi đồng thời dùng chung một lượt quét', async () => {
+  let scans = 0;
+  const host = fakeHost({ windows: () => [NOTEPAD] });
+  const gui = createGuiController({
+    host, notify: () => {},
+    fetchApps: async () => {
+      scans++;
+      await new Promise((r) => setTimeout(r, 15));
+      return [{ Name: 'Calculator', AppID: 'Microsoft.WindowsCalculator_8wekyb3d8bbwe!App' }];
+    },
+  });
+  const [a, b] = await Promise.all([gui.prewarm(), gui.prewarm()]);
+  assert.equal(scans, 1, 'chỉ chạy một lượt quét song song');
+  assert.equal(a.length, 1);
+  assert.equal(b.length, 1);
+  await gui.prewarm();
+  assert.equal(scans, 1, 'dùng lại bộ nhớ đệm đã làm ấm');
 });

@@ -39,6 +39,8 @@ import { createScheduleManager } from './schedule.mjs';
 import { remoteDebuggingPage } from './dailyBrowser.mjs';
 import { HOME_BASE, SHARED_DIR, createMultiUserHost, isMultiUserMode } from './multiUser.mjs';
 import { createAutoUpdater } from './autoUpdate.mjs';
+import { createDesktopCastManager } from './desktop/desktopCast.mjs';
+import { createDesktopWebRtc } from './desktop/desktopWebRtc.mjs';
 import {
   BootAction, MAX_BOOTS_BEFORE_ROLLBACK, RESTART_EXIT_CODE, UPDATE_CONFIRM_AFTER_MS, UPDATE_ROLLED_BACK, checkBootAfterUpdate, cleanupRetired, clearStaleInstalledMarker,
   confirmUpdate, ingestSupervisorRollback, isStandaloneBinary, noteCleanExit, updateProfile,
@@ -256,11 +258,12 @@ export async function startRemoteClient(options = {}) {
   const fileIndex = multiUser ? null : createFileIndex(indexRootsFor(roots, fullAccess));
   const useDailyBrowser = options.separateBrowser !== true;
   const browserTunnels = browser ? createBrowserTunnels({ serverUrl, deviceToken: () => creds.device_token, browser, useDailyBrowser, say: (m) => say(chalk.cyan(m)) }) : null;
-  // Một tiến trình host chung cho giao diện + Office (chỉ dựng khi lời gọi đầu tiên cần).
-  const winHost = guiProfile || officeApps.length ? createWindowsHost() : null;
+  // Tiến trình host riêng cho giao diện và cho Office COM (chỉ dựng khi lời gọi đầu tiên cần) — một lệnh COM treo / bị huỷ không làm mất snapshot giao diện.
+  const guiHost = guiProfile ? createWindowsHost() : null;
+  const officeHost = officeApps.length ? createWindowsHost() : null;
   // Không nói cửa sổ mà focus đang ở linh vật (chủ máy vừa gõ vào ô hỏi) → cửa sổ họ đang dùng lúc hỏi (mascot/ask.mjs).
   const gui = guiProfile ? createGuiController({
-    fullAccess, host: winHost, say: (m) => say(chalk.magenta(m)),
+    fullAccess, host: guiHost, say: (m) => say(chalk.magenta(m)),
     defaultWindow: () => (mascot.pid() ? { avoid_pid: mascot.pid(), fallback: mascotChat?.userWindow()?.window } : null),
   }) : null;
   // Kho hoàn tác (xoá → thùng rác của kho, ghi đè → giữ bản cũ). Máy tính tổ chức: công cụ tệp chạy dưới tài khoản thành viên, không có kho.
@@ -319,7 +322,7 @@ export async function startRemoteClient(options = {}) {
       return ack?.ok ? { ok: true } : { ok: false, error: ack?.error || 'failed' };
     },
   }) : null;
-  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: winHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer, meetings, media, clipboard: multiUser ? null : createClipboard() };
+  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: officeHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer, meetings, media, clipboard: multiUser ? null : createClipboard() };
   const host = multiUser ? createMultiUserHost({ baseEnv: env, say: (m) => say(chalk.gray(m)) }) : null;
   host?.start();
   const tools = buildTools(env);
@@ -356,6 +359,11 @@ export async function startRemoteClient(options = {}) {
     },
   });
   if (isRemotePaused()) mascot.paused(true);
+  const desktopCast = createDesktopCastManager();
+  const desktopWebRtc = createDesktopWebRtc({
+    emitSignal: (payload) => { if (socket?.connected) socket.emit(DeviceEvent.DESKTOP_CAST_SIGNAL, payload); },
+    emitStatus: (payload) => { if (socket?.connected) socket.emit(DeviceEvent.DESKTOP_CAST_STATUS, payload); },
+  });
   let mascotChat = null;
 
   say(chalk.blue('💻 Aivin Device Agent — máy này nhận việc từ agent của bạn'));
@@ -377,6 +385,7 @@ export async function startRemoteClient(options = {}) {
   // `aivin remote meeting start|stop` gõ ở máy → daemon này; buổi ghi / biên bản dở từ lần chạy trước → làm nốt.
   const stopMeetingRequests = meetings ? watchMeetingRequests(meetings) : null;
 
+  void gui?.prewarm?.();
   fileIndex?.build()
     .then((s) => { say(chalk.gray(`   Chỉ mục tệp: ${s.files} tệp (${s.updated} cập nhật, ${s.ms} ms)`)); fileIndex.watch(); })
     .catch((e) => say(chalk.yellow(`   ⚠️  Lập chỉ mục tệp lỗi: ${e.message}`)));
@@ -419,7 +428,8 @@ export async function startRemoteClient(options = {}) {
       void scheduler.cancelAll('Remote control was paused on this device');
       cancelGating([...gating.keys()]);
       browserTunnels?.closeAll();
-      winHost?.close();
+      guiHost?.close();
+      officeHost?.close();
       processes.stopAll();
     }
     if (paused !== pausedSeen) mascot.paused(paused);
@@ -459,14 +469,16 @@ export async function startRemoteClient(options = {}) {
     if (selfManaged) noteCleanExit();
     const draining = scheduler.cancelAll('The Aivin agent on this device stopped');
     cancelGating([...gating.keys()]);
-    ledger.persist();
+    ledger.persist({ sync: true });
     socket.disconnect();
     browserTunnels?.closeAll();
     // Đóng tệp ghi họp cho đúng; biên bản làm ở lần chạy sau (meetings.recover).
     stopMeetingRequests?.();
     void meetings?.shutdown();
     gui?.close();
-    winHost?.close();
+    guiHost?.close();
+    officeHost?.close();
+    desktopCast.stop();
     processes.stopAll();
     keepAwake.close();
     watches?.closeAll();
@@ -778,6 +790,56 @@ export async function startRemoteClient(options = {}) {
     socket.on(DeviceEvent.NOTIFY, guarded(DeviceEvent.NOTIFY, (payload) => mascotChat.onNotify(payload)));
     socket.on(DeviceEvent.VOICE_EVENT, guarded(DeviceEvent.VOICE_EVENT, (payload) => mascotChat.onVoiceEvent(payload)));
   }
+  socket.on(DeviceEvent.DESKTOP_CAST_START, guarded(DeviceEvent.DESKTOP_CAST_START, async (payload) => {
+    const sessionId = payload?.session_id;
+    const viewerId = payload?.viewer_id;
+    const webRtcStarted = payload?.transport === 'webrtc' && sessionId && viewerId
+      ? await desktopWebRtc.start({ sessionId, viewerId, iceServers: payload?.ice_servers || [] }).catch(() => false)
+      : false;
+    if (!desktopCast.isActive()) desktopCast.start({
+      sessionId: payload?.session_id,
+      maxFps: payload?.max_fps || 15,
+      maxWidth: payload?.max_width || 1366,
+      quality: payload?.quality || 65,
+      monitor: payload?.monitor ?? -1,
+      onFrame: (frame) => {
+        desktopWebRtc.push(frame);
+        // Chưa nối xong WebRTC hoặc runtime native không có → JPEG fallback vẫn cho first frame ngay.
+        if (desktopWebRtc.needsFallback() && socket.connected) socket.volatile.emit(DeviceEvent.DESKTOP_CAST_FRAME, frame);
+      },
+      onReady: (meta) => {
+        say(chalk.cyan(`  🖥️  Desktop Cast đang phát trực tiếp (${meta.bounds?.width}x${meta.bounds?.height})`));
+        if (socket.connected) socket.emit(DeviceEvent.DESKTOP_CAST_STATUS, {
+          session_id: sessionId, viewer_id: viewerId, state: 'ready', transport: webRtcStarted ? 'webrtc' : 'jpeg', bounds: meta.bounds,
+        });
+      },
+      onError: (err) => {
+        say(chalk.yellow(`  ⚠️  Desktop Cast lỗi: ${err?.message || err}`));
+      },
+      onStop: () => {
+        say(chalk.gray(`  ⏹  Desktop Cast đã dừng`));
+      },
+    });
+    if (!webRtcStarted && socket.connected) socket.emit(DeviceEvent.DESKTOP_CAST_STATUS, {
+      session_id: sessionId, viewer_id: viewerId, state: 'degraded', transport: 'jpeg', reason: 'webrtc_runtime_unavailable',
+    });
+  }));
+  socket.on(DeviceEvent.DESKTOP_CAST_STOP, guarded(DeviceEvent.DESKTOP_CAST_STOP, (payload) => {
+    if (payload?.viewer_id) desktopWebRtc.close(payload.viewer_id);
+    if (payload?.final !== false) {
+      desktopWebRtc.closeAll();
+      desktopCast.stop();
+    }
+  }));
+  socket.on(DeviceEvent.DESKTOP_CAST_INPUT, guarded(DeviceEvent.DESKTOP_CAST_INPUT, (payload) => {
+    desktopCast.sendInput(payload);
+  }));
+  socket.on(DeviceEvent.DESKTOP_CAST_CONFIG, guarded(DeviceEvent.DESKTOP_CAST_CONFIG, (payload) => {
+    desktopCast.config(payload);
+  }));
+  socket.on(DeviceEvent.DESKTOP_CAST_SIGNAL, guarded(DeviceEvent.DESKTOP_CAST_SIGNAL, (payload) => {
+    void desktopWebRtc.signal(payload).catch(() => undefined);
+  }));
   meetings?.recover();
 
   // Lưới cuối: promise bị từ chối mà không ai bắt → ghi log, KHÔNG thoát (daemon phục vụ cả tổ chức, chết là mất mọi lời gọi đang chạy).

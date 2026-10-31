@@ -21,24 +21,47 @@ export const FolderKind = Object.freeze({
 
 /** Dữ liệu ứng dụng, hệ điều hành, thùng rác, kho gói — không bao giờ lập chỉ mục. */
 const INDEX_SKIP_DIRS = new Set([
-  'AppData', 'Application Data', 'Local Settings', '$Recycle.Bin', 'System Volume Information', 'Windows', 'Program Files',
-  'Program Files (x86)', 'ProgramData', 'Library', 'miniconda3', 'anaconda3', 'snap', 'site-packages', 'Pods', 'DerivedData',
+  'appdata', 'application data', 'local settings', '$recycle.bin', 'system volume information', 'windows', 'program files',
+  'program files (x86)', 'programdata', 'library', 'miniconda3', 'anaconda3', 'snap', 'site-packages', 'pods', 'deriveddata',
+  '__pycache__', '.turbo', '.pnpm-store', '.cargo', '.rustup', '.gradle', '.dart_tool', '.nuget',
+  'system32', 'syswow64', 'recovery', '$windows.~bt', '$windows.~ws', 'steamapps', 'package-cache', 'caches', 'cacheddata',
+  '.vs', '.bundle', 'vendor',
+]);
+
+const NORMALIZED_SKIP_DIRS = new Set([
+  ...INDEX_SKIP_DIRS,
+  ...[...IGNORED_DIRS].map((d) => d.toLowerCase()),
 ]);
 
 /** Tệp tạm / sao lưu / sinh ra khi biên dịch / tải dở — không ai tìm. */
 const SKIP_FILE_EXT = new Set([
   '.tmp', '.temp', '.old', '.bak', '.swp', '.swo', '.crdownload', '.part', '.partial', '.download', '.lock', '.pyc', '.pyo', '.class',
-  '.o', '.obj', '.pdb', '.dll', '.sys', '.cache', '.dmp', '.etl', '.blf', '.regtrans-ms',
+  '.o', '.obj', '.pdb', '.dll', '.sys', '.cache', '.dmp', '.etl', '.blf', '.regtrans-ms', '.iso', '.vmdk', '.qcow2',
+  '.map', '.tsbuildinfo', '.suo', '.user', '.ilk', '.exp', '.lib', '.apk', '.aab', '.dylib', '.so',
 ]);
-const SKIP_FILE_NAMES = new Set(['thumbs.db', 'desktop.ini', 'ntuser.dat', 'ntuser.ini']);
+const SKIP_FILE_NAMES = new Set([
+  'thumbs.db', 'desktop.ini', 'ntuser.dat', 'ntuser.ini',
+  'npm-debug.log', 'yarn-error.log', 'pnpm-debug.log',
+]);
 
-/** Thư mục ẩn (`.claude`, `.gemini`, `.git`…) + rác build + dữ liệu hệ thống. */
-export const skipDir = (name) => name.startsWith('.') || IGNORED_DIRS.has(name) || INDEX_SKIP_DIRS.has(name);
-
-export function skipFile(name) {
+/** Thư mục ẩn (`.claude`, `.gemini`, `.git`…) + rác build + dữ liệu hệ thống (không phân biệt hoa thường). */
+export function skipDir(name, extraExcludes) {
+  if (!name || name.startsWith('.')) return true;
   const lower = name.toLowerCase();
-  return lower.startsWith('.') || lower.startsWith('~$') || lower.endsWith('~') || SKIP_FILE_NAMES.has(lower)
-    || SKIP_FILE_EXT.has(path.extname(lower)) || lower.startsWith('ntuser.dat');
+  if (NORMALIZED_SKIP_DIRS.has(lower)) return true;
+  if (extraExcludes && (extraExcludes.has(name) || extraExcludes.has(lower))) return true;
+  return false;
+}
+
+export function skipFile(name, extraExcludes) {
+  if (!name) return true;
+  const lower = name.toLowerCase();
+  if (lower.startsWith('.') || lower.startsWith('~$') || lower.endsWith('~')) return true;
+  if (SKIP_FILE_NAMES.has(lower) || lower.startsWith('ntuser.dat')) return true;
+  if (SKIP_FILE_EXT.has(path.extname(lower))) return true;
+  if (lower.endsWith('.min.js') || lower.endsWith('.min.css') || lower.endsWith('.d.ts.map')) return true;
+  if (extraExcludes && (extraExcludes.has(name) || extraExcludes.has(lower))) return true;
+  return false;
 }
 
 export const BULK_MIN_FILES = 300;

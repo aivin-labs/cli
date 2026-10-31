@@ -23,10 +23,10 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: AssemblyTitle("AIVIN Bot CLI")]
+[assembly: AssemblyTitle("AIVIN Bot")]
 [assembly: AssemblyDescription("Aivin - lets your Aivin agents work on this computer")]
 [assembly: AssemblyCompany("Aivin Labs")]
-[assembly: AssemblyProduct("AIVIN Bot CLI")]
+[assembly: AssemblyProduct("AIVIN Bot")]
 [assembly: AssemblyCopyright("Aivin Labs")]
 [assembly: AssemblyVersion("@@VERSION@@")]
 [assembly: AssemblyFileVersion("@@VERSION@@")]
@@ -169,7 +169,7 @@ namespace AivinDesktop {
 
       tray = new NotifyIcon();
       tray.ContextMenuStrip = menu;
-      tray.Text = "AIVIN Bot CLI";
+      tray.Text = "AIVIN Bot";
       tray.Icon = shownIcon = greyIcon;
       tray.MouseClick += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) OpenAivin(); };
       tray.Visible = true;
@@ -209,7 +209,7 @@ namespace AivinDesktop {
     void Balloon(string text, ToolTipIcon icon) {
       try {
         tray.Icon = colorIcon;
-        tray.ShowBalloonTip(6000, "AIVIN Bot CLI", text, icon);
+        tray.ShowBalloonTip(6000, "AIVIN Bot", text, icon);
       } catch { }
       try { tray.Icon = shownIcon; } catch { }
     }
@@ -404,7 +404,7 @@ namespace AivinDesktop {
     void ShowPair() {
       if (pairForm != null) { pairForm.Activate(); return; }
       Form f = new Form();
-      f.Text = "AIVIN Bot CLI";
+      f.Text = "AIVIN Bot";
       f.Icon = colorIcon;
       f.Font = SystemFonts.MessageBoxFont;
       f.AutoScaleDimensions = new SizeF(96F, 96F);

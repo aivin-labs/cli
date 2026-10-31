@@ -80,7 +80,7 @@ test('biên dịch được Aivin.exe (Windows): tên + hãng hiện ở Task Ma
   const res = ensureLauncher({ exe, home: path.join(dir, 'home'), dir: path.join(dir, 'build') });
   assert.equal(res.built, true);
   const info = execFileSync('powershell.exe', ['-NoProfile', '-Command', `$v = (Get-Item '${exe}').VersionInfo; "$($v.FileDescription)|$($v.CompanyName)"`], { encoding: 'utf8' }).trim();
-  assert.equal(info, 'AIVIN Bot CLI|Aivin Labs');
+  assert.equal(info, 'AIVIN Bot|Aivin Labs');
   assert.equal(ensureLauncher({ exe, home: path.join(dir, 'home'), dir: path.join(dir, 'build') }).built, false, 'mã không đổi → không biên dịch lại');
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -125,7 +125,7 @@ test('Linux: Exec= bọc nháy theo Desktop Entry spec, tắt / bật nhận c�
   assert.equal(desktopExecArg('/home/$x"y'), '"/home/\\\\$x\\\\"y"');
   const entry = linuxDesktopEntry({ launcher: '/h/aivin-desktop.sh', icon: '/h/logo.png', lang: 'en', autostart: true });
   assert.match(entry, /^Exec="\/h\/aivin-desktop\.sh" --autostart$/m);
-  assert.match(entry, /^Name=AIVIN Bot CLI$/m);
+  assert.match(entry, /^Name=AIVIN Bot$/m);
   assert.equal(isAutostartEnabled(entry), true);
   assert.equal(isAutostartEnabled(entry.replace('Hidden=false', 'Hidden=true')), false);
   assert.equal(isAutostartEnabled(entry.replace('X-GNOME-Autostart-enabled=true', 'X-GNOME-Autostart-enabled=false')), false);

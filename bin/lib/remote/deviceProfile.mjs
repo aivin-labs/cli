@@ -123,6 +123,7 @@ export function buildDeviceProfile(roots) {
     roots: roots.map((r) => path.resolve(r)),
     binaries: detectBinaries(),
     projects: detectProjects(roots),
+    desktop_cast: process.platform === 'win32',
   };
 }
 

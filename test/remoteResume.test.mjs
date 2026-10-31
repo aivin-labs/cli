@@ -51,6 +51,21 @@ test('sổ lời gọi: BE báo không còn ai chờ → bỏ kết quả; quá 
   assert.deepEqual(ledger.unsent(), []);
 });
 
+test('sổ lời gọi: gom nhịp ghi bất đồng bộ khi nhiều lời gọi hoàn tất liên tiếp, flush() đẩy xuống đĩa ngay', async () => {
+  const file = tmpFile('outbox-async.json');
+  const ledger = createCallLedger({ file, debounceMs: 50 });
+  ledger.admit({ call_id: 'b1' });
+  ledger.admit({ call_id: 'b2' });
+  ledger.finish('b1', { call_id: 'b1', ok: true, result: { v: 1 } });
+  ledger.finish('b2', { call_id: 'b2', ok: true, result: { v: 2 } });
+  ledger.persist();
+  assert.equal(fs.existsSync(file), false, 'chưa ghi đồng bộ ngay trên luồng chính');
+  await ledger.flush();
+  assert.equal(fs.existsSync(file), true, 'sau flush đã ghi xong bất đồng bộ');
+  const reloaded = createCallLedger({ file });
+  assert.equal(reloaded.unsent().length, 2);
+});
+
 test('chống làm trùng bền qua lần khởi động lại: bước xong trả kết quả cũ, bước đang chạy lúc daemon chết → INTERRUPTED, bước hỏng được chạy lại', async () => {
   const file = tmpFile('idem.jsonl');
   let runs = 0;

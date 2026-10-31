@@ -84,6 +84,10 @@ namespace AivinGui {
     const uint KEYEVENTF_EXTENDEDKEY = 0x1, KEYEVENTF_KEYUP = 0x2, KEYEVENTF_UNICODE = 0x4;
 
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 200 };
+    static readonly object OutputLock = new object();
+    static readonly object StateLock = new object();
+    static readonly HashSet<string> CancelledIds = new HashSet<string>();
+    static readonly HashSet<string> ActiveWaits = new HashSet<string>();
     /** Ảnh chụp của lần observe: node_id = "<snap>.<idx>" → phần tử. Giữ vài lần gần nhất, cũ hơn → GUI_STALE_NODE. */
     static readonly Dictionary<int, Dictionary<int, AutomationElement>> Snapshots = new Dictionary<int, Dictionary<int, AutomationElement>>();
     static readonly Dictionary<int, IntPtr> SnapshotWindow = new Dictionary<int, IntPtr>();
@@ -118,32 +122,71 @@ namespace AivinGui {
       t.Join();
     }
 
+    static void WriteLineSafe(StreamWriter output, Dictionary<string, object> res) {
+      string line = Json.Serialize(res);
+      lock (OutputLock) { output.WriteLine(line); }
+    }
+
+    static bool IsCancelled(string reqId) {
+      if (string.IsNullOrEmpty(reqId)) return false;
+      lock (CancelledIds) { return CancelledIds.Contains(reqId); }
+    }
+
+    static void ExecuteAndWrite(StreamWriter output, object id, string op, Dictionary<string, object> args) {
+      var res = new Dictionary<string, object>();
+      try {
+        res["result"] = Dispatch(op, args);
+        res["ok"] = true;
+      } catch (GuiError e) {
+        res["ok"] = false; res["code"] = e.Code; res["error"] = e.Message;
+      } catch (ElementNotAvailableException e) {
+        res["ok"] = false; res["code"] = "GUI_STALE_NODE"; res["error"] = "Element is gone: " + e.Message;
+      } catch (Exception e) {
+        res["ok"] = false; res["code"] = "EXECUTION_FAILED"; res["error"] = e.GetType().Name + ": " + e.Message;
+      }
+      res["id"] = id;
+      WriteLineSafe(output, res);
+    }
+
     static void Loop() {
       var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
       var output = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false));
       output.AutoFlush = true;
-      output.WriteLine(Json.Serialize(new Dictionary<string, object> { { "ready", true } }));
+      WriteLineSafe(output, new Dictionary<string, object> { { "ready", true } });
       string line;
       while ((line = input.ReadLine()) != null) {
         if (line.Trim().Length == 0) continue;
         object id = null;
-        var res = new Dictionary<string, object>();
         try {
           var req = (Dictionary<string, object>)Json.DeserializeObject(line);
+          string cancelId = Str(req, "cancel");
+          if (!string.IsNullOrEmpty(cancelId)) {
+            lock (CancelledIds) { if (ActiveWaits.Contains(cancelId)) CancelledIds.Add(cancelId); }
+            continue;
+          }
           id = Get(req, "id");
+          string op = Str(req, "op");
           var args = Get(req, "args") as Dictionary<string, object>;
           if (args == null) args = new Dictionary<string, object>();
-          res["result"] = Dispatch(Str(req, "op"), args);
-          res["ok"] = true;
-        } catch (GuiError e) {
-          res["ok"] = false; res["code"] = e.Code; res["error"] = e.Message;
-        } catch (ElementNotAvailableException e) {
-          res["ok"] = false; res["code"] = "GUI_STALE_NODE"; res["error"] = "Element is gone: " + e.Message;
+          args["__req_id"] = id == null ? null : Convert.ToString(id);
+          // wait_for / ping / idle chỉ đọc trạng thái → chạy trên luồng MTA riêng để wait_for (chờ tới 60s) không chặn observe / act / windows.
+          if (op == "wait_for" || op == "ping" || op == "idle") {
+            object reqId = id;
+            string reqOp = op;
+            var reqArgs = args;
+            string reqIdStr = id == null ? null : Convert.ToString(id);
+            if (op == "wait_for" && !string.IsNullOrEmpty(reqIdStr)) { lock (CancelledIds) { ActiveWaits.Add(reqIdStr); } }
+            var worker = new Thread(delegate () { try { ExecuteAndWrite(output, reqId, reqOp, reqArgs); } finally { if (reqOp == "wait_for" && !string.IsNullOrEmpty(reqIdStr)) { lock (CancelledIds) { ActiveWaits.Remove(reqIdStr); CancelledIds.Remove(reqIdStr); } } } });
+            worker.IsBackground = true;
+            worker.SetApartmentState(ApartmentState.MTA);
+            worker.Start();
+            continue;
+          }
+          ExecuteAndWrite(output, id, op, args);
         } catch (Exception e) {
-          res["ok"] = false; res["code"] = "EXECUTION_FAILED"; res["error"] = e.GetType().Name + ": " + e.Message;
+          var errRes = new Dictionary<string, object> { { "id", id }, { "ok", false }, { "code", "EXECUTION_FAILED" }, { "error", e.GetType().Name + ": " + e.Message } };
+          WriteLineSafe(output, errRes);
         }
-        res["id"] = id;
-        output.WriteLine(Json.Serialize(res));
       }
     }
 
@@ -423,6 +466,7 @@ namespace AivinGui {
       int maxNodes = Math.Max(20, Math.Min(Int(a, "max_nodes", 300), 1500));
       int maxDepth = Math.Max(2, Math.Min(Int(a, "max_depth", 25), 60));
       var sw = Stopwatch.StartNew();
+      AssertWindowResponsive(h);
       AutomationElement root = AutomationElement.FromHandle(h);
       var cache = BuildCache();
       var nodes = new List<object>();
@@ -458,12 +502,14 @@ namespace AivinGui {
         } catch { continue; }
         foreach (AutomationElement k in kids) queue.Enqueue(new KeyValuePair<AutomationElement, int>(k, item.Value + 1));
       }
-      Snapshots[snap] = map;
-      SnapshotWindow[snap] = h;
-      while (Snapshots.Count > KEEP_SNAPSHOTS) {
-        int oldest = int.MaxValue;
-        foreach (var k in Snapshots.Keys) if (k < oldest) oldest = k;
-        Snapshots.Remove(oldest); SnapshotWindow.Remove(oldest); OcrSnapshots.Remove(oldest);
+      lock (StateLock) {
+        Snapshots[snap] = map;
+        SnapshotWindow[snap] = h;
+        while (Snapshots.Count > KEEP_SNAPSHOTS) {
+          int oldest = int.MaxValue;
+          foreach (var k in Snapshots.Keys) if (k < oldest) oldest = k;
+          Snapshots.Remove(oldest); SnapshotWindow.Remove(oldest); OcrSnapshots.Remove(oldest);
+        }
       }
       // Cây nghèo: ít phần tử có tên / thao tác được (ứng dụng vẽ tay, canvas, Electron tắt trợ năng) → cần ảnh để định vị.
       string quality = (interactive >= 3 && named >= 5) ? "good" : "poor";
@@ -539,7 +585,7 @@ namespace AivinGui {
           });
           rects.Add(r);
         }
-        OcrSnapshots[snap] = rects;
+        lock (StateLock) { OcrSnapshots[snap] = rects; }
         var info = new Dictionary<string, object> { { "lang", used }, { "count", rects.Count }, { "ms", sw.ElapsedMilliseconds } };
         if (!used.StartsWith("vi", StringComparison.OrdinalIgnoreCase)) info["hint"] = "No Vietnamese OCR on this PC — Vietnamese text loses its accents. Settings → Time & language → Language → add Vietnamese (Optical character recognition)";
         res["ocr"] = info;
@@ -569,10 +615,12 @@ namespace AivinGui {
       int snap, idx;
       if (!int.TryParse(nodeId.Substring(0, dot), out snap) || !int.TryParse(nodeId.Substring(dot + 1), out idx)) throw new GuiError("INVALID_ARGS", "Bad node id: " + nodeId);
       Dictionary<int, AutomationElement> map;
-      if (!Snapshots.TryGetValue(snap, out map)) throw new GuiError("GUI_STALE_NODE", "Node " + nodeId + " is from an old observation — observe again");
       AutomationElement e;
-      if (!map.TryGetValue(idx, out e)) throw new GuiError("NOT_FOUND", "No node " + nodeId);
-      window = SnapshotWindow[snap];
+      lock (StateLock) {
+        if (!Snapshots.TryGetValue(snap, out map)) throw new GuiError("GUI_STALE_NODE", "Node " + nodeId + " is from an old observation — observe again");
+        if (!map.TryGetValue(idx, out e)) throw new GuiError("NOT_FOUND", "No node " + nodeId);
+        window = SnapshotWindow[snap];
+      }
       return e;
     }
 
@@ -624,8 +672,19 @@ namespace AivinGui {
         if (action != "click" && action != "double_click" && action != "right_click" && action != "set_value" && action != "type") {
           throw new GuiError("INVALID_ARGS", "Text read from the screenshot (OCR) supports click / double_click / right_click / set_value / type only");
         }
-        // Chữ OCR không phải ô nhập: gõ vào nó = click vào chỗ đó trước rồi gõ bằng bàn phím.
-        if (action == "set_value" || action == "type") { MouseAt(null, window, a, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1); method = "mouse"; }
+        // Khi điền chữ vào nhãn OCR (vd "Họ tên:", "Số tiền"): tìm ô nhập thật (Edit / ComboBox / Document) nằm ngay bên phải hoặc ngay bên
+        // dưới nhãn trong cùng cửa sổ để dùng ValuePattern / WM_SETTEXT chạy nền. Chỉ khi không có ô nhập UIA nào (ứng dụng vẽ tay hoàn toàn)
+        // mới bấm vào toạ độ chữ rồi gõ bàn phím.
+        if (action == "set_value" || action == "type") {
+          AutomationElement nearby = FindNearbyInputForOcr(nodeId, window);
+          if (nearby != null) {
+            el = nearby;
+            ocrPoint = null;
+          } else {
+            MouseAt(null, window, a, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1);
+            method = "mouse";
+          }
+        }
       }
       else if (!string.IsNullOrEmpty(nodeId)) el = NodeOf(nodeId, out window);
       else window = ResolveWindow(a);
@@ -635,6 +694,7 @@ namespace AivinGui {
         try { isPassword = el.Current.IsPassword; } catch (ElementNotAvailableException) { throw new GuiError("GUI_STALE_NODE", "Node " + nodeId + " is gone — observe again"); }
         if (isPassword && (action == "type" || action == "set_value")) throw new GuiError("GUI_PASSWORD_FIELD", "Typing into a password field is not allowed — ask the user to type it");
       }
+      AssertWindowResponsive(window);
       IntPtr fgBefore = Native.GetForegroundWindow();
       string used = DoAction(action, method, el, window, a);
       // Thao tác theo pattern không cần cửa sổ đích ở trên cùng, nhưng nhiều ứng dụng (WinForms qua MSAA) tự lấy focus khi bị SetValue /
@@ -806,6 +866,22 @@ namespace AivinGui {
 
     const uint WM_SETTEXT = 0x000C, WM_CHAR = 0x0102, SMTO_ABORTIFHUNG = 0x0002;
 
+    /** Kiểm tra nhanh nhịp phản hồi của cửa sổ bằng WM_NULL + SMTO_ABORTIFHUNG để tránh UI Automation treo cứng khi ứng dụng đích bị đơ. */
+    static bool IsWindowResponsive(IntPtr h, uint timeoutMs) {
+      if (h == IntPtr.Zero || !Native.IsWindow(h)) return false;
+      IntPtr r;
+      return Native.SendMessageTimeout(h, 0, IntPtr.Zero, null, SMTO_ABORTIFHUNG, timeoutMs, out r) != IntPtr.Zero;
+    }
+
+    static void AssertWindowResponsive(IntPtr h) {
+      if (h == IntPtr.Zero) return;
+      if (!Native.IsWindow(h)) throw new GuiError("GUI_WINDOW_GONE", "The target window has closed");
+      if (!IsWindowResponsive(h, 500)) {
+        if (!Native.IsWindow(h)) throw new GuiError("GUI_WINDOW_GONE", "The target window has closed");
+        throw new GuiError("GUI_WINDOW_HUNG", "The target window is not responding (frozen UI thread)");
+      }
+    }
+
     /** Handle Win32 riêng của phần tử (ô nhập / nút Win32, WinForms có; WPF / UWP / Chromium thì không). */
     static IntPtr OwnHandle(AutomationElement el) {
       if (el == null) return IntPtr.Zero;
@@ -866,37 +942,44 @@ namespace AivinGui {
       int timeout = Math.Max(200, Math.Min(Int(a, "timeout_ms", 10000), 60000));
       IntPtr h = (!windowLevel || !string.IsNullOrEmpty(Str(a, "window"))) ? ResolveWindow(a) : IntPtr.Zero;
       if (!windowLevel && h == IntPtr.Zero) throw new GuiError("NOT_FOUND", "No window is focused");
+      string reqId = Str(a, "__req_id");
       var sw = Stopwatch.StartNew();
-      while (true) {
-        bool alive = h == IntPtr.Zero || Native.IsWindow(h);
-        Dictionary<string, object> match = null;
-        if (windowLevel) {
-          if (h != IntPtr.Zero) {
-            if (alive && WindowText(h).IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0) match = WindowInfo(h, Native.GetForegroundWindow());
-          } else {
-            foreach (Dictionary<string, object> info in ListWindows(false)) {
-              if (Convert.ToString(info["title"]).IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0) { match = info; break; }
+      try {
+        while (true) {
+          if (IsCancelled(reqId)) throw new GuiError("CANCELLED", "Wait cancelled");
+          bool alive = h == IntPtr.Zero || Native.IsWindow(h);
+          Dictionary<string, object> match = null;
+          if (windowLevel) {
+            if (h != IntPtr.Zero) {
+              if (alive && WindowText(h).IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0) match = WindowInfo(h, Native.GetForegroundWindow());
+            } else {
+              foreach (Dictionary<string, object> info in ListWindows(false)) {
+                if (Convert.ToString(info["title"]).IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0) { match = info; break; }
+              }
             }
+          } else if (alive) {
+            match = FindElement(h, name, aid, role);
           }
-        } else if (alive) {
-          match = FindElement(h, name, aid, role);
+          if (gone ? match == null : match != null) {
+            var res = new Dictionary<string, object> { { "met", true }, { "until", gone ? "gone" : "appears" }, { "waited_ms", sw.ElapsedMilliseconds } };
+            if (match != null) res["match"] = match;
+            if (!alive) res["window_closed"] = true;
+            return res;
+          }
+          if (!alive) throw new GuiError("GUI_WINDOW_GONE", "The window closed while waiting for the element to appear");
+          if (sw.ElapsedMilliseconds >= timeout) {
+            throw new GuiError("GUI_WAIT_TIMEOUT", "Still " + (gone ? "present" : "not there") + " after " + sw.ElapsedMilliseconds + " ms — observe to see what the window shows instead");
+          }
+          Thread.Sleep(250);
         }
-        if (gone ? match == null : match != null) {
-          var res = new Dictionary<string, object> { { "met", true }, { "until", gone ? "gone" : "appears" }, { "waited_ms", sw.ElapsedMilliseconds } };
-          if (match != null) res["match"] = match;
-          if (!alive) res["window_closed"] = true;
-          return res;
-        }
-        if (!alive) throw new GuiError("GUI_WINDOW_GONE", "The window closed while waiting for the element to appear");
-        if (sw.ElapsedMilliseconds >= timeout) {
-          throw new GuiError("GUI_WAIT_TIMEOUT", "Still " + (gone ? "present" : "not there") + " after " + sw.ElapsedMilliseconds + " ms — observe to see what the window shows instead");
-        }
-        Thread.Sleep(250);
+      } finally {
+        if (!string.IsNullOrEmpty(reqId)) { lock (CancelledIds) { CancelledIds.Remove(reqId); } }
       }
     }
 
     /** Phần tử đầu tiên khớp (AutomationId trùng hẳn, hoặc tên chứa chữ — không phân biệt hoa thường), có lọc vai trò. */
     static Dictionary<string, object> FindElement(IntPtr h, string name, string aid, string role) {
+      if (!IsWindowResponsive(h, 300)) return null;
       AutomationElement root;
       try { root = AutomationElement.FromHandle(h); } catch { return null; }
       var cache = new CacheRequest();
@@ -930,14 +1013,71 @@ namespace AivinGui {
       int snap, idx;
       if (!int.TryParse(nodeId.Substring(0, dot), out snap) || !int.TryParse(nodeId.Substring(dot + 2), out idx)) throw new GuiError("INVALID_ARGS", "Bad node id: " + nodeId);
       List<System.Windows.Rect> rects;
-      if (!OcrSnapshots.TryGetValue(snap, out rects)) throw new GuiError("GUI_STALE_NODE", "Node " + nodeId + " is from an old observation — observe again");
-      if (idx < 0 || idx >= rects.Count) throw new GuiError("NOT_FOUND", "No node " + nodeId);
-      window = SnapshotWindow[snap];
+      lock (StateLock) {
+        if (!OcrSnapshots.TryGetValue(snap, out rects)) throw new GuiError("GUI_STALE_NODE", "Node " + nodeId + " is from an old observation — observe again");
+        if (idx < 0 || idx >= rects.Count) throw new GuiError("NOT_FOUND", "No node " + nodeId);
+        window = SnapshotWindow[snap];
+      }
       if (!Native.IsWindow(window)) throw new GuiError("GUI_STALE_NODE", "The window of " + nodeId + " is closed — observe again");
       // Khung chữ tính theo góc cửa sổ lúc observe → cộng vị trí cửa sổ HIỆN TẠI (người dùng có thể đã kéo cửa sổ đi).
       Native.RECT wr; Native.GetWindowRect(window, out wr);
       var r = rects[idx];
       return new System.Windows.Point(wr.Left + r.X + r.Width / 2, wr.Top + r.Y + r.Height / 2);
+    }
+
+    /**
+     * Tìm ô nhập UIA (Edit / ComboBox / Document, hoặc có ValuePattern ghi được) nằm ngay bên phải hoặc ngay bên dưới một nhãn chữ OCR.
+     * Giúp thao tác điền vào nhãn OCR điền thẳng vào ô nhập thật thay vì gõ vào chữ tĩnh.
+     */
+    static AutomationElement FindNearbyInputForOcr(string nodeId, IntPtr window) {
+      if (window == IntPtr.Zero || !Native.IsWindow(window)) return null;
+      int dot = nodeId.IndexOf(".t");
+      int snap, idx;
+      if (dot <= 0 || !int.TryParse(nodeId.Substring(0, dot), out snap) || !int.TryParse(nodeId.Substring(dot + 2), out idx)) return null;
+      System.Windows.Rect ocrRect;
+      var candidates = new List<AutomationElement>();
+      lock (StateLock) {
+        List<System.Windows.Rect> rects;
+        if (!OcrSnapshots.TryGetValue(snap, out rects) || idx < 0 || idx >= rects.Count) return null;
+        ocrRect = rects[idx];
+        Dictionary<int, AutomationElement> map;
+        if (Snapshots.TryGetValue(snap, out map)) {
+          foreach (var kv in map) candidates.Add(kv.Value);
+        }
+      }
+      Native.RECT wr; Native.GetWindowRect(window, out wr);
+      AutomationElement best = null;
+      double bestScore = double.MaxValue;
+      foreach (AutomationElement e in candidates) {
+        try {
+          if (!e.Current.IsEnabled || e.Current.IsOffscreen) continue;
+          ControlType ct = e.Current.ControlType;
+          bool isInput = ct == ControlType.Edit || ct == ControlType.ComboBox || ct == ControlType.Document;
+          if (!isInput) {
+            var vp = Pattern(e, ValuePattern.Pattern) as ValuePattern;
+            if (vp == null || vp.Current.IsReadOnly) continue;
+          }
+          System.Windows.Rect er = e.Current.BoundingRectangle;
+          if (er.IsEmpty || er.Width <= 4 || er.Height <= 4) continue;
+          double rx = er.X - wr.Left, ry = er.Y - wr.Top, rw = er.Width, rh = er.Height;
+          // Bỏ qua nếu chính phần tử bao trùm cả cửa sổ
+          if (rw >= (wr.Right - wr.Left) * 0.95 && rh >= (wr.Bottom - wr.Top) * 0.9) continue;
+          // 1. Ô nhập nằm bên phải nhãn (cùng hàng ngang)
+          double overlapY = Math.Min(ocrRect.Bottom, ry + rh) - Math.Max(ocrRect.Top, ry);
+          double minH = Math.Min(ocrRect.Height, rh);
+          if (minH > 0 && overlapY >= minH * 0.35 && rx >= ocrRect.Right - 12 && rx - ocrRect.Right <= 280) {
+            double dist = Math.Max(0, rx - ocrRect.Right) + Math.Abs((ry + rh / 2) - (ocrRect.Y + ocrRect.Height / 2)) * 2.0;
+            if (dist < bestScore) { bestScore = dist; best = e; }
+          }
+          // 2. Ô nhập nằm ngay bên dưới nhãn (cùng cột dọc)
+          double overlapX = Math.Min(ocrRect.Right, rx + rw) - Math.Max(ocrRect.Left, rx);
+          if ((Math.Abs(rx - ocrRect.Left) <= 140 || overlapX >= ocrRect.Width * 0.4) && ry >= ocrRect.Bottom - 8 && ry - ocrRect.Bottom <= 72) {
+            double dist = Math.Max(0, ry - ocrRect.Bottom) * 1.5 + Math.Abs(rx - ocrRect.Left);
+            if (dist < bestScore) { bestScore = dist; best = e; }
+          }
+        } catch { continue; }
+      }
+      return best;
     }
 
     static System.Windows.Point PointFor(AutomationElement el, IntPtr window, Dictionary<string, object> a) {

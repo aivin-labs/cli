@@ -95,6 +95,17 @@ export async function extractDocText(abs, size, maxChars = 600) {
         await handle.close();
       }
     }
+    if (ext === '.pdf') {
+      const handle = await fs.promises.open(abs, 'r');
+      try {
+        const readLen = Math.min(size, 2 * 1024 * 1024);
+        const buf = Buffer.alloc(readLen);
+        const { bytesRead } = await handle.read(buf, 0, readLen, 0);
+        return extractPdfText(buf.subarray(0, bytesRead), maxChars);
+      } finally {
+        await handle.close();
+      }
+    }
     if (!officeParts(ext, ['ppt/slides/slide1.xml']).length || size > MAX_ZIP_BYTES) return '';
     return clean(officeText(await fs.promises.readFile(abs), ext), maxChars);
   } catch {
@@ -114,4 +125,78 @@ export function wellFormed(text) {
 
 export function isDocFile(abs) {
   return DOC_EXTENSIONS.has(path.extname(abs).toLowerCase());
+}
+
+function unescapePdfString(s) {
+  return String(s || '')
+    .replace(/\\([()\\])/g, '$1')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\([0-7]{1,3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
+}
+
+/** Trích xuất nội dung văn bản từ các stream PDF (hỗ trợ cả stream nén FlateDecode và uncompressed). */
+function extractPdfText(buf, maxChars) {
+  if (!buf || buf.length < 8) return '';
+  const str = buf.toString('latin1');
+  const textPieces = [];
+  let totalLen = 0;
+
+  const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let m;
+  while ((m = streamRe.exec(str)) !== null) {
+    if (totalLen >= maxChars * 2) break;
+    const streamStart = m.index + m[0].indexOf('\n') + 1;
+    const streamEnd = m.index + m[0].lastIndexOf('endstream');
+    const streamRaw = buf.subarray(streamStart, Math.max(streamStart, streamEnd));
+    const dictSlice = str.slice(Math.max(0, m.index - 300), m.index);
+    let decoded = '';
+    if (/\/FlateDecode/i.test(dictSlice)) {
+      try { decoded = zlib.inflateSync(streamRaw).toString('latin1'); }
+      catch { try { decoded = zlib.inflateRawSync(streamRaw).toString('latin1'); } catch { decoded = ''; } }
+    } else {
+      decoded = streamRaw.toString('latin1');
+    }
+
+    if (!decoded || (!decoded.includes('BT') && !decoded.includes('Tj') && !decoded.includes('TJ'))) continue;
+
+    const tjRe = /\(((?:[^)\\]|\\.)*)\)\s*(?:Tj|'|")/g;
+    let tm;
+    while ((tm = tjRe.exec(decoded)) !== null) {
+      const parsed = unescapePdfString(tm[1]);
+      if (parsed.trim()) {
+        textPieces.push(parsed.trim());
+        totalLen += parsed.length;
+        if (totalLen >= maxChars * 2) break;
+      }
+    }
+
+    const arrayTjRe = /\[((?:[^\]\\]|\\.)*)\]\s*TJ/g;
+    let am;
+    while ((am = arrayTjRe.exec(decoded)) !== null) {
+      const innerStr = am[1];
+      const innerRe = /\(((?:[^)\\]|\\.)*)\)/g;
+      let im;
+      while ((im = innerRe.exec(innerStr)) !== null) {
+        const parsed = unescapePdfString(im[1]);
+        if (parsed.trim()) {
+          textPieces.push(parsed.trim());
+          totalLen += parsed.length;
+          if (totalLen >= maxChars * 2) break;
+        }
+      }
+    }
+  }
+
+  if (!textPieces.length) {
+    const rawTj = /\(((?:[^)\\]|\\.)*)\)\s*Tj/g;
+    let rm;
+    while ((rm = rawTj.exec(str)) !== null) {
+      const parsed = unescapePdfString(rm[1]);
+      if (parsed.trim()) textPieces.push(parsed.trim());
+    }
+  }
+
+  return clean(textPieces.join(' '), maxChars);
 }

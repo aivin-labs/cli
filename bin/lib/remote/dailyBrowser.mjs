@@ -256,7 +256,11 @@ export function createCdpMux({ wsUrl, downloadsDir, consentTimeoutMs = CONSENT_T
       sessions.set(params.sessionId, { client, targetId, type: params.targetInfo?.type, parent, aivin });
       if (aivin) markTabAivin(params.targetInfo?.type === 'tab' ? params.sessionId : parent);
     }
-    if (msg.method === 'Target.detachedFromTarget' && params.sessionId) sessions.delete(params.sessionId);
+    if (msg.method === 'Target.detachedFromTarget' && params.sessionId) {
+      sessions.delete(params.sessionId);
+      for (const [sid, s] of [...sessions]) if (s.parent === params.sessionId) sessions.delete(sid);
+      for (const k of [...client.requests.keys()]) if (k.startsWith(`${params.sessionId}:`)) client.requests.delete(k);
+    }
     if (msg.method === 'Target.targetDestroyed' && params.targetId) aivinTargets.delete(params.targetId);
   };
 
@@ -332,7 +336,9 @@ export function createCdpMux({ wsUrl, downloadsDir, consentTimeoutMs = CONSENT_T
           if (msg.id !== undefined) toClient(JSON.stringify({ id: msg.id, ...(msg.sessionId ? { sessionId: msg.sessionId } : {}), error: { code: -32000, message: reason } }));
           return;
         }
-        if (msg.id !== undefined) client.requests.set(`${sid}:${msg.id}`, { method: msg.method, targetId: params.targetId });
+        if (msg.id !== undefined && (msg.method === 'Target.createTarget' || msg.method === 'Target.attachToTarget')) {
+          client.requests.set(`${sid}:${msg.id}`, { method: msg.method, targetId: params.targetId });
+        }
         // Thư mục tải đặt qua một trang áp cho cả hồ sơ: nhớ để trả về mặc định khi đường hầm cuối cùng đóng (tệp người dùng tự tải về đúng chỗ cũ).
         if (msg.method === 'Page.setDownloadBehavior') client.setDownloads = true;
         // Tab mới mở ở nền: không giật tiêu điểm khỏi cửa sổ người dùng đang làm việc.

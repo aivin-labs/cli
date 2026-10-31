@@ -84,14 +84,21 @@ export function createWindowsHost({ spawnImpl = spawn } = {}) {
     return starting;
   }
 
-  /** Một lời gọi tới host. Huỷ (`signal`) giữa chừng → giết host (không có cách ngắt một lời gọi UI Automation đang chờ). */
+  /** Một lời gọi tới host. Huỷ (`signal`) giữa chừng: `wait_for` gửi `{ cancel: id }` để thoát vòng chờ mà không giết tiến trình host (giữ nguyên snapshot); lệnh khác treo thì giết host. */
   async function call(op, args = {}, { signal } = {}) {
     if (signal?.aborted) throw signal.reason;
     await start();
     if (signal?.aborted) throw signal.reason;
     const id = ++seq;
     return new Promise((resolve, reject) => {
-      const onAbort = () => { waiters.delete(id); reject(signal.reason); kill(); };
+      const onAbort = () => {
+        waiters.delete(id);
+        reject(signal.reason);
+        if (op === 'wait_for' && child?.stdin?.writable) {
+          try { child.stdin.write(`${JSON.stringify({ cancel: String(id) })}\n`); return; } catch { /* rơi xuống kill */ }
+        }
+        kill();
+      };
       signal?.addEventListener('abort', onAbort, { once: true });
       waiters.set(id, {
         resolve: (v) => { signal?.removeEventListener('abort', onAbort); resolve(v); },

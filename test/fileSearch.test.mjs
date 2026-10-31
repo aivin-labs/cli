@@ -159,3 +159,22 @@ test('vector: bỏ nửa ký tự lẻ trước khi gửi; BE lỗi → tạm ng
   assert.equal(calls, 1); // đang tạm nghỉ sau lần lỗi
   index.close();
 });
+
+test('đọc chữ trong tệp PDF có stream văn bản và ưu tiên tài liệu khớp đủ từ (AND) trong FTS5', async () => {
+  const dir = sandboxDir();
+  const pdfStream = '%PDF-1.4\n1 0 obj\n<< /Length 45 >>\nstream\nBT\n/F1 12 Tf\n(Hop Dong Thue Nha 2026) Tj\nET\nendstream\nendobj\n%%EOF';
+  const pdfFile = path.join(dir, 'hop-dong.pdf');
+  fs.writeFileSync(pdfFile, pdfStream);
+  const text = await extractDocText(pdfFile, fs.statSync(pdfFile).size);
+  assert.equal(text, 'Hop Dong Thue Nha 2026');
+
+  // Kiểm tra xếp hạng ưu tiên tệp khớp đủ từ
+  fs.writeFileSync(path.join(dir, 'tap-chi.txt'), 'thue xe du lich gia re nam 2026 thue thue thue thue thue');
+  fs.writeFileSync(path.join(dir, 'bien-ban.txt'), 'hop dong thue nha chinh thuc');
+  const index = remote.createFileIndex([dir]);
+  await index.build();
+  const results = index.search('hop dong thue nha', 5);
+  assert.ok(results.length >= 2);
+  assert.match(results[0].path, /(hop-dong\.pdf|bien-ban\.txt)$/, 'tệp khớp đủ từ phải đứng trước tệp chỉ lặp một từ');
+  index.close();
+});

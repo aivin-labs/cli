@@ -90,6 +90,7 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
     readonly System.Windows.FrameworkElement w;
     readonly System.Windows.UIElement bot, shadow, earL, earR, visorFx, face;
     readonly System.Windows.Shapes.Shape tint, halo;
+    readonly System.Windows.UIElement blushL, blushR;
     readonly ScaleTransform botScale, shadowScale, faceScale, mouthOpen, talk;
     readonly RotateTransform botLean, headRot, antRot;
     readonly TranslateTransform botMove, headMove, faceLook, eyeLook, scanY;
@@ -124,7 +125,7 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
     readonly Spring lookX = new Spring(0), lookY = new Spring(0), near = new Spring(0);
     int curX = int.MinValue, curY = int.MinValue; double curMovedAt = -10;
     double prevHead, prevHeadVel, headAcc;
-    double nextBlink = 1.2, blinkAt = -10; bool doubleBlink;
+    double nextBlink = 1.2, blinkAt = -10, blushAt = -10; bool doubleBlink;
     double nextGlance = 2, glanceX, glanceY;
     double hopAt = -10, shakeAt = -10, nodAt = -10, perkAt = -10, flashAt = -10;
     bool hopKick, landKick;
@@ -171,7 +172,7 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
       bot = Get<System.Windows.UIElement>("Bot"); shadow = Get<System.Windows.UIElement>("Shadow");
       earL = Get<System.Windows.UIElement>("EarGlowL"); earR = Get<System.Windows.UIElement>("EarGlowR");
       visorFx = Get<System.Windows.UIElement>("VisorFx"); face = Get<System.Windows.UIElement>("Face");
-      tint = Get<System.Windows.Shapes.Shape>("AntennaTint"); halo = Get<System.Windows.Shapes.Shape>("AntennaHalo");
+      tint = Get<System.Windows.Shapes.Shape>("AntennaTint"); halo = Get<System.Windows.Shapes.Shape>("AntennaHalo"); blushL = w.FindName("BlushL") as System.Windows.UIElement; blushR = w.FindName("BlushR") as System.Windows.UIElement;
       botScale = Get<ScaleTransform>("BotScale"); shadowScale = Get<ScaleTransform>("ShadowScale"); faceScale = Get<ScaleTransform>("FaceScale");
       mouthOpen = Get<ScaleTransform>("MouthOpenScale"); talk = Get<ScaleTransform>("MouthTalkScale");
       botLean = Get<RotateTransform>("BotLean"); headRot = Get<RotateTransform>("HeadRot"); antRot = Get<RotateTransform>("AntennaRot");
@@ -297,9 +298,10 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       double t = Now;
       switch (g) {
         case "dizzy": dizzyAt = t; antA.V += 220; break;
-        case "giggle": giggleAt = t; antA.V -= 140; blinkAt = t; break;
+        case "giggle": giggleAt = t; antA.V -= 140; blinkAt = t; blushAt = t; break;
         case "purr": purrUntil = t + 0.9; break;
-        case "wave": hopAt = t; hopKick = landKick = false; perkAt = t + 0.6; flashAt = t; break;
+        case "wave": hopAt = t; hopKick = landKick = false; perkAt = t + 0.6; flashAt = t; blushAt = t; break;
+        case "wink": blinkAt = t; blushAt = t; antA.V -= 60; break;
         // Busy -> needs you: a start (eyes pop wide, antenna jolts, a quick rise) before the waiting look.
         case "startle": perkAt = t; flashAt = t; antA.V -= 260; eyeSq.V += 6; pop.V += 2.5; break;
         // Done after an error: no hop - sag with a slow breath out, then perk up.
@@ -475,6 +477,7 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       else if (hasColor && tintBrush.Color != colorTo) tintBrush.Color = colorTo;
       tint.Opacity = tv; halo.Opacity = Clamp(0.12 + (tv - 0.45) * 0.9 + flash * 0.5, 0, 0.8);
       visorFx.Opacity = scan; scanY.Y = (scanPhase % 1.0) * VISOR_SCAN;
+      double blush = Math.Max(purrK * 0.9, Bump(t - blushAt, 1.8) * 0.85); if (blushL != null) blushL.Opacity = blush; if (blushR != null) blushR.Opacity = blush;
 
       // 7) Screens (working): flip up from edge-on one after another with a little overshoot, drift, the focused one lights up;
       //    text scrolls / bars bounce. Collapsed when folded away (no 3D work). Zzz (offline): letters drift up and fade.
@@ -570,9 +573,11 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
           else if (state == "waiting" && inState > 12) {
             askAt = t; askSide = rnd.NextDouble() < 0.5 ? -1 : 1; askLevel = Math.Min(askLevel + 1, 3);
             if (askLevel >= 2) perkAt = t + 0.3;
+            SetFace("curious", "hmm");
           }
         }
       }
+      if (state == "waiting" && t - askAt >= 2.0 && eyesNow == "curious" && eyesNext == null) SetFace("wide", "open");
       mouthOpen.ScaleY = 1 + Math.Sin(t * 3.4) * 0.1; mouthOpen.ScaleX = 1 - Math.Sin(t * 3.4) * 0.05;
       talk.ScaleY = 0.45 + 0.55 * Math.Abs(Math.Sin(t * 12));
 

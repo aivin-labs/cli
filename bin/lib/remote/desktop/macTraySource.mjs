@@ -58,7 +58,7 @@ function output(path, args) {
     return '';
   }
 }
-function notify(text) { try { sa.displayNotification(text, { withTitle: 'AIVIN Bot CLI' }); } catch (e) {} }
+function notify(text) { try { sa.displayNotification(text, { withTitle: 'AIVIN Bot' }); } catch (e) {} }
 
 function loadCfg() {
   var c = { exe: null, args: [], s: {}, extra: {} };
@@ -196,7 +196,7 @@ function askCode() {
   var r;
   try {
     r = sa.displayDialog(T('pairPrompt'), {
-      defaultAnswer: '', buttons: [T('pairCancel'), T('pairOk')], defaultButton: T('pairOk'), cancelButton: T('pairCancel'), withTitle: 'AIVIN Bot CLI',
+      defaultAnswer: '', buttons: [T('pairCancel'), T('pairOk')], defaultButton: T('pairOk'), cancelButton: T('pairCancel'), withTitle: 'AIVIN Bot',
     });
   } catch (e) {
     return;
@@ -256,12 +256,12 @@ function buildUi() {
 
   item = $.NSStatusBar.systemStatusBar.statusItemWithLength($.NSVariableStatusItemLength);
   var img = $.NSImage.alloc.initWithContentsOfFile(LOGO);
-  if (img.isNil()) item.button.title = 'AIVIN Bot CLI';
+  if (img.isNil()) item.button.title = 'AIVIN Bot';
   else { img.size = $.NSMakeSize(18, 18); item.button.image = img; }
 
   menu = $.NSMenu.alloc.init;
   menu.autoenablesItems = false;
-  statusItem = addItem('AIVIN Bot CLI', null);
+  statusItem = addItem('AIVIN Bot', null);
   statusItem.enabled = false;
   menu.addItem($.NSMenuItem.separatorItem);
   openItem = addItem(T('connect'), 'onOpen:');

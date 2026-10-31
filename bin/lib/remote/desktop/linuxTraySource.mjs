@@ -66,7 +66,7 @@ def touch(path):
 
 def notify(text):
     if shutil.which('notify-send'):
-        subprocess.Popen(['notify-send', '-i', LOGO, 'AIVIN Bot CLI', text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(['notify-send', '-i', LOGO, 'AIVIN Bot', text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def pid_alive(pid):
@@ -257,9 +257,9 @@ def gtk_ui(sup):
     t = sup.t
     ind = AppIndicator.Indicator.new('aivin', LOGO, AppIndicator.IndicatorCategory.APPLICATION_STATUS)
     ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
-    ind.set_title('AIVIN Bot CLI')
+    ind.set_title('AIVIN Bot')
     menu = Gtk.Menu()
-    status = Gtk.MenuItem(label='AIVIN Bot CLI')
+    status = Gtk.MenuItem(label='AIVIN Bot')
     status.set_sensitive(False)
     connect = Gtk.MenuItem(label=t('connect'))
     pause = Gtk.MenuItem(label=t('pause'))
@@ -289,7 +289,7 @@ def gtk_ui(sup):
         if state['dialog']:
             return
         state['dialog'] = True
-        d = Gtk.Dialog(title='AIVIN Bot CLI')
+        d = Gtk.Dialog(title='AIVIN Bot')
         d.add_buttons(t('pairCancel'), Gtk.ResponseType.CANCEL, t('pairOk'), Gtk.ResponseType.OK)
         d.set_default_response(Gtk.ResponseType.OK)
         d.set_keep_above(True)

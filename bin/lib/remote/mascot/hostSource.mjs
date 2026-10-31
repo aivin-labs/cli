@@ -40,9 +40,9 @@ const DROP_ZONE_R = 90;
 
 /** Màu từng trạng thái: `fg` chấm / chữ, `bg` nền chip. */
 export const MASCOT_PALETTE = Object.freeze({
-  idle: { fg: '#00B42A', bg: '#E8FFEA' },
+  idle: { fg: '#14C9C9', bg: '#E6FFFB' },
   working: { fg: B.brand, bg: '#E8F3FF' },
-  thinking: { fg: B.light, bg: '#E6F9FF' },
+  thinking: { fg: '#722ED1', bg: '#F9F0FF' },
   waiting: { fg: B.warn, bg: B.warnBg },
   paused: { fg: B.muted, bg: '#F2F3F5' },
   offline: { fg: B.muted, bg: '#F2F3F5' },
@@ -488,7 +488,7 @@ function React($prev, $s) {
   if ($s -eq 'waiting' -and ($prev -eq 'working' -or $prev -eq 'thinking')) { $script:rig.Play('startle') }
   elseif ($s -eq 'done') {
     if (($now - $script:errorAt).TotalMinutes -lt 5) { $script:errorAt = [DateTime]::MinValue; PlayFace 'relief' 'relief' 1.3 }
-    elseif ($busyFor -ge 60) { $script:rig.Play('cheer') }
+    elseif ($busyFor -ge 60) { PlayFace 'cheer' 'star' 2.2 }
     elseif ($busyFor -gt 0 -and $busyFor -lt 10) { $script:rig.Play('small') }
   }
 }
@@ -510,7 +510,7 @@ function SetState($s) {
 
 # Pointer: the rig follows the cursor with its eyes on its own (anywhere near the bot). Hovering greets with a happy face and a lean-in.
 function IsBusy { $script:state -eq 'working' -or $script:state -eq 'thinking' }
-(E 'Mascot').Add_MouseEnter({ Wake; $script:rig.Hover = $true; if (-not (IsBusy) -and -not $script:rig.Dizzy) { SetFace 'hello' } })
+(E 'Mascot').Add_MouseEnter({ Wake; $script:rig.Hover = $true; if (-not (IsBusy) -and -not $script:rig.Dizzy) { if ((Get-Random -Minimum 0 -Maximum 10) -lt 3) { PlayFace 'wink' 'wink' 1.4 } else { SetFace 'hello' } } })
 
 # Doze: idle for a long while with nobody around -> the bot nods off (closed eyes, zzz); new work or the pointer wakes it up.
 $script:lastActive = Get-Date

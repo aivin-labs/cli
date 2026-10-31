@@ -7,7 +7,7 @@ import path from 'path';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
 const remote = await import('../bin/lib/remoteControl.mjs');
-const { FolderKind, classifyDir, skipFile } = await import('../bin/lib/remote/folderRules.mjs');
+const { FolderKind, classifyDir, skipFile, skipDir } = await import('../bin/lib/remote/folderRules.mjs');
 const { cloudOnlyFiles, inCloudFolder } = await import('../bin/lib/remote/cloudFiles.mjs');
 const { osFileSearch, windowsSearchSql } = await import('../bin/lib/remote/osSearch.mjs');
 
@@ -29,8 +29,20 @@ test('phân loại thư mục: cài đặt / hồ sơ Chromium / venv / .app, kh
   const invoices = Array.from({ length: 320 }, (_, i) => dirent(`hoa-don-${i}.pdf`));
   assert.equal(classifyDir('Hoa don', invoices), null); // 320 PDF: vẫn lập chỉ mục từng tệp
   assert.equal(classifyDir('Desktop', [dirent('a.exe'), dirent('note.docx')]), null);
-  for (const junk of ['report.tmp', 'x.bak', '~$Hop dong.docx', '.DS_Store', 'Thumbs.db', 'setup.exe.crdownload', 'ntuser.dat.LOG1']) assert.ok(skipFile(junk), junk);
-  for (const keep of ['Hop dong.docx', 'setup.exe', 'logo.png', 'server.log']) assert.ok(!skipFile(keep), keep);
+  for (const junk of ['report.tmp', 'x.bak', '~$Hop dong.docx', '.DS_Store', 'Thumbs.db', 'setup.exe.crdownload', 'ntuser.dat.LOG1', 'bundle.js.map', 'app.min.js', 'style.min.css', 'tsconfig.tsbuildinfo']) assert.ok(skipFile(junk), junk);
+  for (const keep of ['Hop dong.docx', 'setup.exe', 'logo.png', 'server.log', 'app.js', 'style.css']) assert.ok(!skipFile(keep), keep);
+
+  // Không phân biệt chữ hoa thường khi bỏ qua thư mục hệ thống / rác
+  for (const dir of ['AppData', 'appdata', 'APPDATA', 'Windows', 'windows', 'Program Files', 'program files', 'node_modules', 'Node_Modules']) {
+    assert.ok(skipDir(dir), `skipDir: ${dir}`);
+  }
+  for (const keepDir of ['Documents', 'Projects', 'Desktop', 'my_code']) {
+    assert.ok(!skipDir(keepDir), `!skipDir: ${keepDir}`);
+  }
+
+  // Loại trừ tuỳ biến
+  assert.ok(skipDir('FamilyPhotos', new Set(['familyphotos'])));
+  assert.ok(skipFile('heavy_data.csv', new Set(['heavy_data.csv'])));
 });
 
 test('chỉ mục: gộp ảnh chụp màn hình / thư mục ứng dụng / kho git thành một mục; tài liệu bên trong vẫn tìm được; bỏ tệp tạm', async () => {
@@ -174,5 +186,30 @@ test('fs.find: thiếu kết quả thì thêm từ bộ tìm hệ điều hành 
   assert.deepEqual(res.working_folders, ['notes']);
   await tools.get('fs.index_folder').handler({ path: 'notes', remove: true }, ctx, env);
   assert.deepEqual(remote.loadIndexFolders(), []);
+  fileIndex.close();
+});
+
+test('tệp cấu hình loại trừ: nạp .aivinignore và index-excludes.json, loại trừ tệp/thư mục tương ứng', async () => {
+  const root = sandboxDir();
+  write(path.join(root, '.aivinignore'), '# Ghi chu bo qua\nmy_secret_vault\nignored_archive.zip\n');
+  write(path.join(root, 'my_secret_vault', 'file1.txt'), 'noi dung bi mat');
+  write(path.join(root, 'public', 'ignored_archive.zip'), 'du lieu zip');
+  write(path.join(root, 'public', 'tai-lieu-mo.txt'), 'tai lieu cong khai');
+
+  const fileIndex = remote.createFileIndex([root]);
+  await fileIndex.build();
+
+  assert.equal(fileIndex.search('noi dung bi mat', 5).length, 0);
+  assert.equal(fileIndex.search('ignored_archive', 5).length, 0);
+  assert.match(fileIndex.search('tai lieu cong khai', 5)[0].path, /tai-lieu-mo\.txt$/);
+
+  // Thêm mẫu loại trừ động qua addExclude
+  await fileIndex.addExclude('public');
+  assert.equal(fileIndex.search('tai lieu cong khai', 5).length, 0);
+
+  // Xoá mẫu loại trừ qua removeExclude
+  await fileIndex.removeExclude('public');
+  assert.match(fileIndex.search('tai lieu cong khai', 5)[0].path, /tai-lieu-mo\.txt$/);
+
   fileIndex.close();
 });

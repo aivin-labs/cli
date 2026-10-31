@@ -1272,7 +1272,7 @@ aivin desktop                         # status
   once you close that window. Opening Aivin from the search again while it runs just opens it.
 - **Start with the computer** is one setting, whichever way you change it: the app's menu, `aivin remote enable` / `disable`, or the
   system settings in the table. `aivin remote disable` only switches it off, so it stays listed and can be switched back on there.
-  - Windows: an `Aivin` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, listed as "AIVIN Bot CLI" (publisher Aivin Labs); the Start menu entry has the same name.
+  - Windows: an `Aivin` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, listed as "AIVIN Bot" (publisher Aivin Labs); the Start menu entry has the same name.
     `Aivin.exe` is compiled on your computer by the C# compiler that comes with Windows (.NET Framework), so nothing is downloaded.
     If that compiler is blocked, `aivin remote enable` falls back to the "Aivin Remote" scheduled task (not shown in Task Manager).
   - macOS: the LaunchAgent `~/Library/LaunchAgents/com.aivin.remote.plist` opens `Aivin.app`, so Login Items lists it as "Aivin". If

@@ -80,6 +80,9 @@ test('đọc tệp tải: chỉ trong thư mục tải của Aivin, chọn bản
   assert.equal(got.size, 8);
   assert.equal(Buffer.from(got.content, 'base64').toString(), 'a,b\n');
   assert.equal(got.eof, false);
+  const got2 = await tunnels.readDownload({ name: got.name, since, offset: 4, length: 4 }, {});
+  assert.equal(Buffer.from(got2.content, 'base64').toString(), '1,2\n');
+  assert.equal(got2.eof, true);
   await assert.rejects(tunnels.readDownload({ name: '../device-credentials.json', since: 0 }, {}), /Invalid file name/);
 });
 

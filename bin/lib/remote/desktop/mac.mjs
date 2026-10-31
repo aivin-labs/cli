@@ -47,9 +47,9 @@ export function macInfoPlist() {
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>AIVIN Bot CLI</string>
+    <string>AIVIN Bot</string>
     <key>CFBundleDisplayName</key>
-    <string>AIVIN Bot CLI</string>
+    <string>AIVIN Bot</string>
     <key>CFBundleIdentifier</key>
     <string>${MAC_BUNDLE_ID}</string>
     <key>CFBundleExecutable</key>

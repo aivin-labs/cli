@@ -22,26 +22,77 @@ function payloadBytes(payload) {
  * - Kết quả chưa gửi được (mất mạng, chưa có ack) ghi xuống `REMOTE_OUTBOX_FILE` — daemon khởi động lại vẫn gửi.
  * - `heldIds()`: lời gọi máy đang giữ, gửi lên khi chào để BE đối chiếu (huỷ việc không còn ai chờ, khỏi gửi lại việc máy đang làm).
  */
-export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.now() } = {}) {
+export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.now(), debounceMs = 40 } = {}) {
   const calls = new Map();
+  let persistTimer = null;
+  let writeChain = Promise.resolve();
 
-  function persist() {
+  function buildUnsentRows() {
     const unsent = [...calls.entries()].filter(([, e]) => e.state === CallState.DONE && !e.sent);
+    return unsent.map(([id, e]) => {
+      const payload = payloadBytes(e.payload) <= PERSIST_RESULT_BYTES ? e.payload
+        : { call_id: id, ok: false, error: 'Result was too large to keep while offline — run the step again', error_code: 'OUTPUT_TOO_LARGE', duration_ms: e.payload.duration_ms };
+      return { id, at: e.at, payload };
+    });
+  }
+
+  function clearPersistTimer() {
+    if (!persistTimer) return;
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+
+  function persistSync() {
+    clearPersistTimer();
+    const rows = buildUnsentRows();
     try {
-      if (!unsent.length) {
+      if (!rows.length) {
         fs.rmSync(file, { force: true });
         return;
       }
-      const rows = unsent.map(([id, e]) => {
-        const payload = payloadBytes(e.payload) <= PERSIST_RESULT_BYTES ? e.payload
-          : { call_id: id, ok: false, error: 'Result was too large to keep while offline — run the step again', error_code: 'OUTPUT_TOO_LARGE', duration_ms: e.payload.duration_ms };
-        return { id, at: e.at, payload };
-      });
       fs.mkdirSync(path.dirname(file), { recursive: true });
       const tmp = `${file}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(rows), { mode: 0o600 });
       fs.renameSync(tmp, file);
     } catch { /* không ghi được: vẫn giữ trong bộ nhớ */ }
+  }
+
+  function enqueueAsyncPersist() {
+    clearPersistTimer();
+    const rows = buildUnsentRows();
+    if (!rows.length) {
+      try { fs.rmSync(file, { force: true }); } catch { /* bỏ qua */ }
+      return writeChain;
+    }
+    const serialized = JSON.stringify(rows);
+    writeChain = writeChain.then(async () => {
+      try {
+        await fs.promises.mkdir(path.dirname(file), { recursive: true });
+        const tmp = `${file}.tmp`;
+        await fs.promises.writeFile(tmp, serialized, { mode: 0o600 });
+        await fs.promises.rename(tmp, file);
+      } catch { /* không ghi được: vẫn giữ trong bộ nhớ */ }
+    });
+    return writeChain;
+  }
+
+  function schedulePersist() {
+    const hasUnsent = [...calls.values()].some((e) => e.state === CallState.DONE && !e.sent);
+    if (!hasUnsent) {
+      clearPersistTimer();
+      try { fs.rmSync(file, { force: true }); } catch { /* bỏ qua */ }
+      return;
+    }
+    if (debounceMs <= 0) {
+      persistSync();
+      return;
+    }
+    if (persistTimer) return;
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      void enqueueAsyncPersist();
+    }, debounceMs);
+    persistTimer.unref?.();
   }
 
   function load() {
@@ -70,7 +121,7 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
       calls.delete(id);
       changed = true;
     }
-    if (changed) persist();
+    if (changed) schedulePersist();
   }
 
   load();
@@ -86,7 +137,10 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
     /** Lời gọi xong — kết quả chờ gửi. `persistNow`: ghi xuống đĩa ngay (đang mất kết nối). */
     finish(callId, payload, { persistNow = false } = {}) {
       calls.set(callId, { state: CallState.DONE, at: now(), payload, sent: false });
-      if (persistNow) persist();
+      if (persistNow) {
+        for (const e of calls.values()) if (e.state === CallState.DONE && !e.sent) e.onDisk = true;
+        persistSync();
+      }
     },
     markSent(callId) {
       const e = calls.get(callId);
@@ -94,7 +148,7 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
       const wasOnDisk = e.onDisk;
       e.sent = true;
       e.payload = { call_id: callId, ...pick(e.payload) };
-      if (wasOnDisk) persist();
+      if (wasOnDisk) schedulePersist();
     },
     /** Lời gọi đã xong bị BE gửi lại: đánh dấu chưa gửi, trả kết quả để gửi lần nữa. */
     reopen(callId) {
@@ -104,9 +158,14 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
       return e.payload;
     },
     /** Ghi các kết quả chưa gửi xuống đĩa (gửi chưa được xác nhận / daemon sắp dừng). */
-    persist() {
+    persist({ sync = false } = {}) {
       for (const e of calls.values()) if (e.state === CallState.DONE && !e.sent) e.onDisk = true;
-      persist();
+      if (sync) persistSync();
+      else schedulePersist();
+    },
+    /** Đẩy ngay các thay đổi đang chờ ghi bất đồng bộ xuống đĩa. */
+    flush() {
+      return persistTimer ? enqueueAsyncPersist() : writeChain;
     },
     /** BE báo không còn ai chờ → bỏ kết quả chưa gửi của các lời gọi này. */
     drop(callIds) {
@@ -118,7 +177,7 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
           changed = true;
         }
       }
-      if (changed) persist();
+      if (changed) schedulePersist();
     },
     unsent: () => [...calls.values()].filter((e) => e.state === CallState.DONE && !e.sent).map((e) => e.payload),
     heldIds: () => [...calls.entries()].filter(([, e]) => e.state === CallState.RUNNING || (e.state === CallState.DONE && !e.sent)).map(([id]) => id),

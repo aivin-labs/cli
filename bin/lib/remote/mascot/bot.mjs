@@ -67,9 +67,13 @@ export const BOT_FACES = Object.freeze({
   // Phản ứng (hostSource.mjs): xong sau khi lỗi → nhắm mắt thở phào; rảnh lâu sắp ngủ gật → ngáp.
   relief: { eyes: 'closed', mouth: 'smile' },
   yawn: { eyes: 'closed', mouth: 'open' },
+  // Cử chỉ biểu cảm mở rộng:
+  wink: { eyes: 'wink', mouth: 'grin' },
+  curious: { eyes: 'curious', mouth: 'hmm' },
+  star: { eyes: 'star', mouth: 'grin' },
 });
 
-export const BOT_EYES = Object.freeze(['open', 'focus', 'up', 'wide', 'happy', 'closed', 'sad', 'dizzy']);
+export const BOT_EYES = Object.freeze(['open', 'focus', 'up', 'wide', 'happy', 'closed', 'sad', 'dizzy', 'wink', 'curious', 'star']);
 export const BOT_MOUTHS = Object.freeze(['smile', 'flat', 'hmm', 'open', 'grin', 'wobble', 'talk']);
 
 /**
@@ -101,6 +105,8 @@ const pill = (w, h, blink) => `<Rectangle Canvas.Left="${-w / 2}" Canvas.Top="${
 
 /** Mắt xoắn ốc (chóng mặt): các nửa vòng tròn nối nhau to dần quanh (0,0); rig quay `spin` (BOT_SPINS). */
 const spiral = (spin) => `<Path Data="M0,0 A1.6,1.6 0 0 1 3.2,0 A3.2,3.2 0 0 1 -3.2,0 A4.8,4.8 0 0 1 6.4,0 A6.4,6.4 0 0 1 -6.4,0" ${glowStroke(2.4)} Fill="{x:Null}"><Path.RenderTransform><RotateTransform x:Name="${spin}"/></Path.RenderTransform></Path>`;
+/** Mắt ngôi sao 4 cánh phát sáng (hào hứng / ăn mừng). */
+const starEye = `<Path Data="M0,-6.5 Q1.2,-1.2 6.5,0 Q1.2,1.2 0,6.5 Q-1.2,1.2 -6.5,0 Q-1.2,-1.2 0,-6.5 Z" ${glowStroke(2.2)} Fill="${GLOW}"/>`;
 /** Tên các RotateTransform của mắt xoắn ốc (rigSource.mjs quay khi chóng mặt). */
 export const BOT_SPINS = Object.freeze(['SpinL', 'SpinR']);
 
@@ -108,15 +114,28 @@ export const BOT_SPINS = Object.freeze(['SpinL', 'SpinR']);
 const EYE_SHAPES = {
   open: [pill(10, 14, 'BlinkL'), pill(10, 14, 'BlinkR')],
   focus: [pill(10, 8, 'BlinkFL'), pill(10, 8, 'BlinkFR')],
-  up: [`<Canvas Canvas.Left="2" Canvas.Top="-3.5">${pill(9, 12)}</Canvas>`],
+  up: [
+    `<Canvas Canvas.Left="2" Canvas.Top="-3.5">${pill(9, 12, 'BlinkUL')}</Canvas>`,
+    `<Canvas Canvas.Left="2" Canvas.Top="-3.5">${pill(9, 12, 'BlinkUR')}</Canvas>`,
+  ],
   wide: [pill(12.5, 16, 'BlinkWL'), pill(12.5, 16, 'BlinkWR')],
   happy: [`<Path Data="M-8,3 Q0,-8 8,3" ${glowStroke()} Fill="{x:Null}"/>`],
   closed: [`<Path Data="M-7,0 Q0,5 7,0" ${glowStroke()} Fill="{x:Null}"/>`],
   sad: [`<Path Data="M-7,3 Q-1,-5 7,-1" ${glowStroke()} Fill="{x:Null}"/>`, `<Path Data="M-7,-1 Q1,-5 7,3" ${glowStroke()} Fill="{x:Null}"/>`],
   dizzy: [spiral('SpinL'), spiral('SpinR')],
+  wink: [`<Path Data="M-8,3 Q0,-8 8,3" ${glowStroke()} Fill="{x:Null}"/>`, pill(10, 14, 'BlinkWnkR')],
+  curious: [pill(10, 8, 'BlinkCurL'), pill(12.5, 16, 'BlinkCurR')],
+  star: [starEye],
 };
 /** Tên các ScaleTransform chớp mắt (rigSource.mjs đặt ScaleY). */
-export const BOT_BLINKS = Object.freeze(['BlinkL', 'BlinkR', 'BlinkFL', 'BlinkFR', 'BlinkWL', 'BlinkWR']);
+export const BOT_BLINKS = Object.freeze([
+  'BlinkL', 'BlinkR',
+  'BlinkFL', 'BlinkFR',
+  'BlinkUL', 'BlinkUR',
+  'BlinkWL', 'BlinkWR',
+  'BlinkWnkR',
+  'BlinkCurL', 'BlinkCurR',
+]);
 
 const eyeSide = (side) => BOT_EYES.map((n) => {
   const [left, right] = EYE_SHAPES[n];
@@ -245,7 +264,7 @@ const THINK_XAML = `<Canvas x:Name="Think" Opacity="0" IsHitTestVisible="False">
    ${thinkCircle(TK.x - TK.w / 2 - 16, TK.y + TK.h / 2 + 20, 4)}
    ${thinkCircle(TK.x - TK.w / 2 - 5, TK.y + TK.h / 2 + 9, 6.2)}
    <Border Canvas.Left="${TK.x - TK.w / 2}" Canvas.Top="${TK.y - TK.h / 2}" Width="${TK.w}" Height="${TK.h}" CornerRadius="${TK.h / 2}" Background="White" BorderBrush="#D5DBE6" BorderThickness="1.2"/>
-   ${[0, 1, 2].map((i) => `<Ellipse x:Name="ThinkDot${i}" Canvas.Left="${TK.x - TK.gap - TK.dot / 2 + i * TK.gap}" Canvas.Top="${TK.y - TK.dot / 2}" Width="${TK.dot}" Height="${TK.dot}" Fill="#3491FA"/>`).join('\n   ')}
+   ${[0, 1, 2].map((i) => `<Ellipse x:Name="ThinkDot${i}" Canvas.Left="${TK.x - TK.gap - TK.dot / 2 + i * TK.gap}" Canvas.Top="${TK.y - TK.dot / 2}" Width="${TK.dot}" Height="${TK.dot}" Fill="#722ED1"/>`).join('\n   ')}
   </Canvas>`;
 
 /** Tia lấp lánh (xong việc): sao bốn cánh vàng / xanh xen kẽ; rig đặt vị trí / cỡ / góc xoay. */
@@ -335,6 +354,12 @@ export const BOT_XAML = `<Canvas x:Name="Stage" Width="${S}" Height="${S}">
       <TranslateTransform X="${F.x}" Y="${F.y}"/>
      </TransformGroup></Canvas.RenderTransform>
      <Canvas.Effect><DropShadowEffect BlurRadius="7" ShadowDepth="0" Opacity="0.8" Color="${GLOW}"/></Canvas.Effect>
+     <Ellipse x:Name="BlushL" Canvas.Left="${-F.eyeDx - 4}" Canvas.Top="${F.eyeY + 8.5}" Width="8" Height="4" Fill="#FFA39E" Opacity="0">
+      <Ellipse.Effect><BlurEffect Radius="2.5"/></Ellipse.Effect>
+     </Ellipse>
+     <Ellipse x:Name="BlushR" Canvas.Left="${F.eyeDx - 4}" Canvas.Top="${F.eyeY + 8.5}" Width="8" Height="4" Fill="#FFA39E" Opacity="0">
+      <Ellipse.Effect><BlurEffect Radius="2.5"/></Ellipse.Effect>
+     </Ellipse>
      <Canvas><Canvas.RenderTransform><TranslateTransform x:Name="EyeLook"/></Canvas.RenderTransform>
       <Canvas x:Name="EyeL" Canvas.Left="${-F.eyeDx}" Canvas.Top="${F.eyeY}"><Canvas.RenderTransform><ScaleTransform x:Name="EyeMorphL"/></Canvas.RenderTransform>
       ${eyeSide('L')}

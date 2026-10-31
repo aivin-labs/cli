@@ -1,0 +1,514 @@
+/**
+ * Tiến trình phát hình ảnh màn hình trực tiếp và điều khiển từ xa trên Windows (Desktop Scenecast).
+ * Tương thích C# 5 / .NET Framework 4.5+ / PowerShell 5.1:
+ * - Chụp màn hình qua Graphics.CopyFromScreen.
+ * - Lồng con trỏ chuột thật của Windows vào khung hình (GetCursorInfo + DrawIcon).
+ * - Hỗ trợ đa màn hình: lấy danh sách màn hình và chuyển đổi màn hình cần chụp theo thời gian thực.
+ * - Co ảnh về chiều rộng tối đa (giữ tỉ lệ), nén ảnh sang định dạng JPEG nhẹ.
+ * - So sánh ảnh thu nhỏ (64x36) để chỉ gửi khung hình khi có chuyển động hoặc giữ nhịp định kỳ (1 FPS).
+ * - Nhận lệnh chuột, bàn phím và phím tắt hệ thống (hotkeys) qua stdin và thực thi qua Win32 API.
+ * - Hỗ trợ thay đổi độ phân giải, chất lượng nén JPEG, giới hạn FPS và chọn màn hình theo thời gian thực.
+ */
+
+export const DESKTOP_CAST_CSHARP = String.raw`
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+
+namespace AivinDesktopCast {
+  static class Native {
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, ushort bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll")] public static extern short VkKeyScan(char ch);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int x; public int y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct CURSORINFO {
+      public int cbSize;
+      public int flags;
+      public IntPtr hCursor;
+      public POINT ptScreenPos;
+    }
+
+    [DllImport("user32.dll")] public static extern bool GetCursorInfo(out CURSORINFO pci);
+    [DllImport("user32.dll")] public static extern bool DrawIcon(IntPtr hDC, int X, int Y, IntPtr hIcon);
+
+    public const int CURSOR_SHOWING = 0x00000001;
+
+    public const uint MOUSEEVENTF_MOVE = 0x0001;
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+    public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+    public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+    public const uint MOUSEEVENTF_WHEEL = 0x0800;
+
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+    public const uint KEYEVENTF_UNICODE = 0x0004;
+  }
+
+  static class Out {
+    static readonly object gate = new object();
+    static readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+
+    public static void Send(Dictionary<string, object> msg) {
+      string line = json.Serialize(msg);
+      lock (gate) { Console.Out.WriteLine(line); Console.Out.Flush(); }
+    }
+
+    public static Dictionary<string, object> Parse(string text) {
+      if (string.IsNullOrEmpty(text)) return new Dictionary<string, object>();
+      return json.Deserialize<Dictionary<string, object>>(text);
+    }
+
+    public static Dictionary<string, object> Msg(string t) {
+      var d = new Dictionary<string, object>();
+      d["t"] = t;
+      return d;
+    }
+  }
+
+  public static class CastScreen {
+    public static Rectangle GetBounds(int monitor) {
+      if (monitor < 0 || monitor >= Screen.AllScreens.Length) {
+        return SystemInformation.VirtualScreen;
+      }
+      return Screen.AllScreens[monitor].Bounds;
+    }
+
+    public static List<Dictionary<string, object>> GetScreens() {
+      var list = new List<Dictionary<string, object>>();
+      var all = Screen.AllScreens;
+      for (int i = 0; i < all.Length; i++) {
+        var s = all[i];
+        var d = new Dictionary<string, object>();
+        d["index"] = i;
+        d["name"] = "Màn hình " + (i + 1) + (s.Primary ? " (Chính)" : "");
+        d["primary"] = s.Primary;
+        d["width"] = s.Bounds.Width;
+        d["height"] = s.Bounds.Height;
+        d["x"] = s.Bounds.X;
+        d["y"] = s.Bounds.Y;
+        list.Add(d);
+      }
+      return list;
+    }
+
+    public static Bitmap Grab(Rectangle r) {
+      var bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format24bppRgb);
+      using (var g = Graphics.FromImage(bmp)) {
+        g.CopyFromScreen(r.Left, r.Top, 0, 0, r.Size);
+
+        // Lồng con trỏ chuột thật của Windows vào ảnh
+        try {
+          Native.CURSORINFO pci;
+          pci.cbSize = Marshal.SizeOf(typeof(Native.CURSORINFO));
+          if (Native.GetCursorInfo(out pci) && (pci.flags & Native.CURSOR_SHOWING) != 0) {
+            int cursorX = pci.ptScreenPos.x - r.Left;
+            int cursorY = pci.ptScreenPos.y - r.Top;
+            if (cursorX >= -32 && cursorX < r.Width && cursorY >= -32 && cursorY < r.Height) {
+              IntPtr hdc = g.GetHdc();
+              try {
+                Native.DrawIcon(hdc, cursorX, cursorY, pci.hCursor);
+              } finally {
+                g.ReleaseHdc(hdc);
+              }
+            }
+          }
+        } catch {}
+      }
+      return bmp;
+    }
+
+    public static Bitmap Scale(Bitmap src, int maxWidth) {
+      if (src.Width <= maxWidth) return src;
+      int h = (int)Math.Round(src.Height * (double)maxWidth / src.Width);
+      var dst = new Bitmap(maxWidth, h, PixelFormat.Format24bppRgb);
+      using (var g = Graphics.FromImage(dst)) {
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+        g.DrawImage(src, 0, 0, maxWidth, h);
+      }
+      src.Dispose();
+      return dst;
+    }
+
+    public static byte[] Jpeg(Bitmap bmp, int quality) {
+      var encoders = ImageCodecInfo.GetImageEncoders();
+      ImageCodecInfo codec = null;
+      for (int i = 0; i < encoders.Length; i++) {
+        if (encoders[i].MimeType == "image/jpeg") { codec = encoders[i]; break; }
+      }
+      if (codec == null) {
+        using (var ms = new MemoryStream()) { bmp.Save(ms, ImageFormat.Jpeg); return ms.ToArray(); }
+      }
+      var p = new EncoderParameters(1);
+      p.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)quality);
+      using (var ms = new MemoryStream()) {
+        bmp.Save(ms, codec, p);
+        return ms.ToArray();
+      }
+    }
+
+    public static byte[] Thumb(Bitmap src) {
+      var t = new byte[64 * 36];
+      using (var small = new Bitmap(64, 36, PixelFormat.Format24bppRgb)) {
+        using (var g = Graphics.FromImage(small)) {
+          g.DrawImage(src, 0, 0, 64, 36);
+        }
+        for (int y = 0; y < 36; y++) {
+          for (int x = 0; x < 64; x++) {
+            var c = small.GetPixel(x, y);
+            t[y * 64 + x] = (byte)((c.R * 3 + c.G * 6 + c.B) / 10);
+          }
+        }
+      }
+      return t;
+    }
+
+    public static double Diff(byte[] a, byte[] b) {
+      if (a == null || b == null) return 255;
+      long s = 0;
+      for (int i = 0; i < a.Length; i++) s += Math.Abs(a[i] - b[i]);
+      return (double)s / a.Length;
+    }
+  }
+
+  public static class CastHost {
+    static volatile bool running = true;
+    static volatile int currentMonitor = -1;
+    static Rectangle currentBounds;
+    static int currentImageWidth = 0;
+    static int currentImageHeight = 0;
+    static volatile int targetMaxFps = 15;
+    static volatile int targetMaxWidth = 1366;
+    static volatile int targetQuality = 65;
+
+    public static void Run(string argsJson) {
+      Native.SetProcessDPIAware();
+      var a = Out.Parse(argsJson);
+      currentMonitor = a.ContainsKey("monitor") ? Convert.ToInt32(a["monitor"]) : -1;
+      targetMaxFps = a.ContainsKey("max_fps") ? Convert.ToInt32(a["max_fps"]) : 15;
+      if (targetMaxFps < 1) targetMaxFps = 1;
+      if (targetMaxFps > 30) targetMaxFps = 30;
+      targetMaxWidth = a.ContainsKey("max_width") ? Convert.ToInt32(a["max_width"]) : 1366;
+      targetQuality = a.ContainsKey("quality") ? Convert.ToInt32(a["quality"]) : 65;
+
+      currentBounds = CastScreen.GetBounds(currentMonitor);
+
+      // Luồng đọc lệnh điều khiển từ xa từ stdin
+      var inputThread = new Thread(ReadInputLoop);
+      inputThread.IsBackground = true;
+      inputThread.Start();
+
+      var readyMsg = Out.Msg("ready");
+      readyMsg["monitor"] = currentMonitor;
+      readyMsg["screens"] = CastScreen.GetScreens();
+      readyMsg["bounds"] = new Dictionary<string, object> {
+        { "x", currentBounds.X }, { "y", currentBounds.Y },
+        { "width", currentBounds.Width }, { "height", currentBounds.Height }
+      };
+      Out.Send(readyMsg);
+
+      var clock = System.Diagnostics.Stopwatch.StartNew();
+      byte[] lastThumb = null;
+      long lastSendMs = 0;
+
+      while (running) {
+        long frameStartMs = clock.ElapsedMilliseconds;
+        long targetFrameInterval = 1000 / Math.Max(1, targetMaxFps);
+        try {
+          currentBounds = CastScreen.GetBounds(currentMonitor);
+          using (var rawBmp = CastScreen.Grab(currentBounds)) {
+            var thumb = CastScreen.Thumb(rawBmp);
+            double diff = CastScreen.Diff(thumb, lastThumb);
+            long nowMs = clock.ElapsedMilliseconds;
+            bool forceKeepAlive = (nowMs - lastSendMs) >= 1000;
+
+            if (diff > 4.5 || forceKeepAlive || lastThumb == null) {
+              lastThumb = thumb;
+              lastSendMs = nowMs;
+
+              using (var scaled = CastScreen.Scale(new Bitmap(rawBmp), targetMaxWidth)) {
+                currentImageWidth = scaled.Width;
+                currentImageHeight = scaled.Height;
+                byte[] jpegBytes = CastScreen.Jpeg(scaled, targetQuality);
+                string base64 = Convert.ToBase64String(jpegBytes);
+
+                var frameMsg = Out.Msg("frame");
+                frameMsg["image"] = base64;
+                frameMsg["width"] = currentImageWidth;
+                frameMsg["height"] = currentImageHeight;
+                frameMsg["screenWidth"] = currentBounds.Width;
+                frameMsg["screenHeight"] = currentBounds.Height;
+                frameMsg["monitor"] = currentMonitor;
+                frameMsg["screens"] = CastScreen.GetScreens();
+                frameMsg["ts"] = nowMs;
+                Out.Send(frameMsg);
+              }
+            }
+          }
+        } catch (Exception ex) {
+          var warnMsg = Out.Msg("warn");
+          warnMsg["error"] = ex.Message;
+          Out.Send(warnMsg);
+        }
+
+        long elapsed = clock.ElapsedMilliseconds - frameStartMs;
+        long sleepMs = targetFrameInterval - elapsed;
+        if (sleepMs > 5) {
+          Thread.Sleep((int)sleepMs);
+        } else {
+          Thread.Sleep(5);
+        }
+      }
+
+      var stoppedMsg = Out.Msg("stopped");
+      Out.Send(stoppedMsg);
+    }
+
+    static void ReadInputLoop() {
+      try {
+        string line;
+        while (running && (line = Console.In.ReadLine()) != null) {
+          line = line.Trim();
+          if (string.IsNullOrEmpty(line)) continue;
+          if (line == "stop") {
+            running = false;
+            break;
+          }
+          var cmd = Out.Parse(line);
+          string op = cmd.ContainsKey("op") ? Convert.ToString(cmd["op"]) : "";
+          if (op == "stop") {
+            running = false;
+            break;
+          } else if (op == "input") {
+            HandleInput(cmd);
+          } else if (op == "config") {
+            HandleConfig(cmd);
+          }
+        }
+      } catch {
+        running = false;
+      }
+    }
+
+    static void HandleConfig(Dictionary<string, object> cmd) {
+      try {
+        if (cmd.ContainsKey("max_fps")) {
+          int fps = Convert.ToInt32(cmd["max_fps"]);
+          if (fps >= 1 && fps <= 30) targetMaxFps = fps;
+        }
+        if (cmd.ContainsKey("quality")) {
+          int q = Convert.ToInt32(cmd["quality"]);
+          if (q >= 10 && q <= 95) targetQuality = q;
+        }
+        if (cmd.ContainsKey("max_width")) {
+          int w = Convert.ToInt32(cmd["max_width"]);
+          if (w >= 640 && w <= 2560) targetMaxWidth = w;
+        }
+        if (cmd.ContainsKey("monitor")) {
+          int m = Convert.ToInt32(cmd["monitor"]);
+          if (m >= -1 && m < Screen.AllScreens.Length) {
+            currentMonitor = m;
+          }
+        }
+        var ack = Out.Msg("config_ack");
+        ack["max_fps"] = targetMaxFps;
+        ack["quality"] = targetQuality;
+        ack["max_width"] = targetMaxWidth;
+        ack["monitor"] = currentMonitor;
+        Out.Send(ack);
+      } catch {
+      }
+    }
+
+    static byte KeyNameToVk(string name) {
+      if (string.IsNullOrEmpty(name)) return 0;
+      switch (name.ToLower().Trim()) {
+        case "win": case "windows": case "lwin": case "meta": case "cmd": return 0x5B;
+        case "rwin": return 0x5C;
+        case "ctrl": case "control": case "lctrl": return 0x11;
+        case "rctrl": return 0xA3;
+        case "alt": case "menu": case "lalt": return 0x12;
+        case "ralt": return 0xA5;
+        case "shift": case "lshift": return 0x10;
+        case "rshift": return 0xA1;
+        case "tab": return 0x09;
+        case "escape": case "esc": return 0x1B;
+        case "enter": case "return": return 0x0D;
+        case "backspace": return 0x08;
+        case "space": return 0x20;
+        case "delete": case "del": return 0x2E;
+        case "insert": case "ins": return 0x2D;
+        case "home": return 0x24;
+        case "end": return 0x23;
+        case "pageup": return 0x21;
+        case "pagedown": return 0x22;
+        case "up": case "arrowup": return 0x26;
+        case "down": case "arrowdown": return 0x28;
+        case "left": case "arrowleft": return 0x25;
+        case "right": case "arrowright": return 0x27;
+        case "f1": return 0x70;
+        case "f2": return 0x71;
+        case "f3": return 0x72;
+        case "f4": return 0x73;
+        case "f5": return 0x74;
+        case "f6": return 0x75;
+        case "f7": return 0x76;
+        case "f8": return 0x77;
+        case "f9": return 0x78;
+        case "f10": return 0x79;
+        case "f11": return 0x7A;
+        case "f12": return 0x7B;
+        case "printscreen": case "prtsc": return 0x2C;
+        default:
+          if (name.Length == 1) {
+            char ch = char.ToUpperInvariant(name[0]);
+            if (ch >= 'A' && ch <= 'Z') return (byte)ch;
+            if (ch >= '0' && ch <= '9') return (byte)ch;
+          }
+          return 0;
+      }
+    }
+
+    static void HandleInput(Dictionary<string, object> cmd) {
+      try {
+        string action = cmd.ContainsKey("action") ? Convert.ToString(cmd["action"]) : "";
+        double rx = cmd.ContainsKey("x") ? Convert.ToDouble(cmd["x"]) : 0;
+        double ry = cmd.ContainsKey("y") ? Convert.ToDouble(cmd["y"]) : 0;
+
+        int targetX = currentBounds.X;
+        int targetY = currentBounds.Y;
+        if (currentImageWidth > 0 && currentImageHeight > 0) {
+          targetX += (int)Math.Round((rx / currentImageWidth) * currentBounds.Width);
+          targetY += (int)Math.Round((ry / currentImageHeight) * currentBounds.Height);
+        }
+
+        if (action == "move") {
+          Native.SetCursorPos(targetX, targetY);
+        } else if (action == "click") {
+          int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
+          Native.SetCursorPos(targetX, targetY);
+          Thread.Sleep(10);
+          if (button == 2) {
+            Native.mouse_event(Native.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+            Thread.Sleep(15);
+            Native.mouse_event(Native.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+          } else if (button == 1) {
+            Native.mouse_event(Native.MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0);
+            Thread.Sleep(15);
+            Native.mouse_event(Native.MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0);
+          } else {
+            Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            Thread.Sleep(15);
+            Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+          }
+        } else if (action == "dblclick") {
+          Native.SetCursorPos(targetX, targetY);
+          Thread.Sleep(10);
+          Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+          Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+          Thread.Sleep(40);
+          Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+          Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        } else if (action == "rightclick") {
+          Native.SetCursorPos(targetX, targetY);
+          Thread.Sleep(10);
+          Native.mouse_event(Native.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+          Thread.Sleep(15);
+          Native.mouse_event(Native.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+        } else if (action == "mousedown") {
+          int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
+          Native.SetCursorPos(targetX, targetY);
+          if (button == 2) Native.mouse_event(Native.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+          else if (button == 1) Native.mouse_event(Native.MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0);
+          else Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        } else if (action == "mouseup") {
+          int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
+          Native.SetCursorPos(targetX, targetY);
+          if (button == 2) Native.mouse_event(Native.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+          else if (button == 1) Native.mouse_event(Native.MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0);
+          else Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        } else if (action == "scroll") {
+          int deltaY = cmd.ContainsKey("deltaY") ? Convert.ToInt32(cmd["deltaY"]) : 0;
+          Native.SetCursorPos(targetX, targetY);
+          Native.mouse_event(Native.MOUSEEVENTF_WHEEL, 0, 0, -deltaY, 0);
+        } else if (action == "type") {
+          string text = cmd.ContainsKey("text") ? Convert.ToString(cmd["text"]) : "";
+          if (!string.IsNullOrEmpty(text)) {
+            for (int i = 0; i < text.Length; i++) {
+              char c = text[i];
+              Native.keybd_event(0, (ushort)c, Native.KEYEVENTF_UNICODE, UIntPtr.Zero);
+              Native.keybd_event(0, (ushort)c, Native.KEYEVENTF_UNICODE | Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            }
+          }
+        } else if (action == "key") {
+          string key = cmd.ContainsKey("key") ? Convert.ToString(cmd["key"]) : "";
+          HandleSpecialKey(key);
+        } else if (action == "hotkey") {
+          System.Collections.ArrayList keys = cmd.ContainsKey("keys") ? cmd["keys"] as System.Collections.ArrayList : null;
+          if (keys != null && keys.Count > 0) {
+            var vks = new List<byte>();
+            for (int i = 0; i < keys.Count; i++) {
+              byte vk = KeyNameToVk(Convert.ToString(keys[i]));
+              if (vk != 0) vks.Add(vk);
+            }
+            for (int i = 0; i < vks.Count; i++) {
+              Native.keybd_event(vks[i], 0, 0, UIntPtr.Zero);
+              Thread.Sleep(10);
+            }
+            Thread.Sleep(40);
+            for (int i = vks.Count - 1; i >= 0; i--) {
+              Native.keybd_event(vks[i], 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+              Thread.Sleep(10);
+            }
+          }
+        }
+      } catch {
+      }
+    }
+
+    static void HandleSpecialKey(string key) {
+      byte vk = KeyNameToVk(key);
+      if (vk != 0) {
+        Native.keybd_event(vk, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(15);
+        Native.keybd_event(vk, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+      }
+    }
+  }
+}
+`;
+
+export const DESKTOP_CAST_PS1 = String.raw`
+$ErrorActionPreference = 'Stop'
+$dll = $env:AIVIN_CAST_DLL
+$src = $env:AIVIN_CAST_SRC
+$refs = @('System.Drawing', 'System.Windows.Forms', 'System.Web.Extensions')
+foreach ($r in $refs) { Add-Type -AssemblyName $r }
+if ($dll -and (Test-Path -LiteralPath $dll)) {
+  Add-Type -Path $dll
+} else {
+  Add-Type -TypeDefinition ([IO.File]::ReadAllText($src)) -ReferencedAssemblies $refs -OutputAssembly $dll -OutputType Library
+  Add-Type -Path $dll
+}
+try {
+  [AivinDesktopCast.CastHost]::Run($env:AIVIN_CAST_ARGS)
+} catch {
+  $m = @{ t = 'error'; error = $_.Exception.Message } | ConvertTo-Json -Compress
+  [Console]::Out.WriteLine($m)
+  exit 1
+}
+`;
