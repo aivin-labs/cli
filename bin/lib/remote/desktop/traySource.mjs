@@ -275,6 +275,7 @@ namespace AivinDesktop {
       tray.Text = "AIVIN Bot";
       tray.Icon = shownIcon = greyIcon;
       tray.MouseClick += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) OpenAivin(); };
+      tray.DoubleClick += delegate { OpenAivin(); };
       tray.Visible = true;
 
       openEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\AivinTrayOpen-" + id);

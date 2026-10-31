@@ -117,7 +117,8 @@ function PeekAsk {
   $script:askOpen = $true; AskShow 'Ask'; $w.FindResource('AskGlow').Begin($w, $true)
 }
 function OpenAsk {
-  NoteTarget; AskHide 'Panel'; PeekAsk
+  NoteTarget; AskHide 'Panel'
+  $script:askOpen = $true; AskShow 'Ask'; $w.FindResource('AskGlow').Begin($w, $true)
   $script:askFocused = $true; SetActivatable $true; $ok = [AivinMascotAsk.Native]::TakeFocus($script:hwnd); [void]$w.Activate(); Dbg "ask focus=$ok"
   [void](E 'AskBox').Focus(); [void][Windows.Input.Keyboard]::Focus((E 'AskBox'))
 }
@@ -128,7 +129,7 @@ function CloseAsk {
   $script:askOpen = $false; $script:askFocused = $false
   AskHide 'Ask'; SetActivatable $false; $w.FindResource('AskGlow').Stop($w)
 }
-function MascotClick { if ($script:askFocused) { CloseAsk } else { OpenAsk } }
+function MascotClick { if ($script:askOpen -and (E 'Ask').Visibility -eq 'Visible' -and $script:askFocused) { CloseAsk } else { OpenAsk } }
 # One box at a time: while the ask box is open, what the bot does on the machine only updates the text; the bubble
 # (notification) comes back with the latest step once the box closes, if the bot is still busy.
 $script:baseShowBubble = (Get-Item function:ShowBubble).ScriptBlock
