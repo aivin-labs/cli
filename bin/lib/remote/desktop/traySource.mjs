@@ -572,7 +572,7 @@ namespace AivinDesktop {
       Refresh();
     }
 
-    /** Mở Aivin: chưa ghép máy → hỏi mã; có rồi → bật web + hiện linh vật (như "aivin ui"), chạy daemon ngay nếu đang không chạy. */
+    /** Mở Aivin: chưa ghép máy → hỏi mã; có rồi → hiện linh vật và ô hỏi đáp ngay trên màn hình. */
     void OpenAivin() {
       if (quitting) return;
       if (!File.Exists(CredsFile)) { ShowPair(); return; }
@@ -586,22 +586,6 @@ namespace AivinDesktop {
         }
         long ms = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
         File.WriteAllText(ShowFile, ms.ToString(CultureInfo.InvariantCulture));
-      } catch { }
-
-      // Mở Web Aivin trên trình duyệt mặc định của hệ thống ngay lập tức
-      try {
-        string webUrl = "https://beta.aivin.vn";
-        if (File.Exists(CredsFile)) {
-          string txt = File.ReadAllText(CredsFile);
-          Match m = Regex.Match(txt, "\"server_url\"\\s*:\\s*\"([^\"]+)\"");
-          if (m.Success) {
-            string u = m.Groups[1].Value.Trim().TrimEnd('/');
-            if (u.Contains("-api.")) webUrl = u.Replace("-api.", ".");
-            else if (u.Contains("://api.")) webUrl = u.Replace("://api.", "://");
-            else if (u.StartsWith("http")) webUrl = u;
-          }
-        }
-        Process.Start(webUrl);
       } catch { }
 
       if (child == null && LockHolder() == 0) {
