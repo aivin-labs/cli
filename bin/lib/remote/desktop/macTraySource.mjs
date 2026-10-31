@@ -244,7 +244,6 @@ function buildUi() {
       'onOpen:': { types: ['void', ['id']], implementation: function () { openAivin(); } },
       'onPause:': { types: ['void', ['id']], implementation: function () { togglePause(); } },
       'onStartup:': { types: ['void', ['id']], implementation: function () { setStartup(!startupEnabled()); refresh(); } },
-      'onFolder:': { types: ['void', ['id']], implementation: function () { task('/usr/bin/open', [HOME]).launch; } },
       'onQuit:': { types: ['void', ['id']], implementation: function () { quit(); } },
       'tick:': { types: ['void', ['id']], implementation: function () { try { tick(); } catch (e) { console.log('aivin tray: ' + e); } } },
       'applicationShouldHandleReopen:hasVisibleWindows:': { types: ['bool', ['id', 'bool']], implementation: function () { openAivin(); return false; } },
@@ -267,7 +266,6 @@ function buildUi() {
   openItem = addItem(T('connect'), 'onOpen:');
   pauseItem = addItem(T('pause'), 'onPause:');
   startupItem = addItem(T('startup'), 'onStartup:');
-  addItem(T('folder'), 'onFolder:');
   menu.addItem($.NSMenuItem.separatorItem);
   addItem(T('quit'), 'onQuit:');
   item.menu = menu;

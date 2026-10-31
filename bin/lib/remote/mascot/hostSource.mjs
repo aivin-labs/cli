@@ -254,6 +254,18 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
 </Window>`;
 
 export const MASCOT_PS1 = String.raw`$ErrorActionPreference = 'Stop'
+# Đảm bảo chỉ có duy nhất 1 linh vật trên màn hình: dọn dẹp tiến trình cũ và khóa đơn thể (single instance mutex)
+try {
+  $myPid = $PID
+  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.ProcessId -ne $myPid -and $_.CommandLine -and $_.CommandLine.Contains('host.ps1')) {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+  }
+} catch {}
+$createdNew = $false
+$script:mascotMutex = New-Object System.Threading.Mutex($true, "Local\AivinMascotSingleInstance", [ref]$createdNew)
+if (-not $createdNew) { exit 0 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
 $utf8 = New-Object Text.UTF8Encoding $false
 $dir = $env:AIVIN_MASCOT_DIR
@@ -752,7 +764,10 @@ $pump.Add_Tick({
 $w.Add_ContentRendered({
   SetState 'idle'; Place; $w.FindResource('WindowIn').Begin($w); $script:rig.Start(); $script:rig.Intro(); $pump.Start(); Send @{ t = 'ready' }
 })
-$w.Add_Closed({ $script:rig.Stop() })
+$w.Add_Closed({
+  try { if ($script:mascotMutex) { $script:mascotMutex.ReleaseMutex(); $script:mascotMutex.Dispose() } } catch {}
+  $script:rig.Stop()
+})
 $app = New-Object Windows.Application
 $app.ShutdownMode = 'OnMainWindowClose'
 [void]$app.Run($w)

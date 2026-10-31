@@ -264,9 +264,8 @@ def gtk_ui(sup):
     connect = Gtk.MenuItem(label=t('connect'))
     pause = Gtk.MenuItem(label=t('pause'))
     startup = Gtk.CheckMenuItem(label=t('startup'))
-    folder = Gtk.MenuItem(label=t('folder'))
     quit_item = Gtk.MenuItem(label=t('quit'))
-    for item in (status, Gtk.SeparatorMenuItem(), connect, pause, startup, folder, Gtk.SeparatorMenuItem(), quit_item):
+    for item in (status, Gtk.SeparatorMenuItem(), connect, pause, startup, Gtk.SeparatorMenuItem(), quit_item):
         menu.append(item)
     state = {'icon': None, 'syncing': False, 'dialog': False}
 
@@ -329,11 +328,6 @@ def gtk_ui(sup):
             set_startup(sup, item.get_active())
             refresh()
 
-    def open_folder(*_):
-        opener = shutil.which('xdg-open')
-        if opener:
-            subprocess.Popen([opener, HOME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
     def quit_app(*_):
         sup.kill()
         Gtk.main_quit()
@@ -348,7 +342,6 @@ def gtk_ui(sup):
     connect.connect('activate', ask_code)
     pause.connect('activate', toggle_pause)
     startup.connect('toggled', toggle_startup)
-    folder.connect('activate', open_folder)
     quit_item.connect('activate', quit_app)
     menu.show_all()
     ind.set_menu(menu)

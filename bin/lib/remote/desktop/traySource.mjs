@@ -107,6 +107,7 @@ namespace AivinDesktop {
     static readonly string LockFile = Path.Combine(Program.Home, "remote-daemon.lock");
     static readonly string PausedFile = Path.Combine(Program.Home, "remote-paused");
     static readonly string ShowFile = Path.Combine(Program.Home, "mascot-show");
+    static readonly string HideFile = Path.Combine(Program.Home, "mascot-hide");
     static readonly string MascotFile = Path.Combine(Program.Home, "mascot.json");
     static readonly string CfgFile = Path.Combine(Program.Home, "desktop", "launch.cfg");
     static readonly string LogoFile = Path.Combine(Program.Home, "desktop", "logo.png");
@@ -133,7 +134,7 @@ namespace AivinDesktop {
     Config cfg;
     NotifyIcon tray;
     Icon colorIcon, greyIcon, shownIcon;
-    ToolStripMenuItem status, open, pause, startup, quit;
+    ToolStripMenuItem status, open, pause, startup, mascot, quit;
     System.Windows.Forms.Timer timer;
     Control invoker;
     EventWaitHandle openEvent, quitEvent;
@@ -162,9 +163,9 @@ namespace AivinDesktop {
       open.Font = new Font(open.Font, FontStyle.Bold);
       pause = Item("", delegate { TogglePause(); });
       startup = Item(cfg.T("startup"), delegate { SetStartup(!StartupEnabled()); Refresh(); });
-      ToolStripMenuItem folder = Item(cfg.T("folder"), delegate { Run("explorer.exe", Quote(Program.Home)); });
+      mascot = Item(cfg.T("mascot"), delegate { ToggleMascot(); });
       quit = Item(cfg.T("quit"), delegate { Quit(); });
-      menu.Items.AddRange(new ToolStripItem[] { status, new ToolStripSeparator(), open, pause, startup, folder, new ToolStripSeparator(), quit });
+      menu.Items.AddRange(new ToolStripItem[] { status, new ToolStripSeparator(), open, pause, startup, mascot, new ToolStripSeparator(), quit });
       menu.Opening += delegate { Refresh(); };
 
       tray = new NotifyIcon();
@@ -371,6 +372,44 @@ namespace AivinDesktop {
       pause.Text = cfg.T(paused ? "resume" : "pause");
       pause.Visible = paired;
       startup.Checked = StartupEnabled();
+      bool mascotOn = IsMascotEnabled();
+      mascot.Checked = mascotOn;
+      mascot.Text = cfg.T(mascotOn ? "mascotHide" : "mascotShow");
+    }
+
+    bool IsMascotEnabled() {
+      try {
+        if (!File.Exists(MascotFile)) return true;
+        string s = File.ReadAllText(MascotFile);
+        return !Regex.IsMatch(s, "\"enabled\"\\s*:\\s*false");
+      } catch { return true; }
+    }
+
+    void ToggleMascot() {
+      bool enabled = IsMascotEnabled();
+      try {
+        if (enabled) {
+          if (File.Exists(MascotFile)) {
+            string s = File.ReadAllText(MascotFile);
+            string t = Regex.Replace(s, "\"enabled\"\\s*:\\s*true", "\"enabled\": false");
+            if (t == s && !s.Contains("\"enabled\"")) t = Regex.Replace(s, "\\{", "{\r\n  \"enabled\": false,");
+            File.WriteAllText(MascotFile, t);
+          } else {
+            File.WriteAllText(MascotFile, "{\r\n  \"enabled\": false\r\n}\r\n");
+          }
+          long ms = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+          File.WriteAllText(HideFile, ms.ToString(CultureInfo.InvariantCulture));
+        } else {
+          if (File.Exists(MascotFile)) {
+            string s = File.ReadAllText(MascotFile);
+            string t = Regex.Replace(s, "\"enabled\"\\s*:\\s*false", "\"enabled\": true");
+            File.WriteAllText(MascotFile, t);
+          }
+          long ms = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+          File.WriteAllText(ShowFile, ms.ToString(CultureInfo.InvariantCulture));
+        }
+      } catch { }
+      Refresh();
     }
 
     /** Mở Aivin: chưa ghép máy → hỏi mã; có rồi → bật + hiện linh vật (như "aivin ui"), chạy daemon ngay nếu đang không chạy. */

@@ -1264,7 +1264,7 @@ aivin desktop                         # status
 | Start with the computer | Task Manager → Startup apps | System Settings → General → Login Items | Startup Applications (GNOME) / Autostart (KDE) |
 
 - **The icon** is in colour while Aivin is taking work, grey when paused, stopped or not connected. Its menu: connect this computer
-  (asks for the code from Aivin), pause / resume work (the kill switch), start with the computer, open the `~/.aivin` folder, quit
+  (asks for the code from Aivin), pause / resume work (the kill switch), start with the computer, quit
   (which also stops the listener). On Windows, clicking the icon opens the mascot and its ask box.
 - **Keeps the listener running**: the app runs `aivin remote start --quiet` hidden. It restarts it when it crashes (after 10 s, then
   longer, up to 5 minutes), switches to a newly installed release right away (exit code 75), and puts the previous release back when a

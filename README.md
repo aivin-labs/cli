@@ -1,98 +1,153 @@
-# @aivin-labs/cli
+<div align="center">
 
-Building an AI agent that does real work — one that calls an LLM, reasons over your data, uses
-tools, and knows when to hand a decision back to a human — usually means weeks of infrastructure
-before you write a single line of business logic: a service to host it, an SDK to wire the model
-calls, auth, queues, logging, a deploy pipeline. [Aivin](https://aivin.cloud) exists to collapse
-that. Describe what you want built, and get back a real, typed, callable, observable service in
-minutes — not sprints.
+# ⚡ @aivin-labs/cli
 
-`@aivin-labs/cli` is your entry point into that platform, and your main tool for working inside
-the Aivin ecosystem day to day. Instead of hand-rolling a service, you run `aivin init`, describe
-what the plugin should do, and get a real, deployable TypeScript project — hot-reloading local dev
-server, typed input/output, and a one-command path to production included. Everything after that —
-testing, logs, connectors, MCP integrations, agents, automation — is one more `aivin` command
-away, so you can build agentic applications that plug straight into the platform without ever
-leaving your terminal or editor.
+**The Command-Line Gateway to AIVIN Bot & The Agentic Ecosystem**
 
-This package is the interactive tooling only; the plugin runtime library your generated code
-actually imports at runtime is
-[`@aivin-labs/sdk`](https://www.npmjs.com/package/@aivin-labs/sdk) (`ai`, `vector`, `store`, ...),
-installed automatically as a dependency of every project this CLI scaffolds. See
-[Relationship to @aivin-labs/sdk](#relationship-to-aivin-labssdk) below for how the two packages
-divide responsibilities.
+[![npm version](https://img.shields.io/npm/v/@aivin-labs/cli?style=flat-square&color=blue&logo=npm)](https://www.npmjs.com/package/@aivin-labs/cli)
+[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A522.0.0-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-Native%20Exec-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![MCP Ready](https://img.shields.io/badge/MCP-Protocol%20Ready-purple?style=flat-square)](https://modelcontextprotocol.io)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square)](#install-without-nodejs-connect-a-computer-to-aivin)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 
-## The Aivin ecosystem
+<p align="center">
+  Building an autonomous AI agent that does real work usually requires weeks of plumbing before business logic: servers, model routing, queues, auth, and sandboxes. <b>Aivin collapses that into minutes.</b>
+</p>
 
-Aivin isn't just a place to host one function — it's a small, composable ecosystem for agentic
-software, and this CLI is how you reach every piece of it:
+[The Aivin Ecosystem](#the-aivin-ecosystem) •
+[AIVIN Bot in Action](#aivin-bot-capabilities-via-cli) •
+[Architecture](#how-the-cli-powers-aivin-bot) •
+[Installation](#install) •
+[Quick Start](#quick-start) •
+[Windows Mascot](#aivin-mascot-on-windows) •
+[Command Reference](#command-overview)
 
-- **Plugins** — the core unit of work: a typed function (`main(mission, input, ctx)`), deployed as
-  its own container, callable by name, and searchable by every other plugin or agent in your org
-  (`aivin plugin search`, `call()` from the SDK). Write one by hand (`aivin create`), have AI
-  generate it from a description (`aivin init` / `aivin plugin make`), or convert an existing
-  project into one in place (`aivin plugin convert`).
-- **MCP proxies** — wrap any [Model Context Protocol](https://modelcontextprotocol.io) server's
-  tools, resources, or prompts as first-class Aivin plugins with zero code (`aivin mcp <url>`),
-  so the growing MCP ecosystem becomes instantly usable by your agents.
-- **Connectors** — shared OAuth apps and credential namespaces (`aivin connector`), so ten plugins
-  that all need "the org's Slack" don't each prompt the user for a separate login.
-- **AI Staff agents** — persistent, nameable agents you target with a mission, that use your
-  plugins as tools and can pause to ask a human for input mid-task (HIL). Install one from the
-  marketplace or build your own (`aivin agent`, `aivin do`).
-- **Automation jobs** — recurring, scheduled work described in plain language
-  (`aivin do job "..."`) — no cron syntax to write.
-- **AI Browser** — a self-correcting agent that drives a real browser, yours or a server-side one,
-  to complete a goal end-to-end (`aivin browser`).
-- **Workspaces, projects, and tasks** — the organizing structure everything above lives in, plus a
-  lightweight task tracker (`aivin task`) for the human side of the work.
-- **Plugin Marketplace** — plugins and MCP proxies you build here aren't limited to your own org:
-  submit them for community review and publish to Aivin's public Plugin Marketplace
-  (`aivin mcp <url> --publish`), so the AI capabilities you develop become reusable building
-  blocks other teams on the platform can search for and call, not just your own.
-- **Local, agent-supervised execution** — this CLI is also how Aivin reaches onto *your* machine to
-  get real work done, always under an explicit mission and never as open-ended remote access:
-  `aivin browser` drives a dedicated local browser profile (your own cookies/logins, isolated from
-  your daily-driver browser) so an agent can act on real logged-in sites, and `aivin start` can run
-  your plugin code inside a sandboxed `worker_threads.Worker` (`AIVIN_SANDBOX_WORKER=true`) with no
-  direct access to secrets or the filesystem. Every run stays scoped to the mission that started
-  it, with human-in-the-loop checkpoints (HIL) whenever an agent needs your go-ahead.
+---
 
-Put together: you describe the outcome you want, and Aivin's building blocks — plugins, agents,
-connectors, MCP tools — compose into it. `aivin` is how you author, test, and ship each of those
-pieces from your own terminal, on top of whatever editor/CI workflow you already use.
+</div>
 
-## Table of contents
+## The Aivin Ecosystem
 
-- [The Aivin ecosystem](#the-aivin-ecosystem)
-- [Install](#install)
-- [Quick start](#quick-start)
-- [Aivin mascot on Windows](#aivin-mascot-on-windows)
-- [What you get from a scaffold](#what-you-get-from-a-scaffold)
-- [Command overview](#command-overview)
-- [Environment variables](#environment-variables)
-- [Documentation](#documentation)
-- [Relationship to @aivin-labs/sdk](#relationship-to-aivin-labssdk)
-- [Development](#development)
-- [License](#license)
+<p align="center">
+  <img src="docs/media/aivin-ecosystem.jpg" alt="AIVIN Agentic Ecosystem Overview" width="800" />
+</p>
+
+`@aivin-labs/cli` is your day-to-day command center for interacting with **AIVIN Bot** and developing on the [Aivin Platform](https://aivin.cloud). Run `aivin init`, describe what you need in plain words, and get back a fully typed TypeScript project with a hot-reloading dev server, typed schemas, and single-command deployment to production.
+
+Aivin is a modular, composable ecosystem for agentic software:
+
+- **AIVIN Bot & AI Staff** — Persistent, goal-driven agents that reason over private data, use plugins as tools, and pause for human approval (HIL) mid-task.
+- **Typed Plugins** — The core unit of work: a typed function (`main(mission, input, ctx)`) deployed in its own isolated container, searchable and callable by any agent across your organization.
+- **Model Context Protocol (MCP)** — Wrap any [MCP](https://modelcontextprotocol.io) server's tools, resources, or prompts as first-class Aivin plugins with zero code (`aivin mcp <url>`).
+- **Autonomous AI Browser** — A self-correcting agent driving a real browser (locally or server-side) with vision and DOM reasoning to accomplish tasks end-to-end (`aivin browser`).
+- **Local Machine Supervised Execution** — Pair your local computer with AIVIN Bot (`aivin remote start`), allowing the bot to interact with logged-in web applications safely under explicit mission scopes.
+- **Natural Language Automation** — Schedule recurring background tasks using plain English (`aivin do job "..."`) without ever touching cron syntax.
+- **Plugin Marketplace** — Publish and share plugins or MCP proxies with team members or the public ecosystem (`aivin mcp <url> --publish`).
+
+---
+
+## AIVIN Bot Capabilities via CLI
+
+The CLI brings the full power of **AIVIN Bot** directly into your terminal workflows:
+
+```mermaid
+flowchart TD
+    CLIUser(["Terminal / Developer"]) --> Command["aivin CLI Commands"]
+
+    subgraph BotActions["AIVIN Bot Actions"]
+        Command -->|"aivin do [agent] [mission]"| AgentTask["AI Staff Goal Execution"]
+        Command -->|"aivin plugin ask [mission]"| AutoMatch["Auto-Pick & Execute Best Plugin"]
+        Command -->|"aivin browser [mission]"| WebTask["Autonomous Web Navigation"]
+        Command -->|"aivin do job [description]"| AutoJob["Natural Language Scheduled Cron"]
+    end
+
+    subgraph RemoteSupervision["Supervised Local Execution"]
+        Command -->|"aivin remote start"| RemoteTunnel["Secure Outbound Tunnel"]
+        RemoteTunnel --> LocalBrowser["Isolated Browser Profile (~/.aivin)"]
+        RemoteTunnel --> DesktopMascot["Windows Interactive Floating Mascot"]
+        RemoteTunnel --> CDPFilter["CDP Safety Filter: Block Local Files & Executables"]
+    end
+
+    subgraph Extensibility["Zero-Code Tooling"]
+        Command -->|"aivin mcp <url>"| MCPProxy["Auto-Convert MCP Server to Plugin"]
+        Command -->|"aivin init <name>"| AIScaffold["AI-Generated Typed Plugin Project"]
+        Command -->|"aivin deploy"| Marketplace["Deploy to Organization / Marketplace"]
+    end
+```
+
+### 1. Goal-Driven Staff Agents (`aivin do`)
+Dispatch an objective directly to an AI Staff agent. The agent breaks down the mission, queries relevant documents, invokes available plugins, and reports back:
+```bash
+aivin do researcher "Summarize key changes in our compliance policy and compare with last quarter"
+```
+
+### 2. Autonomous AI Browser (`aivin browser`)
+Drive a dedicated browser session locally or server-side:
+```bash
+aivin browser "Open site X, navigate to billing, and download the latest tax statement"
+```
+
+### 3. Natural Language Scheduled Automation (`aivin do job`)
+Define recurring background tasks in plain English:
+```bash
+aivin do job "Every Monday at 9:00 AM, query pending PRs and notify our team Slack channel"
+```
+
+### 4. Smart Plugin Matching (`aivin plugin ask`)
+Pass an open-ended mission, and AIVIN Bot automatically searches your organization's catalog, selects the best-matching plugin, executes it with the required input, and prints the result:
+```bash
+aivin plugin ask "Convert the quarterly sales data in data.csv into an executive summary table"
+```
+
+---
+
+## How the CLI Powers AIVIN Bot
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Dev as Developer
+    participant CLI as aivin CLI
+    participant Cloud as AIVIN Platform / Bot
+    participant Browser as Local Browser Window
+    participant Target as Target Web / SaaS
+
+    Dev->>CLI: aivin remote start --code <code>
+    CLI->>Cloud: Authenticate and establish outbound tunnel
+    Cloud-->>CLI: Machine connected to AIVIN Bot
+
+    Dev->>Cloud: Assign web mission via Chat or CLI
+    Cloud->>CLI: Route browser action to paired computer
+    CLI->>Browser: Launch isolated profile with existing user cookies
+    Browser->>Target: Navigate and execute steps
+    opt Requires 2FA or Human Checkpoint
+        CLI->>Dev: Native desktop notification / Mascot alert
+        Dev->>Browser: Complete 2FA prompt
+    end
+    Browser->>Target: Finalize download or update
+    CLI-->>Cloud: Mission complete & report progress
+    Cloud-->>Dev: Return finalized result
+```
+
+---
 
 ## Install
+
+### Global Installation via npm
 
 ```bash
 npm install -g @aivin-labs/cli
 aivin --version
 ```
 
-Requires Node.js ≥ 22.0.0 — the SDK relies on Node's native TypeScript execution to load
-`src/main.ts` directly, with no separate build step. `aivin start`/`aivin test` check this up
-front and fail with a clear message (not a cryptic loader error) if your Node is too old.
+> **Requirement**: Node.js **≥ 22.0.0**. The CLI leverages Node's native TypeScript execution to run `src/main.ts` directly with zero compile steps.
 
-### Install without Node.js (connect a computer to Aivin)
+---
 
-Single-file builds are served from **https://get.aivin.vn** (mirrored on
-[GitHub Releases](https://github.com/aivin-labs/cli/releases)) together with `SHA256SUMS`. The
-installers pick the right build, verify its checksum, check it starts, and put `aivin` first on
-your PATH:
+### Install without Node.js (Connect a Computer to Aivin)
+
+Self-contained standalone single-file binaries are available for every major operating system:
 
 ```powershell
 # Windows 10/11 (PowerShell 5.1 or 7), x64 or ARM64
@@ -100,195 +155,151 @@ irm https://get.aivin.vn/install.ps1 | iex
 ```
 
 ```bash
-# macOS (Intel / Apple Silicon) and Linux (x64 / arm64, glibc or musl)
+# macOS (Intel / Apple Silicon) and Linux (x64 / arm64)
 curl -fsSL https://get.aivin.vn/install.sh | sh
-# Alpine / systems without curl
-wget -qO- https://get.aivin.vn/install.sh | sh
 ```
 
-| Platform | Build |
-|---|---|
-| Windows x64 / ARM64 | `aivin-windows-x64.exe` (baseline, no AVX2 needed) / `aivin-windows-arm64.exe` |
-| macOS Intel / Apple Silicon | `aivin-darwin-x64` (baseline) / `aivin-darwin-arm64` (ad-hoc signed) |
-| Linux glibc x64 / arm64 | `aivin-linux-x64` (baseline) / `aivin-linux-arm64` |
-| Linux musl (Alpine) x64 / arm64 | `aivin-linux-x64-musl` / `aivin-linux-arm64-musl` — needs `libstdc++ libgcc`, which the installer adds with `apk` when it can |
+| Platform | Binary Build |
+| :--- | :--- |
+| **Windows x64 / ARM64** | `aivin-windows-x64.exe` / `aivin-windows-arm64.exe` |
+| **macOS Intel / Apple Silicon** | `aivin-darwin-x64` / `aivin-darwin-arm64` |
+| **Linux glibc x64 / arm64** | `aivin-linux-x64` / `aivin-linux-arm64` |
+| **Linux musl (Alpine)** | `aivin-linux-x64-musl` / `aivin-linux-arm64-musl` |
 
-In Aivin, **chat box → Browser menu → Add this computer** prints the same one-liner with a
-one-time pairing code, so the computer is installed and connected in one step
-(`aivin remote start --code <code>`).
+In Aivin Web, clicking **Chat box → Browser menu → Add this computer** prints a one-liner with a one-time pairing code (`aivin remote start --code <code>`).
 
-When the chat has a computer selected, AI Browser work on websites runs in a Chrome/Edge window
-on that computer. If you enabled **"Allow remote debugging for this browser instance"** in your
-everyday browser (`chrome://inspect/#remote-debugging`, Edge: `edge://inspect` → Remote debugging),
-the AI works in THAT browser with all your existing logins: click "Allow" once when it asks; the AI
-opens its own tabs in the background and can only watch (never drive, close or read cookies of) the
-tabs you opened. Otherwise it uses Aivin's own window (profile `~/.aivin/browser-profile`, shared with
-`aivin browser` — log in once per site). `--separate-browser` always uses Aivin's own window.
-Downloads land in `~/Downloads/Aivin`; when the AI needs you (login, 2FA, approval) you get an OS
-notification. `aivin remote start --no-browser` turns this off.
-Every tunnel goes through a CDP filter on this computer: no `file://` / `chrome://` pages, no picking local files, downloads only into
-`~/Downloads/Aivin` (executables are cancelled). `aivin remote pause` now also cancels running commands and closes AI browser tabs.
+---
 
-Releasing: `npm run build:binary` (Bun, all 8 builds into `dist/`), then on the host behind
-Cloudflare `npm run get:publish && npm run get:up` (nginx `deploy/get/`, versioned folders +
-`latest.txt`). Pushing a `v*` tag also builds and attaches everything to a GitHub Release
-(`.github/workflows/release.yml`).
-
-## Quick start
+## Quick Start
 
 ```bash
-aivin init my-plugin          # ask what the plugin should do, scaffold + generate working code
-cd my-plugin && npm install
+# 1. Scaffold a new plugin and generate working code from description
+aivin init invoice-parser
+cd invoice-parser && npm install
 
-aivin start                   # run it locally - gRPC server + an HTTP test shim on :4001
+# 2. Run locally with hot-reloading (gRPC server + HTTP test shim on :4001)
+aivin start
 
-aivin login                   # save an API key (once per machine)
-aivin test                    # verify on a non-production instance first
-aivin deploy                  # ship it
+# 3. Log in to Aivin Platform
+aivin login
+
+# 4. Verify on non-production instance
+aivin test
+
+# 5. Ship to your organization
+aivin deploy
 ```
 
-`aivin init` asks what the plugin should do, then scaffolds the project **and** generates real
-working code from that description in one step. Prefer a blank scaffold you write by hand?
-`aivin create my-plugin` does just the scaffolding, no AI step. Already have a project instead of
-a description? `aivin plugin convert` turns an existing directory into a plugin in place.
+Prefer a blank scaffold without AI-generated code? Use `aivin create my-plugin`.
+Have an existing project you want to wrap? `aivin plugin convert` converts it in place.
 
-## Aivin mascot on Windows
+---
+
+## Aivin Mascot on Windows
 
 <p align="center">
-  <img src="docs/media/aivin-mascot-live.gif" alt="The current live Aivin mascot showing chat, file drag and attached-file states" width="480" />
+  <img src="docs/media/aivin-mascot-live.gif" alt="The live Aivin mascot showing chat, file drag, and attached-file states" width="480" />
 </p>
 
-When Aivin Remote is running on Windows, a small animated Aivin mascot can float above your apps.
-It shows whether Aivin is idle, working, thinking, waiting for you, done, paused, offline, or has hit
-an error. Hover or click it to type a question, use its microphone for a live voice conversation,
-right-click for the activity panel, or drop local files onto it to attach them to your next message.
-The mascot stays out of Aivin screenshots and moves aside while the agent controls another window.
-The animation above is captured from the current WPF interface: it shows a chat, the drag target and
-the tray holding files already attached to the next message.
+When Aivin Remote is running on Windows, an interactive animated **Aivin Mascot** floats smoothly above your desktop windows:
 
 ```bash
-aivin remote start             # start the listener and mascot
-aivin ui                       # show the mascot and open its ask box
+aivin remote start             # start remote listener and show mascot
+aivin ui                       # open mascot ask box
 aivin ui --demo                # preview all mascot animations
-aivin remote mascot off        # turn it off persistently
-aivin remote mascot on         # enable it for the next listener start
+aivin remote mascot off        # disable mascot persistently
+aivin remote mascot on         # re-enable mascot for next start
 ```
 
-Turning it off from the activity panel plays a short fade-and-slide exit animation while the Remote
-listener continues in the background. See the dedicated [Aivin mascot guide](docs/AIVIN_MASCOT.md)
-for interactions, voice and keyboard shortcuts, states, privacy behavior, and troubleshooting.
+- **Visual State Indicators**: Displays real-time states (idle, working, thinking, waiting for approval, paused, offline, error).
+- **Interactive Controls**: Click to open quick ask box, talk using live voice chat, or drag-and-drop local files directly onto the mascot to attach them to your next prompt.
+- **Screen-Aware**: Automatically moves aside and hides itself during agent screenshot captures.
 
-### How Remote connects Aivin to computers
+### How Remote Connects Aivin to Local Computers
 
-![Aivin Platform routes authenticated work to listeners on selected computers; each listener applies local policy and returns progress and results](docs/media/aivin-remote-architecture.svg)
+<p align="center">
+  <img src="docs/media/aivin-remote-architecture.svg" alt="Aivin Platform routes authenticated work to listeners on selected computers; each listener applies local policy and returns progress and results" width="760" />
+</p>
 
-Each paired computer opens its own authenticated outbound connection to Aivin Platform. The
-platform routes a chat or mission to the selected computer; its listener applies local policy,
-requests approval for protected actions, runs the allowed local tools, and sends progress and
-results back. The mascot talks to the listener on the same computer—it is not a separate remote
-control channel.
+Each paired computer opens its own authenticated outbound connection to Aivin Platform. The platform routes a chat or mission to the selected computer; its listener applies local policy, requests approval for protected actions, runs the allowed local tools, and sends progress and results back. The mascot talks to the listener on the same computer—it is not a separate remote control channel.
 
-## What you get from a scaffold
+---
 
-Both `aivin init` and `aivin create` produce the same project shape (`init` additionally writes
-`src/service.ts` — see [CLI.md](docs/CLI.md#aivin-init-name)):
+## What You Get from a Scaffold
 
-```
+Every plugin scaffolded via `aivin init` or `aivin create` has a clear, standardized structure:
+
+```text
 my-plugin/
-├── manifest.json    # shared fields + plugins[] - identity, input/output schema, triggers
+├── manifest.json      # Identity, I/O JSON Schema, triggers & AI descriptions
 ├── src/
-│   └── main.ts        # (+ service.ts, if you used `aivin init`)
-├── package.json      # depends only on @aivin-labs/sdk; "start" runs `aivin-server` directly
-├── tsconfig.json      # editor/type-checking config, not used to build anything at deploy time
-├── AGENTS.md          # orientation for a coding agent (Claude Code, Cursor, ...) in this project
-├── test/              # a real, runnable example test using createMockSDK
-├── .env                # local-only config (SDK_ENDPOINT, etc.)
-└── .gitignore
+│   ├── main.ts        # Typed entrypoint: main(mission, input, ctx)
+│   └── service.ts     # Core business logic generated by AIVIN Bot
+├── package.json       # Depends strictly on @aivin-labs/sdk
+├── tsconfig.json      # Native TypeScript execution config
+├── AGENTS.md          # Orientation guide for coding agents (Cursor, Claude Code)
+├── test/              # Runnable integration tests with createMockSDK
+└── .env               # Local development overrides
 ```
 
-`manifest.json`'s `description` is what the AI planner reads to decide when to use your plugin —
-fill it in precisely. Full field reference lives in
-[MANIFEST.md (sdk repo)](https://github.com/aivin-labs/AIVIN-SDK/blob/main/docs/MANIFEST.md).
+---
 
-## Command overview
+## Command Overview
 
-Every command supports `--help` for its full flag list (`aivin <command> --help`). This table is
-a map — see [docs/CLI.md](docs/CLI.md) for the complete reference, including exact flags,
-examples, and behavior notes for each one.
+| Command | Action |
+| :--- | :--- |
+| `aivin init [name]` | Scaffold a plugin **and** AI-generate working code from your description |
+| `aivin create [name]` | Scaffold a clean, blank plugin project without AI code generation |
+| `aivin validate` | Validate `manifest.json` schema without network calls |
+| `aivin start` | Run plugin locally (gRPC server + `:4001` HTTP test shim) with hot reload |
+| `aivin deploy` | Deploy the current plugin to your organization's workspace |
+| `aivin test` | Deploy to a staging instance, run smoke tests, and print report |
+| `aivin plugin search <query>` | Search your organization and public marketplace for reusable plugins |
+| `aivin plugin ask [mission]` | Auto-select the best matching plugin and execute it against a mission |
+| `aivin plugin trigger [mission] [input]` | Directly invoke a deployed plugin with payload and inspect output |
+| `aivin plugin logs [pluginId]` | Stream live console output from a deployed plugin |
+| `aivin connector` | Manage shared OAuth credentials and authentication namespaces |
+| `aivin mcp <url>` | Scan any MCP server and instantly deploy all its tools as Aivin plugins |
+| `aivin browser [mission]` | Launch an autonomous AI Browser mission driving a local or cloud browser |
+| `aivin remote start` | Connect this computer to Aivin Platform with local CDP safety filters |
+| `aivin ui` | Show the Windows desktop mascot or preview animations with `--demo` |
+| `aivin do [agent] [mission]` | Dispatch a goal to an AI Staff agent to run in the background |
+| `aivin do job [description]` | Create a recurring background automation job using plain English |
+| `aivin task [description]` | Create, update, or track tasks within your active workspace |
+| `aivin workspace` | Switch between organizations, workspaces, and projects |
+| `aivin agent` | Search, install, create, or publish AI Staff agents |
 
-| Command | What it does |
-| --- | --- |
-| `aivin init [name]` | Scaffold a plugin **and** AI-generate its code from a description, in one step |
-| `aivin create [name]` | Scaffold a blank plugin project, no AI step |
-| `aivin validate` | Validate `manifest.json` (or `--json`/`--stdin`) without touching the network |
-| `aivin start` | Run the plugin locally (real gRPC server + `:4001` HTTP test shim), with hot-reload |
-| `aivin deploy` | Deploy the current plugin to your org |
-| `aivin test` | Deploy to a non-production instance, then smoke-test it and save a report |
-| `aivin plugin search <query>` | Search the platform's plugin ecosystem for something to reuse |
-| `aivin plugin info <id>` | Show one plugin's detail directly by id, no search query needed |
-| `aivin plugin ask [mission]` | One-shot: auto-pick the best-matching plugin for a mission and trigger it, like an agent would |
-| `aivin plugin make <description>` | AI-generate `src/main.ts` from a natural-language description |
-| `aivin plugin convert [hint]` | Turn an existing project in the current directory into a plugin |
-| `aivin plugin trigger [mission] [input]` | Invoke a deployed plugin for real and print the result |
-| `aivin plugin logs [pluginId]` | Tail a deployed plugin's live console output |
-| `aivin connector` | Register/search/list reusable OAuth or credential-form connectors |
-| `aivin pluginstore` | Attach a self-hosted `aivin-service` worker to your org as a plugin store |
-| `aivin mcp <url>` | Scan an MCP server and convert everything it finds into deployed plugin(s) |
-| `aivin mcp create <name>` | Scaffold a single manifest-only plugin that proxies one MCP tool/resource/prompt |
-| `aivin login [baseUrl]` | Log in and save an API key for this machine (browser flow by default) |
-| `aivin whoami` | Show which account is logged in on this machine |
-| `aivin key` | Manage named API keys (`gen` / `revoke` / `list`) for your account |
-| `aivin browser [mission]` | Run an AI Browser mission, driving a real local or server-side browser |
-| `aivin remote start` | Connect this computer to Aivin and show the Windows mascot when enabled |
-| `aivin ui` | Show the Windows mascot with its ask box, or preview its animations with `--demo` |
-| `aivin do [agentNickname] [mission]` | Have an AI Staff agent work toward a goal in the background |
-| `aivin do job [description]` | Create a recurring automation job from a plain-language description |
-| `aivin task [description]` | Create, list, get, update, or delete tasks in a project |
-| `aivin workspace` | Browse your workspaces/projects and pick one for `--workspace`/`--project` |
-| `aivin agent` | Search, install, create, and publish AI Staff agents |
-| `aivin project` | Create, rename, and delete projects within a workspace |
-
-## Environment variables
-
-Most projects never need any of these — `aivin login` saves your key once, machine-wide, and
-sensible defaults cover local development. Set them in a project's `.env` (or your shell) to
-override:
-
-| Variable | Used by | Default |
-| --- | --- | --- |
-| `SDK_ENDPOINT` | SDK calls, `aivin start` | `sdk.aivin.cloud:443` |
-| `AIVIN_BASE_URL` | `deploy`, `test`, `plugin make/convert/trigger`, `login --basic` | `https://api.aivin.cloud` |
-| `AIVIN_WEB_URL` | `login` (browser flow) | `https://brain.aivin.cloud` |
-| `LOCAL_TEST_PORT` | `aivin start` | `4001` |
-| `LOCAL_TEST_HOST` | `aivin start` | `127.0.0.1` (loopback-only — `/invoke` has no auth) |
-| `AIVIN_SANDBOX_WORKER` | `aivin start`, deployed containers | `false` |
-
-Full descriptions and when you'd actually touch each one: [CLI.md#environment-variables](docs/CLI.md#environment-variables).
-
-## Documentation
-
-- [docs/AIVIN_MASCOT.md](docs/AIVIN_MASCOT.md) — the Windows mascot: interaction, voice,
-  animation states, shortcuts, privacy, controls, and troubleshooting.
-- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — the full narrative walkthrough: scaffold,
-  write, test, deploy, and use a plugin from the CLI, plus everything else `aivin` drives (tasks,
-  AI Browser missions, workspaces, agents).
-- [docs/CLI.md](docs/CLI.md) — every command, flag, and environment variable, for lookup.
-- [docs/CHANGELOG.md](docs/CHANGELOG.md) — release history.
-- [`@aivin-labs/sdk`'s own docs](https://github.com/aivin-labs/AIVIN-SDK/tree/main/docs) — the SDK
-  API your plugin code calls (`ai`, `vector`, `store`, ...), `manifest.json`'s field reference, and
-  `ctx`. This package doesn't duplicate that content.
+---
 
 ## Relationship to @aivin-labs/sdk
 
-- **This package (`@aivin-labs/cli`)** is dev tooling: it never runs inside a deployed plugin
-  container, only on your machine (or CI). Its own `aivin --version` is independent of whatever
-  `@aivin-labs/sdk` version a given plugin project has installed.
-- **`@aivin-labs/sdk`** is the runtime library (`import { ai, ... } from '@aivin-labs/sdk'`) and
-  also ships `bin/server.mjs` (exposed as the `aivin-server` binary) — the actual process a
-  deployed plugin container runs via `npm start`. `aivin start`/`aivin test` resolve and run this
-  binary from the **current project's own** installed `@aivin-labs/sdk`, not from this CLI's
-  install location, so a scaffolded project's `package.json` depends on `@aivin-labs/sdk` directly
-  and never needs this CLI package installed inside the container.
+- **`@aivin-labs/cli`** is developer tooling: It runs locally on your workstation or in CI environments. It is never bundled into your deployed container.
+- **`@aivin-labs/sdk`** is the runtime library imported in code (`import { ai, vector, store } from '@aivin-labs/sdk'`). It provides the runtime server (`aivin-server`) executed inside deployed plugin containers.
+
+---
+
+## Environment Variables
+
+| Variable | Target | Default |
+| :--- | :--- | :--- |
+| `SDK_ENDPOINT` | SDK gRPC connection | `sdk.aivin.cloud:443` |
+| `AIVIN_BASE_URL` | API endpoints (`deploy`, `test`, `login`) | `https://api.aivin.cloud` |
+| `AIVIN_WEB_URL` | Web dashboard & browser login | `https://brain.aivin.cloud` |
+| `LOCAL_TEST_PORT` | Local test HTTP port (`aivin start`) | `4001` |
+| `LOCAL_TEST_HOST` | Local test bind host | `127.0.0.1` |
+| `AIVIN_SANDBOX_WORKER` | Isolated thread execution | `false` |
+
+---
+
+## Documentation
+
+- [docs/AIVIN_MASCOT.md](docs/AIVIN_MASCOT.md) — The Windows desktop mascot: interactions, animations, shortcuts, privacy, and controls.
+- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) — Complete walkthrough: scaffold, develop, test, and deploy plugins and agents.
+- [docs/CLI.md](docs/CLI.md) — Comprehensive command and flag reference manual.
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — Version release history.
+- [`@aivin-labs/sdk` Docs](https://github.com/aivin-labs/AIVIN-SDK/tree/main/docs) — Runtime SDK documentation (`ai`, `vector`, `store`).
+
+---
 
 ## Development
 
@@ -299,6 +310,16 @@ npm run format    # prettier --write .
 npm test          # node --test test/cli.validate.test.mjs
 ```
 
+---
+
 ## License
 
-MIT
+MIT License. See [LICENSE](LICENSE) for details.
+
+---
+
+<div align="center">
+
+Built for developers who want AI agents to do real, dependable work.
+
+</div>

@@ -36,11 +36,18 @@ export const HostCommand = Object.freeze({ STATE: 'state', MAIN: 'main', LOG: 'l
 
 /** `aivin ui` (terminal khác) chạm tệp này → daemon đang chạy hiện linh vật + mở ô hỏi (mascot/ui.mjs). */
 export const MASCOT_SHOW_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-show');
+export const MASCOT_HIDE_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-hide');
 const SHOW_POLL_MS = 1000;
 const SHOW_REQUEST_GRACE_MS = 30_000;
 
 /** Ghi yêu cầu hiện linh vật cho daemon đang chạy (hoặc sắp chạy). */
 export function requestMascotShow(file = MASCOT_SHOW_FILE) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, String(Date.now()));
+}
+
+/** Ghi yêu cầu ẩn linh vật cho daemon đang chạy. */
+export function requestMascotHide(file = MASCOT_HIDE_FILE) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, String(Date.now()));
 }
@@ -126,7 +133,7 @@ export function userWindow(w) {
 export function createMascot({
   enabled = true, platform = process.platform, env = process.env, onPause = () => {}, onResume = () => {}, say = () => {},
   onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onDrop = () => {},
-  spawnImpl = spawn, dir = MASCOT_DIR, settingsFile = MASCOT_SETTINGS_FILE, showFile = MASCOT_SHOW_FILE, now = Date.now, timers = { setTimeout, clearTimeout },
+  spawnImpl = spawn, dir = MASCOT_DIR, settingsFile = MASCOT_SETTINGS_FILE, showFile = MASCOT_SHOW_FILE, hideFile = MASCOT_HIDE_FILE, now = Date.now, timers = { setTimeout, clearTimeout },
   thinkMs = THINK_MS, resultMs = RESULT_MS, mainThrottleMs = MAIN_THROTTLE_MS, restartDelaysMs = RESTART_DELAYS_MS, awayWaveMs = AWAY_WAVE_MS,
 } = {}) {
   if (!enabled || platform !== 'win32') return NOOP;
@@ -244,15 +251,25 @@ export function createMascot({
     write({ t: HostCommand.OPEN_ASK });
   }
 
-  // Yêu cầu từ lệnh `aivin ui` (cửa sổ terminal khác): tệp đánh dấu đổi giờ sửa → đánh thức. Tính cả yêu cầu vừa ghi ngay trước khi daemon
-  // này khởi động (`aivin ui` tự bật daemon rồi mới chờ).
+  // Yêu cầu hiện/ẩn linh vật từ khay hệ thống hoặc lệnh `aivin ui`: tệp đánh dấu đổi giờ sửa.
   let showSeenAt = now() - SHOW_REQUEST_GRACE_MS;
+  let hideSeenAt = now() - SHOW_REQUEST_GRACE_MS;
   const showWatch = setInterval(() => {
-    let at;
-    try { at = fs.statSync(showFile).mtimeMs; } catch { return; }
-    if (at <= showSeenAt) return;
-    showSeenAt = at;
-    wake();
+    try {
+      const showAt = fs.statSync(showFile).mtimeMs;
+      if (showAt > showSeenAt) {
+        showSeenAt = showAt;
+        wake();
+      }
+    } catch {}
+    try {
+      const hideAt = fs.statSync(hideFile).mtimeMs;
+      if (hideAt > hideSeenAt) {
+        hideSeenAt = hideAt;
+        try { saveMascotSettings({ enabled: false }, settingsFile); } catch {}
+        sleep();
+      }
+    } catch {}
   }, SHOW_POLL_MS);
   showWatch.unref?.();
 
