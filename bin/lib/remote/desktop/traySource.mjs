@@ -107,11 +107,24 @@ namespace AivinDesktop {
 
     public ModernMenuRenderer() : base(new ModernColorTable()) { }
 
+    static void FillRoundedRectangle(Graphics g, Brush b, Rectangle r, int radius) {
+      using (System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath()) {
+        int d = radius * 2;
+        path.AddArc(r.X, r.Y, d, d, 180, 90);
+        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        g.FillPath(b, path);
+      }
+    }
+
     protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
       if (e.Item.Selected && e.Item.Enabled) {
         Rectangle rc = new Rectangle(4, 1, e.Item.Width - 8, e.Item.Height - 2);
         using (SolidBrush b = new SolidBrush(ClrHover)) {
-          e.Graphics.FillRectangle(b, rc);
+          FillRoundedRectangle(e.Graphics, b, rc, 6);
         }
       }
     }
@@ -128,7 +141,7 @@ namespace AivinDesktop {
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
       using (Pen p = new Pen(ClrBorder)) {
         int y = e.Item.Height / 2;
-        e.Graphics.DrawLine(p, 14, y, e.Item.Width - 14, y);
+        e.Graphics.DrawLine(p, 16, y, e.Item.Width - 16, y);
       }
     }
 
@@ -220,20 +233,28 @@ namespace AivinDesktop {
       menu.BackColor = Color.White;
       menu.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
       menu.Renderer = new ModernMenuRenderer();
-      menu.Padding = new Padding(2, 6, 2, 6);
+      menu.MinimumSize = new Size(256, 0);
+      menu.Padding = new Padding(4, 8, 4, 8);
 
       status = new ToolStripMenuItem();
       status.Enabled = false;
-      status.Padding = new Padding(14, 6, 14, 4);
+      status.AutoSize = false;
+      status.Height = 30;
+      status.TextAlign = ContentAlignment.MiddleLeft;
+      status.Padding = new Padding(16, 0, 16, 0);
+      status.Margin = new Padding(4, 2, 4, 0);
       status.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
 
       versionItem = new ToolStripMenuItem();
       versionItem.Enabled = false;
-      versionItem.Padding = new Padding(14, 2, 14, 6);
+      versionItem.AutoSize = false;
+      versionItem.Height = 22;
+      versionItem.TextAlign = ContentAlignment.MiddleLeft;
+      versionItem.Padding = new Padding(16, 0, 16, 0);
+      versionItem.Margin = new Padding(4, 0, 4, 4);
       versionItem.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
 
       updateItem = Item("", delegate { CheckOrApplyUpdate(); });
-      updateItem.Padding = new Padding(14, 6, 14, 6);
 
       open = Item("", delegate { OpenAivin(); });
       open.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
@@ -279,7 +300,11 @@ namespace AivinDesktop {
 
     ToolStripMenuItem Item(string text, EventHandler onClick) {
       ToolStripMenuItem item = new ToolStripMenuItem(text);
-      item.Padding = new Padding(14, 6, 14, 6);
+      item.AutoSize = false;
+      item.Height = 34;
+      item.TextAlign = ContentAlignment.MiddleLeft;
+      item.Padding = new Padding(16, 0, 16, 0);
+      item.Margin = new Padding(4, 1, 4, 1);
       item.Click += onClick;
       return item;
     }
