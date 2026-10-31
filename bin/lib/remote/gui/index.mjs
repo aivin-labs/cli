@@ -46,6 +46,7 @@ const OPEN_WAIT_MS = 10_000;
 const WAIT_MAX_MS = 60_000;
 const FIND_DEFAULT = 20;
 const FIND_MAX = 60;
+const SEMANTIC_CHOICES = 5;
 /** Báo người dùng "AI đang điều khiển" một lần mỗi quãng này (lần thao tác ghi đầu tiên). */
 const NOTIFY_EVERY_MS = 5 * 60_000;
 
@@ -88,6 +89,41 @@ export function assertAppAllowed(name, { fullAccess }) {
 }
 
 const normalizeName = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * Rank UI nodes with richer evidence while keeping the model-facing schema small. Hard exclusions happen
+ * before scoring; exact accessible names and AutomationIds beat loose word matches. The margin between the
+ * first two candidates is used by gui.do to refuse ambiguous actions instead of guessing.
+ */
+export function rankGuiNodes(nodes, query, role = '') {
+  const q = normalizeName(query);
+  const words = q.split(' ').filter(Boolean);
+  const wantedRole = String(role || '').toLowerCase();
+  if (!words.length) return [];
+  return (nodes || [])
+    .filter((n) => (!wantedRole || String(n.role || '').toLowerCase() === wantedRole) && !n.disabled && !n.offscreen)
+    .map((node, order) => {
+      const name = normalizeName(node.name);
+      const aid = normalizeName(node.automation_id);
+      const value = normalizeName(node.value);
+      const help = normalizeName(node.help);
+      const combined = [name, aid, value, help].filter(Boolean).join(' ');
+      const hits = words.filter((word) => combined.includes(word)).length;
+      if (!hits) return null;
+      let score = Math.round((hits / words.length) * 50);
+      const evidence = [];
+      if (name === q) { score += 50; evidence.push('exact_name'); }
+      else if (aid === q) { score += 45; evidence.push('exact_automation_id'); }
+      else if (name.startsWith(q)) { score += 35; evidence.push('name_prefix'); }
+      else if (words.every((word) => name.includes(word))) { score += 30; evidence.push('all_words_in_name'); }
+      else if (words.every((word) => combined.includes(word))) { score += 20; evidence.push('all_words'); }
+      if (node.source === 'ocr') { score -= 5; evidence.push('ocr'); }
+      if (node.patterns?.length) { score += 3; evidence.push('actionable_pattern'); }
+      return { node, score, hits, evidence, order };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || b.hits - a.hits || a.order - b.order);
+}
 
 /** Chọn ứng dụng theo tên: trùng hẳn > bắt đầu bằng > chứa. Nhiều ứng viên ngang nhau → trả danh sách để Planner chọn lại. */
 export function matchApps(apps, query) {
@@ -176,16 +212,74 @@ export function createGuiController({
     const role = String(args.role || '').toLowerCase();
     const max = Math.max(1, Math.min(Number(args.max) || FIND_DEFAULT, FIND_MAX));
     const res = await observe({ ...args, max_nodes: 1500 }, ctx);
-    const scored = (res.nodes || [])
-      .filter((n) => !role || n.role === role)
-      .map((n) => {
-        const text = normalizeName([n.name, n.automation_id, n.value, n.help].filter(Boolean).join(' '));
-        return { n, hits: words.filter((w) => text.includes(w)).length };
-      })
-      .filter((x) => x.hits > 0);
+    const scored = rankGuiNodes(res.nodes, args.query, role);
     const all = scored.filter((x) => x.hits === words.length);
-    const picked = (all.length ? all : scored.sort((a, b) => b.hits - a.hits)).slice(0, max).map((x) => x.n);
-    return { ...res, nodes: picked, query: String(args.query), matched: all.length ? all.length : scored.length, exact: all.length > 0 };
+    const pool = all.length ? all : scored.filter((x) => x.hits === scored[0]?.hits);
+    const picked = pool.slice(0, max);
+    const margin = picked.length > 1 ? picked[0].score - picked[1].score : picked.length ? picked[0].score : 0;
+    return {
+      ...res,
+      nodes: picked.map((x) => x.node),
+      query: String(args.query), matched: all.length || scored.length, exact: all.length > 0,
+      confidence: !picked.length ? 'none' : margin >= 15 || picked.length === 1 ? 'high' : margin >= 5 ? 'medium' : 'low',
+      ambiguous: picked.length > 1 && margin < 5 || undefined,
+    };
+  }
+
+  /**
+   * Compact semantic fast path. The caller states intent; candidate evidence, exclusions, ambiguity handling,
+   * execution and cheap post-action verification stay inside the device runtime.
+   */
+  async function semanticDo(args, ctx, env) {
+    const command = String(args.do || '').toLowerCase();
+    if (command === 'open') return openApp({ name: args.target, file: args.file }, ctx, env);
+    const action = {
+      click: GuiAction.CLICK, fill: GuiAction.SET_VALUE, select: GuiAction.SELECT, toggle: GuiAction.TOGGLE,
+      key: GuiAction.KEY, scroll: GuiAction.SCROLL,
+    }[command];
+    if (!action) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Unknown semantic action: ${args.do || ''}`);
+
+    if ((command === 'key' || command === 'scroll') && !args.target) {
+      const result = await act({
+        action, window: args.within || args.window, keys: command === 'key' ? args.value : undefined,
+        direction: command === 'scroll' ? args.value : undefined,
+      }, ctx);
+      return { ok: true, action: command, effect: result.window_title_changed || result.focused_element || command };
+    }
+
+    const query = String(args.target || '').trim();
+    if (!query) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give target');
+    const found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES }, ctx);
+    if (!found.nodes.length) throw new DeviceToolError(DeviceErrorCode.GUI_TARGET_NOT_FOUND, `No enabled visible target matched "${query}"`);
+    if (found.ambiguous) {
+      return {
+        ok: false, code: DeviceErrorCode.GUI_AMBIGUOUS_TARGET,
+        choices: found.nodes.map((n) => ({ ref: n.id, label: [n.name || n.automation_id || n.role, n.role].filter(Boolean).join(' — ') })),
+      };
+    }
+
+    const node = found.nodes[0];
+    const result = await act({
+      action, node_id: node.id,
+      text: command === 'fill' ? args.value : undefined,
+      option: command === 'select' ? args.value : undefined,
+      state: command === 'toggle' ? args.value : undefined,
+    }, ctx);
+    let verified;
+    if (command === 'fill' && Object.hasOwn(result.target || {}, 'value')) verified = String(result.target.value) === String(args.value ?? '');
+    if (command === 'select' && Object.hasOwn(result.target || {}, 'selected')) verified = result.target.selected === true;
+    if (command === 'toggle' && Object.hasOwn(result.target || {}, 'checked')) {
+      const expected = String(args.value || '').toLowerCase();
+      verified = expected === 'on' ? result.target.checked === 'on' : expected === 'off' ? result.target.checked === 'off' : undefined;
+    }
+    if (verified === false) {
+      throw new DeviceToolError(DeviceErrorCode.GUI_NO_EFFECT, `${command} ran but the target did not reach the requested state`);
+    }
+    return {
+      ok: true, action: command, target: node.name || node.automation_id || node.role,
+      ...(verified === undefined ? {} : { verified }),
+      effect: result.window_title_changed || result.target || result.focused_element || command,
+    };
   }
 
   /** Chờ phần tử / cửa sổ hiện ra hoặc mất đi — chỉ đọc. Chờ trong một cửa sổ thì cửa sổ đó phải được phép điều khiển. */
@@ -275,7 +369,7 @@ export function createGuiController({
     return { opened: app.name, window: win, hint: win ? undefined : 'App started but no new window yet — call gui.windows in a moment' };
   }
 
-  return { windows, observe, find, waitFor, focus, act, openApp, close: () => host.close() };
+  return { windows, observe, find, waitFor, focus, act, semanticDo, openApp, close: () => host.close() };
 }
 
 /** Công cụ GUI cho danh mục của Planner. */
@@ -285,6 +379,13 @@ export function buildGuiTools(gui) {
     window: str('window handle (0x…) or a title/process to match; default the focused window (asked from the mascot: the window the person was using)'),
   };
   return [
+    { name: 'gui.do', group: ToolGroup.GUI, handler: (a, c, e) => gui.semanticDo(a, c, e),
+      description: 'Fast semantic desktop action. State the intent briefly; the device finds one enabled visible target, refuses ambiguity, acts, and verifies simple value/state changes. Use precise gui.find/gui.act only after an ambiguous result.',
+      input_schema: schema({
+        do: str('click | fill | select | toggle | key | scroll | open'), target: str('short visible label or app name'),
+        value: str('text, option, on/off, key chord, or scroll direction'), within: str('optional window title/process'),
+        role: str('optional role such as button or edit'), file: str('document path for open'),
+      }, ['do']) },
     { name: 'gui.windows', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.windows(a, c),
       description: 'List open desktop windows: title, app process, handle, position, which is focused/minimized. blocked = the AI may not control it.',
       input_schema: schema({ include_dialogs: bool('also list owned dialogs') }) },

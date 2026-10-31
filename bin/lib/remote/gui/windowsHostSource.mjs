@@ -643,7 +643,10 @@ namespace AivinGui {
       bool restored = used != "mouse" && used != "keyboard" && RestoreForeground(fgBefore, window);
       // Chạy nền: người dùng đang ở cửa sổ khác → cửa sổ của AI về lại dưới đáy (không chồng lên việc của người dùng).
       if (restored || (used != "mouse" && used != "keyboard" && fgBefore != window && window != IntPtr.Zero)) SendToBack(window);
-      Thread.Sleep(Math.Max(0, Math.Min(Int(a, "settle_ms", 250), 3000)));
+      // Pattern actions expose their new state synchronously in most UIA providers. Keep a short grace for
+      // providers that publish property changes just after returning; real mouse/keyboard still needs longer.
+      int defaultSettle = used == "mouse" || used == "keyboard" ? 250 : 30;
+      Thread.Sleep(Math.Max(0, Math.Min(Int(a, "settle_ms", defaultSettle), 3000)));
       var res = new Dictionary<string, object> { { "action", action }, { "method", used } };
       if (restored) res["focus_returned_to_user"] = true;
       if (el != null) res["target"] = Live(el);

@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
-const { assertAppAllowed, assertWindowAllowed, buildGuiTools, createGuiController, detectGui, matchApps } = await import('../bin/lib/remote/gui/index.mjs');
+const { assertAppAllowed, assertWindowAllowed, buildGuiTools, createGuiController, detectGui, matchApps, rankGuiNodes } = await import('../bin/lib/remote/gui/index.mjs');
 const { buildTools } = await import('../bin/lib/remote/toolHandlers.mjs');
 const { buildCatalog } = await import('../bin/lib/remote/deviceProfile.mjs');
 const { DEFAULT_GROUP_LIMITS, ToolGroup } = await import('../bin/lib/remote/constants.mjs');
@@ -49,6 +49,19 @@ test('matchApps: trùng hẳn > bắt đầu bằng > chứa, bỏ dấu; ngang 
   assert.deepEqual(matchApps(apps, 'may tinh').map((a) => a.name), ['Máy tính']);
   assert.deepEqual(matchApps(apps, 'zal').map((a) => a.name), ['Zalo', 'Zalo Beta']);
   assert.deepEqual(matchApps(apps, 'photoshop'), []);
+});
+
+test('semantic rank: loại node disabled/offscreen, exact name thắng; hai ứng viên ngang nhau vẫn giữ để báo mơ hồ', () => {
+  const ranked = rankGuiNodes([
+    { id: '1.1', role: 'button', name: 'Save and close', patterns: ['invoke'] },
+    { id: '1.2', role: 'button', name: 'Save', patterns: ['invoke'] },
+    { id: '1.3', role: 'button', name: 'Save', disabled: true },
+    { id: '1.4', role: 'edit', name: 'Save', offscreen: true },
+  ], 'save', 'button');
+  assert.deepEqual(ranked.map((x) => x.node.id), ['1.2', '1.1']);
+  assert.ok(ranked[0].score - ranked[1].score >= 15);
+  const tied = rankGuiNodes([{ id: '2.1', name: 'Save', role: 'button' }, { id: '2.2', name: 'Save', role: 'button' }], 'save');
+  assert.equal(tied[0].score, tied[1].score);
 });
 
 test('act theo node_id: snapshot lạ → GUI_STALE_NODE; ứng dụng bị chặn → không gửi xuống host', async () => {
@@ -181,8 +194,9 @@ test('find: chỉ phần tử khớp mọi từ (bỏ dấu, cả AutomationId /
   const host = fakeHost({ observe: { snapshot: 5, window: NOTEPAD, nodes, tree_quality: 'good', node_count: nodes.length }, act: (a) => ({ action: a.action, method: 'invoke' }) });
   const gui = createGuiController({ host, notify: () => {} });
   const r = await gui.find({ query: 'luu', role: 'button' }, {});
-  assert.deepEqual(r.nodes.map((n) => n.id), ['5.2', '5.3']);
+  assert.deepEqual(r.nodes.map((n) => n.id), ['5.3', '5.2']);
   assert.equal(r.exact, true);
+  assert.equal(r.confidence, 'high');
   assert.equal(host.calls[0].args.max_nodes, 1500, 'đi cả cây rồi lọc');
   assert.deepEqual((await gui.find({ query: 'amount' }, {})).nodes.map((n) => n.id), ['5.1']);
   assert.deepEqual((await gui.find({ query: 'tien dien' }, {})).nodes.map((n) => n.id), ['5.4']);
@@ -192,6 +206,43 @@ test('find: chỉ phần tử khớp mọi từ (bỏ dấu, cả AutomationId /
   assert.equal((await gui.find({ query: 'luu', max: 1 }, {})).nodes.length, 1);
   await assert.rejects(gui.find({ query: '  ' }, {}), (e) => e.code === 'INVALID_ARGS');
   assert.equal((await gui.act({ action: 'click', node_id: '5.3' }, {})).method, 'invoke', 'id của find dùng ngay cho act');
+});
+
+test('gui.do: schema ngắn, semantic match nội bộ, từ chối mơ hồ và xác minh fill', async () => {
+  const observations = [
+    { snapshot: 11, window: NOTEPAD, tree_quality: 'good', nodes: [
+      { id: '11.1', role: 'edit', name: 'Customer name', patterns: ['value'] },
+      { id: '11.2', role: 'button', name: 'Save' },
+    ] },
+    { snapshot: 12, window: NOTEPAD, tree_quality: 'good', nodes: [
+      { id: '12.1', role: 'button', name: 'Save' }, { id: '12.2', role: 'button', name: 'Save' },
+    ] },
+  ];
+  const host = fakeHost({
+    observe: () => observations.shift(),
+    act: (a) => ({ action: a.action, method: 'value', target: { exists: true, value: a.text } }),
+  });
+  const gui = createGuiController({ host, notify: () => {} });
+  const filled = await gui.semanticDo({ do: 'fill', target: 'Customer name', value: 'An', role: 'edit' }, {}, {});
+  assert.deepEqual({ ok: filled.ok, action: filled.action, verified: filled.verified }, { ok: true, action: 'fill', verified: true });
+  assert.equal(host.calls.find((c) => c.op === 'act').args.node_id, '11.1');
+  const ambiguous = await gui.semanticDo({ do: 'click', target: 'Save', role: 'button' }, {}, {});
+  assert.equal(ambiguous.code, 'GUI_AMBIGUOUS_TARGET');
+  assert.equal(ambiguous.choices.length, 2);
+  assert.equal(host.calls.filter((c) => c.op === 'act').length, 1, 'mơ hồ không được click');
+
+  const tool = buildGuiTools(gui).find((t) => t.name === 'gui.do');
+  assert.deepEqual(tool.input_schema.required, ['do']);
+  assert.deepEqual(Object.keys(tool.input_schema.properties), ['do', 'target', 'value', 'within', 'role', 'file']);
+});
+
+test('gui.do: hậu điều kiện fill sai → GUI_NO_EFFECT', async () => {
+  const host = fakeHost({
+    observe: { snapshot: 20, window: NOTEPAD, tree_quality: 'good', nodes: [{ id: '20.1', role: 'edit', name: 'Amount' }] },
+    act: { action: 'set_value', method: 'value', target: { exists: true, value: 'old' } },
+  });
+  const gui = createGuiController({ host, notify: () => {} });
+  await assert.rejects(gui.semanticDo({ do: 'fill', target: 'Amount', value: '100' }, {}, {}), (e) => e.code === 'GUI_NO_EFFECT');
 });
 
 test('trình soạn code / ứng dụng agent (VS Code, Cursor, Claude…) chỉ điều khiển / mở được khi máy toàn quyền', async () => {

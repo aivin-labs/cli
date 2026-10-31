@@ -202,6 +202,9 @@ export const DeviceErrorCode = Object.freeze({
   GUI_UNAVAILABLE: 'GUI_UNAVAILABLE',
   /** node_id của lần observe cũ hoặc phần tử đã biến mất — observe lại. */
   GUI_STALE_NODE: 'GUI_STALE_NODE',
+  GUI_TARGET_NOT_FOUND: 'GUI_TARGET_NOT_FOUND',
+  GUI_AMBIGUOUS_TARGET: 'GUI_AMBIGUOUS_TARGET',
+  GUI_NO_EFFECT: 'GUI_NO_EFFECT',
   /** Người dùng đang dùng chuột / bàn phím — AI dừng, hỏi trước khi làm tiếp. */
   GUI_USER_ACTIVE: 'GUI_USER_ACTIVE',
   /** Ứng dụng không được điều khiển (quản lý mật khẩu, hộp nâng quyền, terminal khi không toàn quyền…). */

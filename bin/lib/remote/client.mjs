@@ -326,6 +326,7 @@ export async function startRemoteClient(options = {}) {
   const byName = toolMap(tools);
   // Công cụ chủ máy tắt (`aivin remote policy deny`) không vào danh mục — Planner không lập kế hoạch với nó (gọi tới vẫn bị chặn ở sàn luật).
   const deniedTools = new Set(policyGuard.read().deny_tools);
+  if (deniedTools.has('gui.act')) deniedTools.add('gui.do');
   const { catalog, hash } = buildCatalog(tools.filter((t) => !deniedTools.has(t.name)));
   const confirmer = multiUser ? null : createLocalConfirmer();
   // Nhiều người dùng: thêm trần song song theo từng thành viên — một người không chiếm hết chỗ của cả tổ chức.

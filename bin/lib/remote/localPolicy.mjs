@@ -39,7 +39,10 @@ const POLICY_KEY_ACCOUNT = 'remote-policy-key';
  * Công cụ mang lệnh để chạy → tham số chứa lệnh. `gui.act`: chữ gõ vào cửa sổ (hộp Run, terminal đang mở) cũng là một cách chạy lệnh —
  * xét cùng mẫu lệnh rủi ro / luật chặn của chủ máy.
  */
-const COMMAND_ARG = Object.freeze({ 'shell.exec': 'command', 'proc.start': 'command', 'proc.write': 'text', 'sys.schedule': 'command', 'gui.act': 'text' });
+const COMMAND_ARG = Object.freeze({
+  'shell.exec': 'command', 'proc.start': 'command', 'proc.write': 'text', 'sys.schedule': 'command',
+  'gui.act': 'text', 'gui.do': 'value',
+});
 
 /** Công cụ luôn xét là rủi ro: gửi ra ngoài thay người dùng, cài việc chạy định kỳ (cách bám trụ kinh điển của mã độc). */
 // meeting.start: ghi âm micro + âm thanh máy — AI không tự bật ghi âm khi không ai ngồi trước máy biết (29/10/2026).
@@ -230,7 +233,10 @@ export function riskReason(tool, args = {}) {
  * Lời gọi nội bộ (BE tự dùng: đọc khúc tệp, ghi nhớ…) và chỉ đọc không bao giờ cần xác nhận.
  */
 export function evaluateLocalPolicy(policy, tool, args = {}) {
-  if (policy.deny_tools.includes(tool.name)) {
+  // gui.do is only a compact route into the same GUI actuator. A device owner who disabled the
+  // lower-level actuator must not get it back merely because a newer CLI advertised the fast path.
+  const deniedByAlias = tool.name === 'gui.do' && policy.deny_tools.includes('gui.act');
+  if (policy.deny_tools.includes(tool.name) || deniedByAlias) {
     throw new DeviceToolError(DeviceErrorCode.LOCAL_DENIED, `The owner of this computer turned off ${tool.name} here`);
   }
   const command = commandOf(tool.name, args);
