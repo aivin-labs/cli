@@ -8,6 +8,7 @@ import { lockHolder } from '../daemonLock.mjs';
 import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
 import { TRAY_CS } from './traySource.mjs';
 import { trayStrings } from './strings.mjs';
+import { currentCliVersion } from '../../selfUpdate.mjs';
 
 /**
  * Aivin trên màn hình Windows (29/10/2026): `Aivin.exe` (khay hệ thống + trình giữ chạy daemon, traySource.mjs) biên dịch trên máy, lối tắt
@@ -76,6 +77,7 @@ export function pngToIco(png) {
  */
 export function launchConfigText({ argv, rollback = null, lang = 'en', extra = {}, platform = 'win32' }) {
   const clean = (v) => String(v).replace(/[\r\n]+/g, ' ');
+  if (!extra.version) { try { extra.version = currentCliVersion(); } catch {} }
   const lines = [`exe=${clean(argv[0])}`, ...argv.slice(1).map((a) => `arg=${clean(a)}`)];
   if (rollback) lines.push(`pending=${clean(rollback.pendingFile)}`, `rollback=${clean(rollback.rollbackFile)}`);
   for (const [key, value] of Object.entries(extra)) lines.push(`${key}=${clean(value)}`);

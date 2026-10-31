@@ -72,6 +72,7 @@ namespace AivinDesktop {
     public List<string> Args = new List<string>();
     public string Pending;
     public string Rollback;
+    public string Version = "";
     Dictionary<string, string> strings = new Dictionary<string, string>();
 
     public static Config Load(string file) {
@@ -85,6 +86,7 @@ namespace AivinDesktop {
           else if (k == "arg") c.Args.Add(v);
           else if (k == "pending") c.Pending = v;
           else if (k == "rollback") c.Rollback = v;
+          else if (k == "version") c.Version = v;
           else if (k.StartsWith("s.")) c.strings[k.Substring(2)] = v.Replace("\\n", "\n");
         }
       } catch { }
@@ -134,13 +136,14 @@ namespace AivinDesktop {
     Config cfg;
     NotifyIcon tray;
     Icon colorIcon, greyIcon, shownIcon;
-    ToolStripMenuItem status, open, pause, startup, mascot, quit;
+    ToolStripMenuItem status, versionItem, updateItem, open, pause, startup, mascot, quit;
     System.Windows.Forms.Timer timer;
     Control invoker;
     EventWaitHandle openEvent, quitEvent;
     Process child;
     DateTime childStarted;
     DateTime nextStart = DateTime.MinValue;
+    bool isUpdating = false;
     // Listener sập: mở lại sau 2 s, rồi gấp đôi (tối đa 5 phút) nếu sập liên tục.
     const int FirstDelay = 2;
     int delay = FirstDelay;
@@ -159,13 +162,19 @@ namespace AivinDesktop {
       ContextMenuStrip menu = new ContextMenuStrip();
       status = new ToolStripMenuItem();
       status.Enabled = false;
+      versionItem = new ToolStripMenuItem();
+      versionItem.Enabled = false;
+      updateItem = Item("", delegate { CheckOrApplyUpdate(); });
       open = Item("", delegate { OpenAivin(); });
       open.Font = new Font(open.Font, FontStyle.Bold);
       pause = Item("", delegate { TogglePause(); });
       startup = Item(cfg.T("startup"), delegate { SetStartup(!StartupEnabled()); Refresh(); });
       mascot = Item(cfg.T("mascot"), delegate { ToggleMascot(); });
       quit = Item(cfg.T("quit"), delegate { Quit(); });
-      menu.Items.AddRange(new ToolStripItem[] { status, new ToolStripSeparator(), open, pause, startup, mascot, new ToolStripSeparator(), quit });
+      menu.Items.AddRange(new ToolStripItem[] {
+        status, versionItem, updateItem, new ToolStripSeparator(),
+        open, pause, startup, mascot, new ToolStripSeparator(), quit
+      });
       menu.Opening += delegate { Refresh(); };
 
       tray = new NotifyIcon();
@@ -351,6 +360,29 @@ namespace AivinDesktop {
 
     // --- Menu -------------------------------------------------------------------------------------------------------------------------
 
+    void CheckOrApplyUpdate() {
+      if (isUpdating) return;
+      isUpdating = true;
+      Balloon(cfg.T("updateUpdating"), ToolTipIcon.Info);
+      Refresh();
+      ThreadPool.QueueUserWorkItem(delegate {
+        try {
+          ProcessStartInfo psi = new ProcessStartInfo(cfg.Exe, "update");
+          psi.UseShellExecute = false;
+          psi.CreateNoWindow = true;
+          psi.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+          using (Process p = Process.Start(psi)) {
+            p.WaitForExit(180000);
+          }
+        } catch { }
+        isUpdating = false;
+        UI(delegate {
+          Refresh();
+          Balloon("AIVIN Bot: " + cfg.T("updateUpToDate"), ToolTipIcon.Info);
+        });
+      });
+    }
+
     void Refresh() {
       bool paired = File.Exists(CredsFile);
       bool paused = File.Exists(PausedFile);
@@ -362,6 +394,35 @@ namespace AivinDesktop {
       tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
       Icon want = paired && running && !paused ? colorIcon : greyIcon;
       if (want != shownIcon) { tray.Icon = want; shownIcon = want; }
+
+      // Phiên bản hiện tại
+      string ver = !string.IsNullOrEmpty(cfg.Version) ? cfg.Version : "1.0.13";
+      versionItem.Text = cfg.T("version").Replace("{version}", "v" + ver.TrimStart('v'));
+
+      // Đọc update-status.json
+      string siteLatest = null;
+      try {
+        string updateFile = Path.Combine(Program.Home, "update-status.json");
+        if (File.Exists(updateFile)) {
+          string txt = File.ReadAllText(updateFile);
+          Match m = Regex.Match(txt, "\"site_latest\"\\s*:\\s*\"([^\"]+)\"");
+          if (m.Success) siteLatest = m.Groups[1].Value;
+        }
+      } catch { }
+
+      if (isUpdating) {
+        updateItem.Text = cfg.T("updateUpdating");
+        updateItem.Enabled = false;
+      } else if (!string.IsNullOrEmpty(siteLatest) && !siteLatest.TrimStart('v').Equals(ver.TrimStart('v'), StringComparison.OrdinalIgnoreCase)) {
+        updateItem.Text = cfg.T("updateAvailable").Replace("{version}", siteLatest);
+        updateItem.Font = new Font(updateItem.Font, FontStyle.Bold);
+        updateItem.Enabled = true;
+      } else {
+        updateItem.Text = cfg.T("updateUpToDate") + " (" + cfg.T("updateCheckNow") + ")";
+        updateItem.Font = new Font(updateItem.Font, FontStyle.Regular);
+        updateItem.Enabled = true;
+      }
+
       // Ghi trạng thái khi đổi — để chẩn đoán (biểu tượng xám vì sao) mà không phải mở khay.
       string why = "paired=" + paired + " running=" + running + " child=" + (child != null) + " lock=" + LockHolder() + " paused=" + paused;
       if (why != lastWhy) {

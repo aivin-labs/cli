@@ -790,7 +790,13 @@ export async function startRemoteClient(options = {}) {
     socket.on(DeviceEvent.NOTIFY, guarded(DeviceEvent.NOTIFY, (payload) => mascotChat.onNotify(payload)));
     socket.on(DeviceEvent.VOICE_EVENT, guarded(DeviceEvent.VOICE_EVENT, (payload) => mascotChat.onVoiceEvent(payload)));
   }
-  socket.on(DeviceEvent.DESKTOP_CAST_START, guarded(DeviceEvent.DESKTOP_CAST_START, async (payload) => {
+  socket.on(DeviceEvent.UPDATE, guarded(DeviceEvent.UPDATE, (payload) => {
+      if (!updater) return;
+      if (payload?.min_version) updater.setMinVersion(payload.min_version);
+      if (payload?.latest_version) updater.setServerHints(payload);
+      void updater.checkNow({ urgent: true });
+    }));
+    socket.on(DeviceEvent.DESKTOP_CAST_START, guarded(DeviceEvent.DESKTOP_CAST_START, async (payload) => {
     const sessionId = payload?.session_id;
     const viewerId = payload?.viewer_id;
     const webRtcStarted = payload?.transport === 'webrtc' && sessionId && viewerId

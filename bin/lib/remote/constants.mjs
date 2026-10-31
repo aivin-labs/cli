@@ -55,6 +55,8 @@ export const DeviceEvent = Object.freeze({
   WATCHES: 'device:watches',
   /** CLI → BE (29/10/2026): sắp thoát để chuyển sang bản CLI vừa tự cập nhật — `{ reason, version, expect_back_ms }`; máy sẽ nối lại ngay. */
   RESTARTING: 'device:restarting',
+  /** BE -> CLI: Bản phát hành mới đã sẵn sàng, yêu cầu client tự kiểm tra/cập nhật ngay. */
+  UPDATE: 'device:update',
   /** CLI → BE (29/10/2026): chủ máy hỏi / giao việc qua linh vật — `{ text, request_id }`, ack `{ ok, request_id, session_id, error? }`. */
   CHAT: 'device:chat',
   /** BE → CLI: tiến trình / câu trả lời của lượt chat — `{ request_id, kind: progress | answer | timeout | error, text }`. */

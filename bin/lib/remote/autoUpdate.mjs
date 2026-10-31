@@ -115,6 +115,10 @@ export function createAutoUpdater({
 
   return {
     tick,
+    async checkNow({ urgent: isUrgent = true } = {}) {
+      urgent = isUrgent;
+      return check();
+    },
     setMinVersion,
     /** Gợi ý từ ack của `device:hello` (`hello.cli`) — xem đầu tệp. */
     setServerHints(hints) {
