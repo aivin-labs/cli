@@ -43,7 +43,7 @@ function fakeSpawn() {
 }
 
 const tick = () => new Promise((r) => setImmediate(r));
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-root-'));
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-root-')));
 const env = { roots: [root] };
 const claudeOnly = (spawnImpl) => createAgentRunner({ find: () => ({ bin: 'claude', version: '2.1.312' }), spawnImpl });
 
