@@ -801,10 +801,51 @@ function Handle($m) {
 }
 
 # @ASK_HOOK
+# Watch mascot-hide and mascot.json so toggling from system tray closes the mascot immediately.
+$script:aivinHome = if ($dir) { Split-Path (Split-Path $dir) } else { $null }
+if (-not $script:aivinHome -or -not [System.IO.Directory]::Exists($script:aivinHome)) {
+  $script:aivinHome = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.aivin'
+}
+$script:hideFile = Join-Path $script:aivinHome 'mascot-hide'
+$script:mascotJson = Join-Path $script:aivinHome 'mascot.json'
+$script:lastHideTime = [DateTime]::UtcNow
+if ([System.IO.File]::Exists($script:hideFile)) {
+  try { $script:lastHideTime = [System.IO.File]::GetLastWriteTimeUtc($script:hideFile) } catch {}
+}
+$script:lastMascotJsonTime = [DateTime]::UtcNow
+if ([System.IO.File]::Exists($script:mascotJson)) {
+  try { $script:lastMascotJsonTime = [System.IO.File]::GetLastWriteTimeUtc($script:mascotJson) } catch {}
+}
+
 # Commands arrive as JSON lines on stdin (background thread -> queue); the UI drains the queue. stdin closed = daemon gone -> close.
 [AivinMascot.Input]::Start()
 $pump = New-Object Windows.Threading.DispatcherTimer; $pump.Interval = [TimeSpan]::FromMilliseconds(80)
 $pump.Add_Tick({
+  if ($script:hideFile -and [System.IO.File]::Exists($script:hideFile)) {
+    try {
+      $ht = [System.IO.File]::GetLastWriteTimeUtc($script:hideFile)
+      if ($ht -gt $script:lastHideTime) {
+        $script:lastHideTime = $ht
+        Send @{ t = 'off' }
+        CloseAnimated
+        return
+      }
+    } catch {}
+  }
+  if ($script:mascotJson -and [System.IO.File]::Exists($script:mascotJson)) {
+    try {
+      $mj = [System.IO.File]::GetLastWriteTimeUtc($script:mascotJson)
+      if ($mj -gt $script:lastMascotJsonTime) {
+        $script:lastMascotJsonTime = $mj
+        $txt = [System.IO.File]::ReadAllText($script:mascotJson)
+        if ($txt -match '"enabled"\s*:\s*false') {
+          Send @{ t = 'off' }
+          CloseAnimated
+          return
+        }
+      }
+    } catch {}
+  }
   $line = $null
   while ([AivinMascot.Input]::Lines.TryDequeue([ref]$line)) {
     if ($line) { try { Handle ($line | ConvertFrom-Json) } catch { [Console]::Error.WriteLine($_.Exception.Message) } }
