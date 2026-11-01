@@ -116,16 +116,49 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
   ${motion('BubbleIn', 1, 1, 160, 'EaseOut')}
   ${motion('BubbleOut', 0, 0.94, 140, 'EaseIn')}
   <Style TargetType="ScrollBar">
-   <Setter Property="Width" Value="6"/>
-   <Setter Property="MinWidth" Value="6"/>
+   <Setter Property="Width" Value="5"/>
+   <Setter Property="MinWidth" Value="5"/>
    <Setter Property="Template"><Setter.Value>
     <ControlTemplate TargetType="ScrollBar">
      <Track x:Name="PART_Track" IsDirectionReversed="True">
       <Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType="Thumb">
-       <Border x:Name="ThumbBar" CornerRadius="3" Background="#D5D8DE" Margin="1,2"/>
-       <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ThumbBar" Property="Background" Value="#AEB3BC"/></Trigger></ControlTemplate.Triggers>
+       <Border x:Name="ThumbBar" CornerRadius="2.5" Background="#D5D8DE" Margin="0,1"/>
+       <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ThumbBar" Property="Background" Value="#9EA4AF"/></Trigger></ControlTemplate.Triggers>
       </ControlTemplate></Thumb.Template></Thumb></Track.Thumb>
      </Track>
+    </ControlTemplate>
+   </Setter.Value></Setter>
+  </Style>
+  <Style TargetType="ScrollViewer">
+   <Setter Property="Template"><Setter.Value>
+    <ControlTemplate TargetType="ScrollViewer">
+     <Grid>
+      <Grid.ColumnDefinitions>
+       <ColumnDefinition Width="*"/>
+       <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <ScrollContentPresenter Grid.Column="0"/>
+      <ScrollBar x:Name="PART_VerticalScrollBar" Grid.Column="1"
+                 Value="{TemplateBinding VerticalOffset}"
+                 Maximum="{TemplateBinding ScrollableHeight}"
+                 ViewportSize="{TemplateBinding ViewportHeight}"
+                 Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"
+                 Width="5" Margin="0,2,1,2" Opacity="0"/>
+     </Grid>
+     <ControlTemplate.Triggers>
+      <Trigger Property="IsMouseOver" Value="True">
+       <Trigger.EnterActions>
+        <BeginStoryboard>
+         <Storyboard><DoubleAnimation Storyboard.TargetName="PART_VerticalScrollBar" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.180"/></Storyboard>
+        </BeginStoryboard>
+       </Trigger.EnterActions>
+       <Trigger.ExitActions>
+        <BeginStoryboard>
+         <Storyboard><DoubleAnimation Storyboard.TargetName="PART_VerticalScrollBar" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.250"/></Storyboard>
+        </BeginStoryboard>
+       </Trigger.ExitActions>
+      </Trigger>
+     </ControlTemplate.Triggers>
     </ControlTemplate>
    </Setter.Value></Setter>
   </Style>
@@ -205,8 +238,8 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
    <Border.RenderTransform><ScaleTransform ScaleX="0.96" ScaleY="0.96"/></Border.RenderTransform>
    <Border.Effect><DropShadowEffect BlurRadius="12" ShadowDepth="1" Direction="270" Opacity="0.10" Color="#6B5CE7"/></Border.Effect>
    <StackPanel Margin="12,8,7,7">
-    <ScrollViewer x:Name="ChatScroll" MaxHeight="220" VerticalScrollBarVisibility="Auto" Visibility="Collapsed" Margin="0,3,4,5">
-     <StackPanel>
+    <ScrollViewer x:Name="ChatScroll" MaxHeight="220" VerticalScrollBarVisibility="Auto" Visibility="Collapsed" Margin="0,3,-4,5">
+     <StackPanel Margin="0,0,10,0">
       <StackPanel x:Name="ChatList"/>
       <!-- Nút trả lời nhanh khi Aivin hỏi lại (thẻ chọn của agent) — askHostSource.mjs dựng theo lệnh ask_choices. -->
       <StackPanel x:Name="Choices" Visibility="Collapsed" Margin="0,2,0,2"/>
