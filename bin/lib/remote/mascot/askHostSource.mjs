@@ -132,7 +132,7 @@ function CloseAsk {
   $script:askOpen = $false; $script:askFocused = $false
   AskHide 'Ask'; SetActivatable $false; $w.FindResource('AskGlow').Stop($w)
 }
-function MascotClick { if ($script:askOpen -and (E 'Ask').Visibility -eq 'Visible') { $script:askManual = $false; CloseAsk } else { OpenAsk } }
+function MascotClick { if ($script:askFocused) { $script:askManual = $false; CloseAsk } else { OpenAsk } }
 # One box at a time: while the ask box is open, what the bot does on the machine only updates the text; the bubble
 # (notification) comes back with the latest step once the box closes, if the bot is still busy.
 $script:baseShowBubble = (Get-Item function:ShowBubble).ScriptBlock
@@ -346,6 +346,7 @@ function ChoiceButtons($options, $multiple) {
     $script:choiceConfirm = $ok; [void]$panel.Children.Add($ok); SyncConfirm
   }
   $panel.Visibility = if ($panel.Children.Count) { 'Visible' } else { 'Collapsed' }
+  if ($panel.Children.Count) { (E 'ChatScroll').Visibility = 'Visible'; (E 'ChatScroll').ScrollToEnd() }
 }
 
 # Voice: a live conversation with Aivin (voiceSource.mjs streams the mic / speaker). '' = off, else connecting | listening | thinking | speaking,

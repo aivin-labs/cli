@@ -205,11 +205,13 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
    <Border.RenderTransform><ScaleTransform ScaleX="0.96" ScaleY="0.96"/></Border.RenderTransform>
    <Border.Effect><DropShadowEffect BlurRadius="12" ShadowDepth="1" Direction="270" Opacity="0.10" Color="#6B5CE7"/></Border.Effect>
    <StackPanel Margin="12,8,7,7">
-    <ScrollViewer x:Name="ChatScroll" MaxHeight="160" VerticalScrollBarVisibility="Hidden" Visibility="Collapsed" Margin="0,3,4,5">
-     <StackPanel x:Name="ChatList"/>
+    <ScrollViewer x:Name="ChatScroll" MaxHeight="220" VerticalScrollBarVisibility="Auto" Visibility="Collapsed" Margin="0,3,4,5">
+     <StackPanel>
+      <StackPanel x:Name="ChatList"/>
+      <!-- Nút trả lời nhanh khi Aivin hỏi lại (thẻ chọn của agent) — askHostSource.mjs dựng theo lệnh ask_choices. -->
+      <StackPanel x:Name="Choices" Visibility="Collapsed" Margin="0,2,0,2"/>
+     </StackPanel>
     </ScrollViewer>
-    <!-- Nút trả lời nhanh khi Aivin hỏi lại (thẻ chọn của agent) — askHostSource.mjs dựng theo lệnh ask_choices. -->
-    <StackPanel x:Name="Choices" Visibility="Collapsed" Margin="0,0,4,5"/>
     <DockPanel>
      <Button x:Name="MicBtn" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Width="26" Height="26" Margin="6,0,0,0" VerticalAlignment="Bottom"
              Background="${ASK_BTN.bg}" BorderThickness="0" Tag="#14000000">
@@ -254,7 +256,7 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
 </Window>`;
 
 export const MASCOT_PS1 = String.raw`$ErrorActionPreference = 'Stop'
-# Đảm bảo chỉ có duy nhất 1 linh vật trên màn hình: dọn dẹp tiến trình cũ và khóa đơn thể (single instance mutex)
+# Single mascot instance check
 try {
   $myPid = $PID
   Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
