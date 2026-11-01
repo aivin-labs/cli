@@ -145,6 +145,7 @@ function CloseAsk {
   if (-not $was -or (E 'Panel').Visibility -eq 'Visible') { return }
   if ($script:chatBusy -and $script:chatLast) { ChatBubble $script:chatLast }
   elseif ((IsBusy) -or $script:state -eq 'waiting') { & $script:baseShowBubble (E 'NowText').Text }
+  if ((E 'Bubble').Visibility -eq 'Visible') { $script:bubbleTimer.Stop(); $script:bubbleTimer.Start() }
 }
 # What the chat turn is doing, short, for the bubble on the bot's head while the box is closed: progress lines, the answer as it is
 # written (its tail), the answer / error. Stays up while the turn runs; once it ends the bubble times out as usual.
@@ -157,7 +158,7 @@ function ChatShort($m) {
 function ChatBubble($text) {
   if (-not $text -or (E 'Panel').Visibility -eq 'Visible') { return }
   & $script:baseShowBubble $text
-  if ($script:chatBusy) { $script:bubbleTimer.Stop() } else { $script:bubbleTimer.Stop(); $script:bubbleTimer.Start() }
+  $script:bubbleTimer.Stop(); $script:bubbleTimer.Start()
 }
 # Hover: the box peeks while the mouse is over the bot / the box and slips away shortly after it leaves, unless it is in use.
 $script:askManual = $false
