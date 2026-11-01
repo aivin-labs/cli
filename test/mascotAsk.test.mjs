@@ -294,7 +294,7 @@ test('host.ps1 có ô hỏi chèn đúng dấu, vẫn toàn ASCII; XAML có đ�
   assert.ok(script.includes('public static class Voice') && script.includes('if (!Voice.Take(line)) Lines.Enqueue(line);'));
   assert.ok(script.includes('[AivinMascot.Output]::Line(') && !script.includes('mciSendString'));
   // Bộ khử tiếng vọng (Voice Capture DSP) + phím tắt nói chuyện + mặt bot theo trạng thái nói chuyện.
-  assert.ok(script.includes('public sealed class Aec') && script.includes('RegisterHotKey($script:hwnd') && script.includes("'speaking' { 'speaking' }"));
+  assert.ok(script.includes('public sealed class Aec') && script.includes('[AivinMascot.HotKeys]::RegisterFirst($script:hwnd') && script.includes("'speaking' { 'speaking' }"));
   for (const name of ['x:Name="Ask"', 'x:Name="AskBox"', 'x:Name="MicBtn"', 'x:Name="MicIcon"', 'x:Name="SendIcon"', 'x:Name="AskGlowSpin"', 'x:Key="AskGlow"']) {
     assert.ok(MASCOT_XAML.includes(name), name);
   }
@@ -400,4 +400,37 @@ test('tần suất thông báo: min (0) chỉ báo phiên hiện tại hoặc vi
   assert.equal(chat.getNotifyFreq(), 2);
   chat.onNotify({ session_id: 's_other', kind: 'done', text: 'thông báo hệ thống toàn cục' });
   assert.ok(rows(sent).some((r) => r.text?.includes('thông báo hệ thống toàn cục')));
+});
+
+test('tần suất thông báo mid (1, mặc định): chưa có phiên hiện tại vẫn lọc; nhận phiên mở từ máy, câu theo dõi tiếp chat:, câu hỏi, việc hỏng', async () => {
+  let n = 0;
+  const { chat, sent, socket } = setup(() => ({ ok: true, session_id: `s${++n}` }));
+  chat.onNotify({ id: 'n1', session_id: 's_web', kind: 'done', text: 'việc phiên web' });
+  chat.onNotify({ id: 'n2', kind: 'done', text: 'báo không phiên' });
+  assert.ok(!rows(sent).some((r) => /việc phiên web|báo không phiên/.test(r.text)), 'trước đây lọt hết khi chưa có phiên hiện tại');
+  chat.onNotify({ id: 'chat:m1', session_id: 's_dev_old', kind: 'done', text: 'kết quả theo dõi tiếp' });
+  chat.onNotify({ id: 'n3', session_id: 's_web', kind: 'failed', text: 'việc hỏng' });
+  chat.onNotify({ id: 'n4', session_id: 's_web', kind: 'needs_you', text: 'cần duyệt', question: { reply_id: 'q9', kind: 'choice', options: [] } });
+  for (const text of ['kết quả theo dõi tiếp', 'việc hỏng', 'cần duyệt']) assert.ok(rows(sent).some((r) => r.text?.includes(text)), text);
+  await chat.ask('mở phiên s1');
+  chat.onChatEvent({ request_id: socket.emitted.at(-1).payload.request_id, kind: 'answer', text: 'ok' });
+  await chat.ask('mở phiên s2');
+  assert.equal(chat.getCurrentSessionId(), 's2');
+  chat.onNotify({ id: 'n5', session_id: 's1', kind: 'done', text: 'phiên cũ của máy' });
+  assert.ok(rows(sent).some((r) => r.text?.includes('phiên cũ của máy')), 'phiên mở từ máy vẫn là việc trên máy khi đã sang phiên khác');
+});
+
+test('link bấm được: chỉ http(s) — url lạ trong báo / câu hỏi bị bỏ, dòng vẫn hiện', async () => {
+  const { safeWebUrl } = await import('../bin/lib/remote/mascot/ask.mjs');
+  assert.equal(safeWebUrl('https://beta.aivin.vn/?session_id=1'), 'https://beta.aivin.vn/?session_id=1');
+  assert.equal(safeWebUrl('HTTP://example.com'), 'http://example.com/');
+  for (const bad of ['file:///C:/Windows/System32/calc.exe', 'C:\\Windows\\calc.exe', 'ms-settings:privacy', 'javascript:alert(1)', 'shell:startup', 'https://', '', null, 42]) {
+    assert.equal(safeWebUrl(bad), null, String(bad));
+  }
+  const { chat, sent } = setup(() => ({ ok: true }), {}, { notifyFreq: 2 });
+  chat.onNotify({ id: 'u1', kind: 'done', title: 'T', text: 'mở máy tính', url: 'file:///C:/Windows/System32/calc.exe' });
+  const row = rows(sent).find((r) => r.text?.includes('mở máy tính'));
+  assert.ok(row && !('url' in row));
+  chat.onNotify({ id: 'u2', kind: 'done', title: 'T', text: 'mở web', url: 'https://aivin.vn/x' });
+  assert.equal(rows(sent).find((r) => r.text?.includes('mở web')).url, 'https://aivin.vn/x');
 });

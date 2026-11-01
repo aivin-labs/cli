@@ -22,13 +22,13 @@ function fakeSocket(reply) {
   };
 }
 
-function setup(reply = () => ({ ok: true })) {
+function setup(reply = () => ({ ok: true }), extra = {}) {
   const sent = [];
   const alerts = [];
   const pending = [];
   const socket = fakeSocket(reply);
   const chat = createMascotChat({
-    socket: () => socket, send: (c) => sent.push(c), lang: 'vi', onAlert: (a) => alerts.push(a), onPending: (on) => pending.push(on),
+    socket: () => socket, send: (c) => sent.push(c), lang: 'vi', onAlert: (a) => alerts.push(a), onPending: (on) => pending.push(on), ...extra,
   });
   return { chat, sent, socket, alerts, pending };
 }
@@ -92,7 +92,8 @@ test('câu hỏi đã hết hạn → báo bằng chữ của máy và bỏ nút
 });
 
 test('báo chủ động: một dòng ngắn "Xong: …" / "Lỗi: …" + bong bóng; cùng id (nối lại) không báo lần hai; loại lạ bỏ qua', () => {
-  const { chat, sent, alerts } = setup();
+  // Mức báo Max (2): mọi báo đều hiện — test này kiểm cách hiện, lọc theo mức xem mascotAsk.test.mjs.
+  const { chat, sent, alerts } = setup(undefined, { notifyFreq: 2 });
   chat.onNotify({ id: 'w1', kind: 'done', title: 'Tổng hợp doanh thu', text: 'Tổng 1,2 tỷ, tăng 8%.' });
   chat.onNotify({ id: 'w1', kind: 'done', title: 'Tổng hợp doanh thu', text: 'Tổng 1,2 tỷ, tăng 8%.' });
   chat.onNotify({ id: 'w2', kind: 'failed', title: 'Đồng bộ CRM', text: 'Hết hạn đăng nhập.' });
@@ -104,7 +105,7 @@ test('báo chủ động: một dòng ngắn "Xong: …" / "Lỗi: …" + bong b
 });
 
 test('thông báo realtime kèm session_id hoặc url: kèm đường dẫn mở trình duyệt', () => {
-  const { chat, sent, alerts } = setup();
+  const { chat, sent, alerts } = setup(undefined, { notifyFreq: 2 });
   chat.onNotify({ id: 'n1', kind: 'done', title: 'Tác vụ xong', text: 'Đã xuất file', session_id: 'sess-123' });
   assert.deepEqual(alerts, [{ kind: 'done', text: 'Xong: Đã xuất file', url: 'https://beta.aivin.vn/?session_id=sess-123' }]);
   assert.ok(rows(sent).some((r) => r.role === ChatRole.ASSISTANT && r.url === 'https://beta.aivin.vn/?session_id=sess-123'));

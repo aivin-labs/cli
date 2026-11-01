@@ -576,26 +576,43 @@ namespace AivinDesktop {
       } catch { return true; }
     }
 
+    /**
+     * Bật / tắt "enabled" trong mascot.json mà giữ nguyên các khoá khác (vị trí, phím tắt, mức báo), ghi nguyên tử (tệp tạm + Replace):
+     * daemon cũng ghi tệp này — ghi dở / đọc lúc đang ghi không được làm mất cài đặt. Tệp hỏng (không phải object JSON) → không ghi đè;
+     * daemon vẫn nhận yêu cầu qua mascot-show / mascot-hide (02/11/2026).
+     */
+    static void SetMascotEnabled(bool on) {
+      string want = on ? "true" : "false";
+      string t;
+      if (File.Exists(MascotFile)) {
+        string s = File.ReadAllText(MascotFile);
+        if (!s.TrimStart().StartsWith("{")) return;
+        t = Regex.Replace(s, "\"enabled\"\\s*:\\s*(true|false)", "\"enabled\": " + want);
+        if (t == s && !Regex.IsMatch(s, "\"enabled\"\\s*:")) t = new Regex("\\{").Replace(s, "{\r\n  \"enabled\": " + want + (s.Trim() == "{}" ? "" : ","), 1);
+        if (t == s) return;
+      } else {
+        t = "{\r\n  \"enabled\": " + want + "\r\n}\r\n";
+      }
+      string tmp = MascotFile + ".tray.tmp";
+      File.WriteAllText(tmp, t);
+      try {
+        if (File.Exists(MascotFile)) File.Replace(tmp, MascotFile, null);
+        else File.Move(tmp, MascotFile);
+      } catch {
+        File.Copy(tmp, MascotFile, true);
+        try { File.Delete(tmp); } catch { }
+      }
+    }
+
     void ToggleMascot() {
       bool enabled = IsMascotEnabled();
       try {
         if (enabled) {
-          if (File.Exists(MascotFile)) {
-            string s = File.ReadAllText(MascotFile);
-            string t = Regex.Replace(s, "\"enabled\"\\s*:\\s*true", "\"enabled\": false");
-            if (t == s && !s.Contains("\"enabled\"")) t = Regex.Replace(s, "\\{", "{\r\n  \"enabled\": false,");
-            File.WriteAllText(MascotFile, t);
-          } else {
-            File.WriteAllText(MascotFile, "{\r\n  \"enabled\": false\r\n}\r\n");
-          }
+          try { SetMascotEnabled(false); } catch { }
           long ms = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
           File.WriteAllText(HideFile, ms.ToString(CultureInfo.InvariantCulture));
         } else {
-          if (File.Exists(MascotFile)) {
-            string s = File.ReadAllText(MascotFile);
-            string t = Regex.Replace(s, "\"enabled\"\\s*:\\s*false", "\"enabled\": true");
-            File.WriteAllText(MascotFile, t);
-          }
+          try { SetMascotEnabled(true); } catch { }
           long ms = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
           File.WriteAllText(ShowFile, ms.ToString(CultureInfo.InvariantCulture));
         }
@@ -608,13 +625,7 @@ namespace AivinDesktop {
       if (quitting) return;
       if (!File.Exists(CredsFile)) { ShowPair(); return; }
       try {
-        if (File.Exists(MascotFile)) {
-          string s = File.ReadAllText(MascotFile);
-          string t = Regex.Replace(s, "\"enabled\"\\s*:\\s*false", "\"enabled\": true");
-          if (t != s) File.WriteAllText(MascotFile, t);
-        } else {
-          File.WriteAllText(MascotFile, "{\r\n  \"enabled\": true\r\n}\r\n");
-        }
+        try { SetMascotEnabled(true); } catch { }
         long ms = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
         File.WriteAllText(ShowFile, ms.ToString(CultureInfo.InvariantCulture));
       } catch { }

@@ -3,12 +3,17 @@ import { spawnSync } from 'child_process';
 /**
  * Phím tắt gọi linh vật (29/10/2026): một tổ hợp toàn hệ thống (`RegisterHotKey`, không móc bàn phím) — bấm → mở ô hỏi + nghe luôn. Mặc định
  * thử lần lượt `DEFAULT_HOTKEYS`, lấy tổ hợp đầu tiên đăng ký được (mỗi máy cài app khác nhau: máy dev 29/10 có Ctrl+Alt+Space,
- * Ctrl+Win+Space, Win+Shift+Space đều đã bị giữ — lỗi 1409). Chủ máy đặt riêng: `aivin remote mascot hotkey <tổ hợp> | off` (mascot.json).
+ * Ctrl+Win+Space, Win+Shift+Space đều đã bị giữ — lỗi 1409). Chủ máy đặt riêng: `aivin remote mascot hotkey <tổ hợp> | off` (mascot.json);
+ * daemon chuyển danh sách vào config.json của cửa sổ (`hostHotkeys`) — có hiệu lực từ lần cửa sổ mở kế tiếp.
  */
 
 export const HOTKEY_MODS = Object.freeze({ alt: 0x1, ctrl: 0x2, shift: 0x4, win: 0x8 });
 export const MOD_NOREPEAT = 0x4000;
-export const DEFAULT_HOTKEYS = Object.freeze(['Win+Alt+Space', 'Ctrl+Shift+Alt+Space', 'Ctrl+Shift+Alt+A']);
+// Không dùng Ctrl+Alt+<chữ> (kể cả thêm Shift): trên bàn phím quốc tế Ctrl+Alt = AltGr, đăng ký toàn hệ thống là nuốt mất ký tự gõ
+// (@, €, ć, ą…) của mọi ứng dụng (02/11/2026).
+export const DEFAULT_HOTKEYS = Object.freeze(['Win+Alt+Space', 'Ctrl+Shift+Alt+Space', 'Win+Alt+A']);
+/** Phím tắt mở ô hỏi để gõ (không nghe): chỉ mặc định, theo cùng công tắc `hotkey off`. */
+export const DEFAULT_CHAT_HOTKEYS = Object.freeze(['Win+Alt+C']);
 
 const MOD_ALIASES = { alt: 'alt', option: 'alt', ctrl: 'ctrl', control: 'ctrl', shift: 'shift', win: 'win', windows: 'win', super: 'win', meta: 'win', cmd: 'win' };
 const NAMED_KEYS = { space: 0x20, enter: 0x0d, tab: 0x09, esc: 0x1b, escape: 0x1b, backspace: 0x08, insert: 0x2d, delete: 0x2e, home: 0x24, end: 0x23, pageup: 0x21, pagedown: 0x22, '`': 0xc0, '/': 0xbf, '.': 0xbe, ',': 0xbc, ';': 0xba };
@@ -50,6 +55,20 @@ export function hotkeyCandidates(setting) {
   const list = setting ? [setting, ...DEFAULT_HOTKEYS] : [...DEFAULT_HOTKEYS];
   const seen = new Set();
   return list.map((h) => { try { return parseHotkey(h); } catch { return null; } }).filter((h) => h && !seen.has(h.label) && seen.add(h.label));
+}
+
+/**
+ * Danh sách cửa sổ linh vật đăng ký (config.json `hotkeys`, mascot/index.mjs ghi mỗi lần mở): mỗi mục `{ n: nhãn, m: mods | MOD_NOREPEAT,
+ * v: vk }`, cửa sổ lấy tổ hợp đầu tiên còn trống của mỗi danh sách. `voice` = tổ hợp chủ máy đặt rồi mặc định; `chat` = mặc định, trừ
+ * tổ hợp đã nằm trong `voice`. `off` → cả hai rỗng (không đăng ký phím nào).
+ */
+export function hostHotkeys(setting) {
+  const toHost = (h) => ({ n: h.label, m: h.mods | MOD_NOREPEAT, v: h.vk });
+  const voice = hotkeyCandidates(setting);
+  if (!voice.length) return { voice: [], chat: [] };
+  const taken = new Set(voice.map((h) => h.label));
+  const chat = DEFAULT_CHAT_HOTKEYS.map((h) => parseHotkey(h)).filter((h) => !taken.has(h.label));
+  return { voice: voice.map(toHost), chat: chat.map(toHost) };
 }
 
 /**

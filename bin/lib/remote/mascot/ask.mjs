@@ -97,10 +97,25 @@ export function webUrlForSession(sessionId, serverUrl = '') {
       const u = new URL(serverUrl);
       let host = u.hostname.replace(/(^|-)api\./, '$1').replace(/^api\./, '');
       if (host.startsWith('-')) host = host.slice(1);
-      base = `${u.protocol}//${host}${u.port ? `:${u.port}` : ''}`;
+      const proto = u.protocol === 'wss:' ? 'https:' : u.protocol === 'ws:' ? 'http:' : u.protocol;
+      base = `${proto}//${host}${u.port ? `:${u.port}` : ''}`;
     } catch {}
   }
   return `${base}/?session_id=${encodeURIComponent(sessionId)}`;
+}
+
+/**
+ * Link cửa sổ linh vật được phép mở khi bấm (02/11/2026): chỉ `http(s)://` — url trong báo chủ động / câu hỏi đến từ BE, cửa sổ mở bằng
+ * `Process.Start` (file:, ms-settings:, .exe… sẽ chạy thẳng trên máy). Không hợp lệ → null (dòng vẫn hiện, chỉ không bấm được).
+ */
+export function safeWebUrl(url) {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url.trim())) return null;
+  try {
+    const u = new URL(url.trim());
+    return (u.protocol === 'http:' || u.protocol === 'https:') && u.hostname ? u.href : null;
+  } catch {
+    return null;
+  }
 }
 const SEEN_NOTIFY_MAX = 50;
 /** Tệp thả vào bot chờ đi kèm một câu, tối đa (cửa sổ cũng đọc qua config.json: thùng đầy thì từ chối ngay lúc kéo tới). */
@@ -129,6 +144,13 @@ export function createMascotChat({
   let current = null;
   let currentNotifyFreq = Number.isInteger(notifyFreq) ? notifyFreq : 1;
   let currentSessionId = null;
+  /** Phiên chat mở từ máy này (ô hỏi / nói chuyện) trong lần chạy daemon này — mức báo Mid nhận báo của các phiên đó ("việc trên máy"). */
+  const deviceSessions = new Set();
+  const noteDeviceSession = (id) => {
+    if (typeof id !== 'string' || !id) return;
+    deviceSessions.add(id);
+    if (deviceSessions.size > SEEN_NOTIFY_MAX) deviceSessions.delete(deviceSessions.values().next().value);
+  };
   /** Năng lực BE (ack của HELLO, `setServerFeatures`): hộp báo + kiểm câu hỏi, dừng lượt, chat mới. */
   const features = { inbox: false, cancel: false, newChat: false };
   /** Câu hỏi đang chờ theo thứ tự đến: `{ session_id, reply_id, kind, options, text }`; đầu hàng = câu đang có nút. */
@@ -253,7 +275,11 @@ export function createMascotChat({
     return option ? fillField(q, String(option.id), String(option.text)) : undefined;
   }
 
-  const row = (role, text, id = `${role}-${randomUUID()}`, extra = {}) => send({ t: AskCommand.CHAT, role, id, text, ...extra });
+  const row = (role, text, id = `${role}-${randomUUID()}`, extra = {}) => {
+    const { url, ...rest } = extra;
+    const safe = url === undefined ? null : safeWebUrl(url);
+    return send({ t: AskCommand.CHAT, role, id, text, ...rest, ...(safe ? { url: safe } : {}) });
+  };
   /** `cancel`: BE dừng được lượt này → cửa sổ đổi nút mic thành nút dừng. */
   const setBusy = (busy) => send({ t: AskCommand.BUSY, busy, ...(busy && features.cancel ? { cancel: true } : {}) });
   const errorText = (code) => t(ERROR_TEXT[code] || MascotText.ASK_ERR_FAILED);
@@ -312,12 +338,12 @@ export function createMascotChat({
     streaming = null;
     setBusy(true);
     row(ChatRole.PROGRESS, t(MascotText.ASK_THINKING), PROGRESS_ROW, { typing: true });
-    if (extra?.session_id) currentSessionId = extra.session_id;
+    if (extra?.session_id) { currentSessionId = extra.session_id; noteDeviceSession(extra.session_id); }
     let ack;
     try {
       // `stream`: xin chữ chạy của câu trả lời (`delta`) — BE cũ bỏ qua trường này.
       ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT, { text, request_id: current, stream: true, ...context(), ...extra });
-      if (ack?.session_id) currentSessionId = ack.session_id;
+      if (ack?.session_id) { currentSessionId = ack.session_id; noteDeviceSession(ack.session_id); }
     } catch (e) {
       finish();
       return row(ChatRole.ERROR, failedSend(e));
@@ -391,6 +417,7 @@ export function createMascotChat({
     if (payload.session_id) currentSessionId = payload.session_id;
     if (stale && payload.request_id === stale && stale !== current) return lateEvent(payload);
     if (payload.request_id !== current) return;
+    noteDeviceSession(payload.session_id);
     received(payload.notice_id);
     armSilence();
     const text = typeof payload.text === 'string' ? payload.text : '';
@@ -563,17 +590,21 @@ export function createMascotChat({
     // 0 = Min: chỉ session hiện tại của linh vật HOẶC câu hỏi HIL cần xử lý.
     // 1 = Mid: session hiện tại, việc trên máy, HOẶC câu hỏi HIL cần xử lý.
     // 2 = Max: mọi thông báo trên hệ thống.
+    // "Việc trên máy" = phiên chat mở từ máy này (deviceSessions) hoặc câu trả lời theo dõi tiếp của lượt chat từ máy (id `chat:<tin>`,
+    // DeviceChatService.noticeOf) — chưa có phiên hiện tại thì báo khác (job, phiên web…) vẫn bị lọc, không lọt hết như trước 02/11/2026.
     if (currentNotifyFreq === 0) {
       if (!isCurrentSession && !isHil) return;
     } else if (currentNotifyFreq === 1) {
-      if (!isCurrentSession && !isHil && payload.session_id && currentSessionId) return;
+      // Việc hỏng cũng là "cần xử lý" ở mức này (Min chỉ giữ câu hỏi chờ trả lời).
+      const onDevice = deviceSessions.has(payload.session_id) || (typeof payload.id === 'string' && payload.id.startsWith('chat:'));
+      if (!isCurrentSession && !isHil && !onDevice && payload.kind !== NotifyKind.FAILED) return;
     }
 
     const label = t(NOTIFY_LABEL[payload.kind]);
     const title = typeof payload.title === 'string' ? payload.title.trim() : '';
     const text = typeof payload.text === 'string' ? payload.text.trim() : '';
     const line = [`${label}${title ? `: ${title}` : ''}`, text].filter(Boolean).join('\n');
-    const url = payload.url || (payload.session_id ? webUrlForSession(payload.session_id, serverUrl) : null);
+    const url = safeWebUrl(payload.url) || (payload.session_id ? safeWebUrl(webUrlForSession(payload.session_id, serverUrl)) : null);
     if (payload.kind === NotifyKind.NEEDS_YOU && payload.question) setPending(payload.session_id, payload.question, line, url);
     else row(payload.kind === NotifyKind.FAILED ? ChatRole.ERROR : ChatRole.ASSISTANT, line, undefined, url ? { url } : {});
     onAlert({ kind: payload.kind, text: `${label}: ${text || title}`, ...(url ? { url } : {}) });

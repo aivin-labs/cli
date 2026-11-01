@@ -73,6 +73,8 @@ namespace AivinGui {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attr, out int value, int size);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
   }
 
   public class Host {
@@ -103,7 +105,14 @@ namespace AivinGui {
      * 28/10/2026: người dùng đang gõ ở cửa sổ khác, mọi set_value bị dừng oan 12 lượt).
      */
     static bool pendingInputCheck = false;
+    /** Thao tác đang chạy có kiểm người dùng không (giữ suốt thao tác — pendingInputCheck chỉ cho lần kiểm đầu). */
+    static bool userInputCheck = false;
     static long inputGraceMs = 1500;
+    /** Giữa các lô gõ: input mới hơn lô AI vừa phát quá ngưỡng này (ms) = của người dùng (lô của AI xử lý xong trong vài ms). */
+    const int BATCH_USER_INPUT_MARGIN_MS = 60;
+    const int TYPE_BATCH_PAUSE_MS = 80;
+    /** Điểm màn hình thật của lần bấm / cuộn / kéo chuột vừa rồi (tính SAU khi đưa cửa sổ lên) — cho screen_point. */
+    static Dictionary<string, object> lastMousePoint = null;
 
     static void GuardInput() {
       if (!pendingInputCheck) return;
@@ -112,10 +121,24 @@ namespace AivinGui {
       if (idle < inputGraceMs) throw new GuiError("GUI_USER_ACTIVE", "The user is using the mouse/keyboard right now (" + idle + " ms ago) — this action needs the real mouse/keyboard");
     }
 
+    /**
+     * Gõ dài nhiều lô (02/11/2026): người dùng chen vào giữa chừng → dừng. Kiểm con trỏ dời chỗ (gõ phím không di chuột) và input mới hơn lô
+     * cuối của AI quá BATCH_USER_INPUT_MARGIN_MS (UserIdleMs coi mọi input trong 150 ms sau lô AI là của AI → không thấy người gõ chen).
+     */
+    static bool UserTouchedSince(Native.POINT cursorAtStart) {
+      Native.POINT now;
+      if (Native.GetCursorPos(out now) && (now.X != cursorAtStart.X || now.Y != cursorAtStart.Y)) return true;
+      var info = new Native.LASTINPUTINFO(); info.cbSize = (uint)Marshal.SizeOf(info);
+      if (!Native.GetLastInputInfo(ref info) || lastInjectedTick == 0) return false;
+      return (int)(info.dwTime - lastInjectedTick) > BATCH_USER_INPUT_MARGIN_MS;
+    }
+
     static void MoveCursor(int x, int y) { GuardInput(); Native.SetCursorPos(x, y); }
 
     public static void Run() {
       try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
+      // Host trước bị giết giữa lúc mở tệp → Excel / Word ẩn nó tạo còn sống, giữ khoá tệp: dọn (chỉ bản chắc chắn do host tạo).
+      try { Office.CleanupOrphans(); } catch { }
       var t = new Thread(Loop);
       t.SetApartmentState(ApartmentState.MTA);
       t.Start();
@@ -306,8 +329,14 @@ namespace AivinGui {
       } catch { return IntPtr.Zero; }
     }
 
-    /** Cửa sổ theo handle, hoặc tìm theo tiêu đề / tên tiến trình (chứa, không phân biệt hoa thường); không có → cửa sổ đang focus. */
-    static IntPtr ResolveWindow(Dictionary<string, object> a) {
+    static IntPtr ResolveWindow(Dictionary<string, object> a) { return ResolveWindow(a, false); }
+
+    /**
+     * Cửa sổ theo handle, hoặc tìm theo tiêu đề / tên tiến trình (chứa, không phân biệt hoa thường); không có → cửa sổ đang focus (chỉ cho
+     * thao tác đọc). forInput (act không node_id, 02/11/2026): không nêu cửa sổ thì KHÔNG lấy cửa sổ đang focus — người dùng có thể vừa
+     * chuyển sang cửa sổ khác, phím / chuột rơi nhầm chỗ. Ngoại lệ: hỏi từ linh vật → cửa sổ chủ máy dùng ngay trước đó ("fallback").
+     */
+    static IntPtr ResolveWindow(Dictionary<string, object> a, bool forInput) {
       string w = Str(a, "window");
       IntPtr h = ParseWindow(w);
       if (h != IntPtr.Zero) {
@@ -330,9 +359,12 @@ namespace AivinGui {
         uint fgPid; Native.GetWindowThreadProcessId(fg, out fgPid);
         if (fgPid == avoid) {
           IntPtr back = ParseWindow(Str(a, "fallback"));
-          return back != IntPtr.Zero && Native.IsWindow(back) ? back : IntPtr.Zero;
+          if (back != IntPtr.Zero && Native.IsWindow(back)) return back;
+          if (forInput) throw new GuiError("INVALID_ARGS", "Name the window for this action (window: handle 0x… or a title/process)");
+          return IntPtr.Zero;
         }
       }
+      if (forInput) throw new GuiError("INVALID_ARGS", "Name the window for this action (window: handle 0x… or a title/process) — input is never sent to whatever window happens to be focused");
       return fg;
     }
 
@@ -354,15 +386,94 @@ namespace AivinGui {
       return Native.GetForegroundWindow() == prev;
     }
 
-    static void ForceForeground(IntPtr h) {
-      if (Native.IsIconic(h)) Native.ShowWindow(h, 9);
-      if (Native.GetForegroundWindow() == h) return;
+    const uint GA_ROOT = 2, GA_ROOTOWNER = 3;
+    const int GWL_STYLE = -16;
+    const int WS_POPUP = unchecked((int)0x80000000), WS_CAPTION = 0x00C00000;
+
+    static IntPtr RootOf(IntPtr h) {
+      if (h == IntPtr.Zero) return IntPtr.Zero;
+      IntPtr r = Native.GetAncestor(h, GA_ROOT);
+      return r == IntPtr.Zero ? h : r;
+    }
+
+    static IntPtr RootOwnerOf(IntPtr h) {
+      if (h == IntPtr.Zero) return IntPtr.Zero;
+      IntPtr r = Native.GetAncestor(h, GA_ROOTOWNER);
+      return r == IntPtr.Zero ? RootOf(h) : r;
+    }
+
+    /** w thuộc cửa sổ đích: cùng cửa sổ gốc, hoặc hộp thoại / popup cùng cây sở hữu (hộp thoại modal của đích lên trên cùng là đúng). */
+    static bool BelongsTo(IntPtr w, IntPtr target) {
+      if (w == IntPtr.Zero || target == IntPtr.Zero) return false;
+      IntPtr tr = RootOf(target), wr = RootOf(w);
+      if (wr == tr) return true;
+      IntPtr two = RootOwnerOf(target), wo = RootOwnerOf(w);
+      return wo == tr || wo == two || wr == two;
+    }
+
+    /** Điểm màn hình (x, y) hiện đang thuộc cửa sổ đích — không bị cửa sổ khác che. Menu Win32 / popup không khung cùng tiến trình cũng tính. */
+    static bool PointOnWindow(int x, int y, IntPtr target) {
+      var p = new Native.POINT { X = x, Y = y };
+      IntPtr hit = Native.WindowFromPoint(p);
+      if (BelongsTo(hit, target)) return true;
+      IntPtr root = RootOf(hit);
+      if (root == IntPtr.Zero) return false;
+      uint hp, tp;
+      Native.GetWindowThreadProcessId(root, out hp);
+      Native.GetWindowThreadProcessId(target, out tp);
+      if (hp != tp) return false;
+      int style = Native.GetWindowLong(root, GWL_STYLE);
+      return ClassOf(root) == "#32768" || ((style & WS_POPUP) != 0 && (style & WS_CAPTION) != WS_CAPTION);
+    }
+
+    /** Bấm chuột thật: điểm bị cửa sổ khác che → không bấm (bấm sẽ rơi vào cửa sổ đang che, có thể là việc riêng của người dùng). */
+    static void AssertPointOnWindow(int x, int y, IntPtr target) {
+      if (PointOnWindow(x, y, target)) return;
+      IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
+      uint pid = 0;
+      if (hit != IntPtr.Zero) Native.GetWindowThreadProcessId(hit, out pid);
+      string who = pid == 0 ? "nothing" : ProcessName(pid);
+      throw new GuiError("GUI_FOCUS_LOST", "Another window (" + who + ") is on top of the target point — nothing was clicked. Observe again, or use an accessibility action (click by node_id / set_value)");
+    }
+
+    /**
+     * Đưa cửa sổ lên trên cùng (khôi phục nếu thu nhỏ). Trả true khi cửa sổ trên cùng đúng là đích (hoặc hộp thoại của nó) — Windows có thể từ
+     * chối SetForegroundWindow (tiến trình khác vừa có input, khoá đổi cửa sổ) mà không báo lỗi (02/11/2026: trước đây vẫn gõ / bấm tiếp).
+     */
+    static bool ForceForeground(IntPtr h) {
+      if (h == IntPtr.Zero) return false;
+      if (Native.IsIconic(h)) { Native.ShowWindow(h, 9); Thread.Sleep(120); }
+      if (Native.GetForegroundWindow() == h) return true;
       GuardInput();
       // Windows chỉ cho đổi cửa sổ trước khi tiến trình vừa có input → nhấn nhả Alt (không tạo ký tự) rồi đặt.
       KeyTap(0x12);
       Native.SetForegroundWindow(h);
       Native.BringWindowToTop(h);
       Thread.Sleep(80);
+      if (BelongsTo(Native.GetForegroundWindow(), h)) return true;
+      // Lần 2: gắn tạm luồng input với cửa sổ đang ở trên cùng rồi đặt lại.
+      IntPtr cur = Native.GetForegroundWindow();
+      uint pid;
+      uint curThread = cur == IntPtr.Zero ? 0 : Native.GetWindowThreadProcessId(cur, out pid);
+      uint me = Native.GetCurrentThreadId();
+      bool attached = curThread != 0 && curThread != me && Native.AttachThreadInput(me, curThread, true);
+      try { Native.SetForegroundWindow(h); Native.BringWindowToTop(h); } finally { if (attached) Native.AttachThreadInput(me, curThread, false); }
+      Thread.Sleep(80);
+      return BelongsTo(Native.GetForegroundWindow(), h);
+    }
+
+    /** Chuột / phím thật cần cửa sổ đích ở trên cùng; không đưa lên được → dừng, KHÔNG phát input vào cửa sổ đang ở trên. */
+    static void RequireForeground(IntPtr h) {
+      if (h == IntPtr.Zero) throw new GuiError("INVALID_ARGS", "Name the window for real mouse/keyboard input (window: handle 0x… or a title/process)");
+      if (!ForceForeground(h)) {
+        throw new GuiError("GUI_FOCUS_LOST", "Could not bring the target window to the front (Windows refused, or another window took focus) — nothing was clicked or typed. Prefer an accessibility action (set_value / click by node_id), or ask the user to switch to that window");
+      }
+    }
+
+    /** Giữa lúc gõ / bấm phím: cửa sổ trên cùng vẫn là đích, không thì dừng (phím sẽ rơi vào cửa sổ khác). */
+    static void AssertStillForeground(IntPtr h, string done) {
+      if (h == IntPtr.Zero || BelongsTo(Native.GetForegroundWindow(), h)) return;
+      throw new GuiError("GUI_FOCUS_LOST", "Another window took focus — stopped" + (string.IsNullOrEmpty(done) ? "" : " after " + done));
     }
 
     static object FocusWindowOp(Dictionary<string, object> a) {
@@ -533,12 +644,19 @@ namespace AivinGui {
       bool wantOcr = Bool(a, "ocr", quality == "poor");
       if (wantImage || wantOcr) {
         var sw2 = Stopwatch.StartNew();
-        using (var bmp = GrabWindow(h)) {
-          if (wantImage) {
-            res["image"] = EncodeImage(bmp, Int(a, "image_max_width", 1366), Int(a, "image_quality", 70));
-            res["image_ms"] = sw2.ElapsedMilliseconds;
+        string imageError;
+        var bmp = GrabWindow(h, out imageError);
+        if (bmp == null) {
+          res["image_error"] = imageError;
+          if (wantOcr) res["ocr"] = new Dictionary<string, object> { { "error", "no usable screenshot: " + imageError } };
+        } else {
+          using (bmp) {
+            if (wantImage) {
+              res["image"] = EncodeImage(bmp, Int(a, "image_max_width", 1366), Int(a, "image_quality", 70));
+              res["image_ms"] = sw2.ElapsedMilliseconds;
+            }
+            if (wantOcr) AddOcrNodes(res, nodes, snap, bmp, Str(a, "ocr_lang"), Int(a, "ocr_max_nodes", 200));
           }
-          if (wantOcr) AddOcrNodes(res, nodes, snap, bmp, Str(a, "ocr_lang"), Int(a, "ocr_max_nodes", 200));
         }
       }
       return res;
@@ -546,18 +664,42 @@ namespace AivinGui {
 
     static uint SafeDpi(IntPtr h) { try { return Native.GetDpiForWindow(h); } catch { return 96; } }
 
-    static Bitmap GrabWindow(IntPtr h) {
+    /**
+     * Ảnh cửa sổ bằng PrintWindow (chụp đúng cửa sổ kể cả khi bị che). PrintWindow hỏng / ảnh đen (vài ứng dụng GPU) → chụp vùng màn hình,
+     * NHƯNG chỉ khi cửa sổ đích đang trên cùng và không bị che (02/11/2026): chụp vùng màn hình lấy cả cửa sổ khác đang đè lên (lộ việc riêng
+     * của người dùng, VLM chọn toạ độ trên cửa sổ khác). Không an toàn → null + lý do (image_error), không trả ảnh sai.
+     */
+    static Bitmap GrabWindow(IntPtr h, out string error) {
+      error = null;
       Native.RECT r; Native.GetWindowRect(h, out r);
       int w = Math.Max(1, r.Right - r.Left), ht = Math.Max(1, r.Bottom - r.Top);
       var bmp = new Bitmap(w, ht, PixelFormat.Format32bppArgb);
       bool ok = false;
-      using (var g = Graphics.FromImage(bmp)) {
-        IntPtr hdc = g.GetHdc();
-        try { ok = Native.PrintWindow(h, hdc, 2); } finally { g.ReleaseHdc(hdc); }
-        // PrintWindow trả ảnh đen với vài ứng dụng GPU → chụp vùng màn hình (cửa sổ phải đang hiện trên cùng).
-        if (!ok || IsMostlyBlack(bmp)) g.CopyFromScreen(r.Left, r.Top, 0, 0, new Size(w, ht));
-      }
+      try {
+        using (var g = Graphics.FromImage(bmp)) {
+          IntPtr hdc = g.GetHdc();
+          try { ok = Native.PrintWindow(h, hdc, 2); } finally { g.ReleaseHdc(hdc); }
+          if (!ok || IsMostlyBlack(bmp)) {
+            error = ScreenCopyBlocker(h, r);
+            if (error == null) g.CopyFromScreen(r.Left, r.Top, 0, 0, new Size(w, ht));
+          }
+        }
+      } catch { bmp.Dispose(); throw; }
+      if (error != null) { bmp.Dispose(); return null; }
       return bmp;
+    }
+
+    /** null = chụp vùng màn hình của cửa sổ an toàn (đích trên cùng, tâm + lưới 3×3 điểm đều thuộc đích); không thì lý do. */
+    static string ScreenCopyBlocker(IntPtr h, Native.RECT r) {
+      if (Native.IsIconic(h)) return "the window is minimized and cannot be captured";
+      if (!BelongsTo(Native.GetForegroundWindow(), h)) return "this app cannot be captured in the background and the window is not in front — bring it to the front (gui.focus) to get a screenshot";
+      int inset = 8;
+      int[] xs = { r.Left + inset, (r.Left + r.Right) / 2, r.Right - inset };
+      int[] ys = { r.Top + inset, (r.Top + r.Bottom) / 2, r.Bottom - inset };
+      foreach (int x in xs) foreach (int y in ys) {
+        if (!PointOnWindow(x, y, h)) return "another window covers part of this window, so a screen capture would show it — bring the window to the front (gui.focus) to get a screenshot";
+      }
+      return null;
     }
 
     static Dictionary<string, object> EncodeImage(Bitmap bmp, int maxWidth, int quality) {
@@ -690,12 +832,16 @@ namespace AivinGui {
       string method = Str(a, "method") ?? "auto";
       inputGraceMs = Int(a, "user_input_grace_ms", 1500);
       pendingInputCheck = Bool(a, "check_user_input", true);
+      userInputCheck = pendingInputCheck;
+      lastMousePoint = null;
       if (!InteractiveDesktop()) throw new GuiError("GUI_LOCKED", "The screen is locked or a secure prompt is showing");
       AutomationElement el = null;
       IntPtr window = IntPtr.Zero;
       ocrPoint = null;
+      ocrNodeId = null;
       if (!string.IsNullOrEmpty(nodeId) && nodeId.Contains(".t")) {
         ocrPoint = OcrPointOf(nodeId, out window);
+        ocrNodeId = nodeId;
         if (action != "click" && action != "double_click" && action != "right_click" && action != "set_value" && action != "type") {
           throw new GuiError("INVALID_ARGS", "Text read from the screenshot (OCR) supports click / double_click / right_click / set_value / type only");
         }
@@ -707,6 +853,7 @@ namespace AivinGui {
           if (nearby != null) {
             el = nearby;
             ocrPoint = null;
+            ocrNodeId = null;
           } else {
             MouseAt(null, window, a, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1);
             method = "mouse";
@@ -714,7 +861,7 @@ namespace AivinGui {
         }
       }
       else if (!string.IsNullOrEmpty(nodeId)) el = NodeOf(nodeId, out window);
-      else window = ResolveWindow(a);
+      else window = ResolveWindow(a, true);
       string beforeTitle = window == IntPtr.Zero ? "" : WindowText(window);
       if (el != null) {
         bool isPassword = false;
@@ -740,6 +887,7 @@ namespace AivinGui {
       int defaultSettle = used == "mouse" || used == "keyboard" ? 250 : 30;
       Thread.Sleep(Math.Max(0, Math.Min(Int(a, "settle_ms", defaultSettle), 3000)));
       var res = new Dictionary<string, object> { { "action", action }, { "method", used } };
+      if (lastMousePoint != null) screenPoint = lastMousePoint;
       if (screenPoint != null) res["screen_point"] = screenPoint;
       if (restored) res["focus_returned_to_user"] = true;
       if (el != null) res["target"] = Live(el);
@@ -795,16 +943,16 @@ namespace AivinGui {
             if (TryBackgroundSetText(el, text)) return "background";
           }
           FocusTarget(el, window);
-          KeyCombo("ctrl+a");
-          TypeText(text);
+          KeyCombo("ctrl+a", window);
+          TypeText(text, window);
           return "keyboard";
         }
         case "type": {
           string text = Str(a, "text") ?? "";
           if (allowPattern && TryBackgroundType(el, text)) return "background";
-          FocusTarget(el, window); TypeText(text); return "keyboard";
+          FocusTarget(el, window); TypeText(text, window); return "keyboard";
         }
-        case "key": FocusTarget(el, window); KeyCombo(Str(a, "keys") ?? ""); return "keyboard";
+        case "key": FocusTarget(el, window); KeyCombo(Str(a, "keys") ?? "", window); return "keyboard";
         case "scroll": {
           string dir = (Str(a, "direction") ?? "down").ToLowerInvariant();
           int amount = Math.Max(1, Math.Min(Int(a, "amount", 3), 30));
@@ -820,9 +968,11 @@ namespace AivinGui {
               return "scroll";
             }
           }
+          RequireForeground(window);
           var p = PointFor(el, window, a);
-          ForceForeground(window);
+          AssertPointOnWindow((int)p.X, (int)p.Y, window);
           MoveCursor((int)p.X, (int)p.Y);
+          lastMousePoint = new Dictionary<string, object> { { "x", (int)p.X }, { "y", (int)p.Y } };
           int delta = (dir == "up" ? 120 : -120) * amount;
           var inp = MouseInput(MOUSEEVENTF_WHEEL, 0, 0, delta);
           Send(new[] { inp });
@@ -871,11 +1021,14 @@ namespace AivinGui {
           return "expand";
         }
         case "drag": {
-          var start = PointFor(el, window, a);
           var toD = Get(a, "to") as Dictionary<string, object>;
           if (toD == null) throw new GuiError("INVALID_ARGS", "drag needs to {x,y}");
+          RequireForeground(window);
+          var start = PointFor(el, window, a);
           var to = WindowPoint(window, a, toD);
-          ForceForeground(window);
+          AssertPointOnWindow((int)start.X, (int)start.Y, window);
+          AssertPointOnWindow((int)to.X, (int)to.Y, window);
+          lastMousePoint = new Dictionary<string, object> { { "x", (int)start.X }, { "y", (int)start.Y } };
           MoveCursor((int)start.X, (int)start.Y);
           Send(new[] { MouseInput(MOUSEEVENTF_LEFTDOWN, 0, 0, 0) });
           for (int i = 1; i <= 10; i++) {
@@ -944,9 +1097,11 @@ namespace AivinGui {
       return true;
     }
 
+    /** Phím thật: cửa sổ đích phải lên được trên cùng (không thì GUI_FOCUS_LOST, không gõ), rồi focus phần tử. */
     static void FocusTarget(AutomationElement el, IntPtr window) {
-      if (window != IntPtr.Zero) ForceForeground(window);
+      RequireForeground(window);
       if (el != null) { try { el.SetFocus(); } catch { } Thread.Sleep(50); }
+      AssertStillForeground(window, null);
     }
 
     /** Toạ độ theo ảnh của lần observe ({x,y} trong khung ảnh đã thu nhỏ, kèm scale) → toạ độ màn hình. */
@@ -1039,6 +1194,8 @@ namespace AivinGui {
 
     /** Điểm màn hình của node chữ OCR của thao tác đang chạy (null = không phải node OCR). */
     static System.Windows.Point? ocrPoint = null;
+    /** node_id OCR của thao tác đang chạy — tính lại điểm theo vị trí cửa sổ lúc bấm (sau khi khôi phục cửa sổ thu nhỏ). */
+    static string ocrNodeId = null;
 
     static System.Windows.Point OcrPointOf(string nodeId, out IntPtr window) {
       window = IntPtr.Zero;
@@ -1115,17 +1272,29 @@ namespace AivinGui {
 
     static System.Windows.Point PointFor(AutomationElement el, IntPtr window, Dictionary<string, object> a) {
       if (el != null) return CenterOf(el);
-      if (ocrPoint.HasValue) return ocrPoint.Value;
+      if (ocrPoint.HasValue) {
+        if (ocrNodeId != null) { IntPtr w; return OcrPointOf(ocrNodeId, out w); }
+        return ocrPoint.Value;
+      }
       var pt = Get(a, "point") as Dictionary<string, object>;
       if (pt == null) throw new GuiError("INVALID_ARGS", "Give node_id or point {x,y}");
       return WindowPoint(window, a, pt);
     }
 
+    /**
+     * Bấm chuột thật (02/11/2026): đưa cửa sổ lên (khôi phục nếu thu nhỏ) TRƯỚC khi tính toạ độ — cửa sổ thu nhỏ có toạ độ ảo; không lên được
+     * trên cùng, hoặc điểm bấm đang bị cửa sổ khác che → GUI_FOCUS_LOST, không bấm.
+     */
     static void MouseAt(AutomationElement el, IntPtr window, Dictionary<string, object> a, uint down, uint up, int times) {
+      RequireForeground(window);
       var p = PointFor(el, window, a);
-      if (window != IntPtr.Zero) ForceForeground(window);
-      MoveCursor((int)p.X, (int)p.Y);
+      int x = (int)p.X, y = (int)p.Y;
+      AssertPointOnWindow(x, y, window);
+      MoveCursor(x, y);
       Thread.Sleep(30);
+      // Trong lúc di chuột có cửa sổ khác nhảy lên (thông báo, hộp thoại của ứng dụng khác) → không bấm.
+      AssertPointOnWindow(x, y, window);
+      lastMousePoint = new Dictionary<string, object> { { "x", x }, { "y", y } };
       var list = new List<Native.INPUT>();
       for (int i = 0; i < times; i++) { list.Add(MouseInput(down, 0, 0, 0)); list.Add(MouseInput(up, 0, 0, 0)); }
       Send(list.ToArray());
@@ -1153,15 +1322,40 @@ namespace AivinGui {
 
     static void KeyTap(ushort vk) { Send(new[] { KeyInput(vk, 0, 0), KeyInput(vk, 0, KEYEVENTF_KEYUP) }); }
 
-    static void TypeText(string text) {
+    /**
+     * Gõ chữ theo lô 200 input. Trước MỖI lô (02/11/2026): cửa sổ trên cùng vẫn là đích, và (khi kiểm người dùng) người dùng không vừa đụng
+     * chuột / phím từ lô trước — lệch thì dừng, báo đã gõ bao nhiêu ký tự (chữ còn lại không rơi vào cửa sổ khác).
+     */
+    static void TypeText(string text, IntPtr window) {
       var list = new List<Native.INPUT>();
+      Native.POINT cursor;
+      bool haveCursor = Native.GetCursorPos(out cursor);
+      int typed = 0, inBatch = 0, total = text.Replace("\r", "").Length;
+      bool first = true;
       foreach (char ch in text) {
-        if (ch == '\n') { list.Add(KeyInput(0x0D, 0, 0)); list.Add(KeyInput(0x0D, 0, KEYEVENTF_KEYUP)); continue; }
         if (ch == '\r') continue;
-        list.Add(KeyInput(0, ch, KEYEVENTF_UNICODE));
-        list.Add(KeyInput(0, ch, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-        if (list.Count >= 200) { Send(list.ToArray()); list.Clear(); Thread.Sleep(5); }
+        if (ch == '\n') { list.Add(KeyInput(0x0D, 0, 0)); list.Add(KeyInput(0x0D, 0, KEYEVENTF_KEYUP)); }
+        else {
+          list.Add(KeyInput(0, ch, KEYEVENTF_UNICODE));
+          list.Add(KeyInput(0, ch, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+        }
+        inBatch++;
+        if (list.Count >= 200) {
+          SendTextBatch(list, window, first, haveCursor, cursor, typed, total);
+          typed += inBatch; inBatch = 0; first = false; list.Clear();
+          Thread.Sleep(TYPE_BATCH_PAUSE_MS);
+        }
       }
+      SendTextBatch(list, window, first, haveCursor, cursor, typed, total);
+    }
+
+    static void SendTextBatch(List<Native.INPUT> list, IntPtr window, bool first, bool haveCursor, Native.POINT cursor, int typed, int total) {
+      if (list.Count == 0) return;
+      string done = typed + " of " + total + " characters";
+      if (!first && userInputCheck && haveCursor && UserTouchedSince(cursor)) {
+        throw new GuiError("GUI_USER_ACTIVE", "The user started using the mouse/keyboard while the AI was typing — stopped after " + done);
+      }
+      AssertStillForeground(window, done);
       Send(list.ToArray());
     }
 
@@ -1176,8 +1370,12 @@ namespace AivinGui {
     static readonly HashSet<ushort> Extended = new HashSet<ushort> { 0x2E, 0x2D, 0x24, 0x23, 0x21, 0x22, 0x26, 0x28, 0x25, 0x27, 0x5B, 0x5D };
 
     /** "ctrl+s", "alt+f4", "enter", "ctrl+shift+n" — nhiều tổ hợp cách nhau bằng dấu cách: "ctrl+a delete". */
-    static void KeyCombo(string spec) {
+    static void KeyCombo(string spec, IntPtr window) {
+      int n = 0;
       foreach (string combo in spec.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) {
+        // Mỗi tổ hợp: cửa sổ trên cùng vẫn là đích (tổ hợp trước có thể đã mở / đóng cửa sổ).
+        AssertStillForeground(window, n == 0 ? null : n + " key combination(s)");
+        n++;
         var vks = new List<ushort>();
         foreach (string raw in combo.ToLowerInvariant().Split('+')) {
           string k = raw.Trim();

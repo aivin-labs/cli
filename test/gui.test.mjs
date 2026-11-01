@@ -94,7 +94,7 @@ test('act theo node_id: snapshot lạ → GUI_STALE_NODE; ứng dụng bị ch�
   const blockedHost = fakeHost({ observe: { snapshot: 1, window: { ...NOTEPAD, process: 'cmd' } }, window_info: { ...NOTEPAD, process: 'cmd' }, act: {} });
   const g2 = createGuiController({ host: blockedHost, notify: () => {} });
   await assert.rejects(g2.observe({}, {}), (e) => e.code === 'GUI_BLOCKED_APP');
-  await assert.rejects(g2.act({ action: 'key', keys: 'enter' }, {}), (e) => e.code === 'GUI_BLOCKED_APP');
+  await assert.rejects(g2.act({ action: 'key', keys: 'enter', window: 'cmd' }, {}), (e) => e.code === 'GUI_BLOCKED_APP');
   assert.equal(blockedHost.calls.some((c) => c.op === 'act'), false);
 });
 
@@ -103,8 +103,8 @@ test('act: hành động lạ bị từ chối; báo "AI đang điều khiển" 
   const notes = [];
   const gui = createGuiController({ host, notify: (n) => notes.push(n) });
   await assert.rejects(gui.act({ action: 'format_disk' }, {}), (e) => e.code === 'INVALID_ARGS');
-  await gui.act({ action: 'key', keys: 'ctrl+s' }, {});
-  await gui.act({ action: 'key', keys: 'enter' }, {});
+  await gui.act({ action: 'key', keys: 'ctrl+s', window: 'notepad' }, {});
+  await gui.act({ action: 'key', keys: 'enter', window: 'notepad' }, {});
   assert.equal(notes.length, 1);
 });
 
@@ -236,10 +236,10 @@ test('gui.do: schema ngắn, semantic match nội bộ, từ chối mơ hồ và
     act: (a) => ({ action: a.action, method: 'value', target: { exists: true, value: a.text } }),
   });
   const gui = createGuiController({ host, notify: () => {} });
-  const filled = await gui.semanticDo({ do: 'fill', target: 'Customer name', value: 'An', role: 'edit' }, {}, {});
+  const filled = await gui.semanticDo({ do: 'fill', target: 'Customer name', value: 'An', role: 'edit', within: 'notepad' }, {}, {});
   assert.deepEqual({ ok: filled.ok, action: filled.action, verified: filled.verified }, { ok: true, action: 'fill', verified: true });
   assert.equal(host.calls.find((c) => c.op === 'act').args.node_id, '11.1');
-  const ambiguous = await gui.semanticDo({ do: 'click', target: 'Save', role: 'button' }, {}, {});
+  const ambiguous = await gui.semanticDo({ do: 'click', target: 'Save', role: 'button', within: 'notepad' }, {}, {});
   assert.equal(ambiguous.code, 'GUI_AMBIGUOUS_TARGET');
   assert.equal(ambiguous.choices.length, 2);
   assert.equal(host.calls.filter((c) => c.op === 'act').length, 1, 'mơ hồ không được click');
@@ -255,7 +255,7 @@ test('gui.do: hậu điều kiện fill sai → GUI_NO_EFFECT', async () => {
     act: { action: 'set_value', method: 'value', target: { exists: true, value: 'old' } },
   });
   const gui = createGuiController({ host, notify: () => {} });
-  await assert.rejects(gui.semanticDo({ do: 'fill', target: 'Amount', value: '100' }, {}, {}), (e) => e.code === 'GUI_NO_EFFECT');
+  await assert.rejects(gui.semanticDo({ do: 'fill', target: 'Amount', value: '100', within: 'notepad' }, {}, {}), (e) => e.code === 'GUI_NO_EFFECT');
 });
 
 test('gui.do: không bao giờ điền trường mật khẩu', async () => {
@@ -264,7 +264,7 @@ test('gui.do: không bao giờ điền trường mật khẩu', async () => {
     act: { action: 'set_value', method: 'value', target: { exists: true } },
   });
   const gui = createGuiController({ host, notify: () => {} });
-  await assert.rejects(gui.semanticDo({ do: 'fill', target: 'Password', value: 'secret' }, {}, {}), (e) => e.code === 'INVALID_ARGS');
+  await assert.rejects(gui.semanticDo({ do: 'fill', target: 'Password', value: 'secret', within: 'notepad' }, {}, {}), (e) => e.code === 'INVALID_ARGS');
   assert.equal(host.calls.some((c) => c.op === 'act'), false);
 });
 
@@ -328,7 +328,7 @@ test('gui.do: không thấy trong cây UIA thường thì tự thử lại với
     act: (a) => ({ action: a.action, method: 'mouse', target: { exists: true } }),
   });
   const gui = createGuiController({ host, notify: () => {} });
-  const clicked = await gui.semanticDo({ do: 'click', target: 'Ghi sổ', role: 'button' }, {}, {});
+  const clicked = await gui.semanticDo({ do: 'click', target: 'Ghi sổ', role: 'button', within: 'notepad' }, {}, {});
   assert.equal(clicked.ok, true);
   assert.equal(host.calls.filter((c) => c.op === 'observe').length, 2);
   assert.equal(host.calls.filter((c) => c.op === 'observe')[1].args.ocr, true);
@@ -371,7 +371,96 @@ test('gui.do: trả kèm screen_point từ host.act để hiển thị con trỏ
     }),
   });
   const gui = createGuiController({ host, notify: () => {} });
-  const res = await gui.semanticDo({ do: 'click', target: 'Save', role: 'button' }, {}, {});
+  const res = await gui.semanticDo({ do: 'click', target: 'Save', role: 'button', within: 'notepad' }, {}, {});
   assert.equal(res.ok, true);
   assert.deepEqual(res.screen_point, { x: 520, y: 340 });
+});
+
+test('thao tác có thay đổi không nêu cửa sổ → INVALID_ARGS, không gửi xuống host; node_id / linh vật / chỉ đọc thì không cần (02/11/2026)', async () => {
+  const host = fakeHost({
+    window_info: NOTEPAD, act: { action: 'key', method: 'keyboard' },
+    observe: { snapshot: 50, window: NOTEPAD, tree_quality: 'good', nodes: [{ id: '50.1', role: 'button', name: 'Save' }] },
+  });
+  const gui = createGuiController({ host, notify: () => {} });
+  for (const action of ['key', 'click', 'type', 'set_value', 'scroll']) {
+    await assert.rejects(gui.act({ action, keys: 'ctrl+s', text: 'x', point: { x: 1, y: 1 } }, {}), (e) => e.code === 'INVALID_ARGS' && /Name the window/.test(e.message), action);
+  }
+  for (const d of ['click', 'fill', 'key', 'toggle', 'select', 'scroll']) {
+    await assert.rejects(gui.semanticDo({ do: d, target: 'Save', value: 'x' }, {}, {}), (e) => e.code === 'INVALID_ARGS', d);
+  }
+  assert.equal(host.calls.some((c) => c.op === 'act' || c.op === 'window_info'), false, 'không hỏi host cửa sổ đang focus');
+  await gui.observe({}, {});
+  await gui.act({ action: 'click', node_id: '50.1' }, {});
+  await gui.act({ action: 'key', keys: 'ctrl+s', window: 'notepad' }, {});
+  assert.equal(host.calls.filter((c) => c.op === 'act').length, 2);
+
+  const mascot = fakeHost({ window_info: NOTEPAD, act: {} });
+  const g2 = createGuiController({ host: mascot, notify: () => {}, defaultWindow: () => ({ avoid_pid: 42, fallback: '0x10' }) });
+  await g2.act({ action: 'key', keys: 'ctrl+s' }, {});
+  assert.equal(mascot.calls.find((c) => c.op === 'act').args.fallback, '0x10');
+  const noFallback = createGuiController({ host: fakeHost({ window_info: NOTEPAD, act: {} }), notify: () => {}, defaultWindow: () => ({ avoid_pid: 42 }) });
+  await assert.rejects(noFallback.act({ action: 'key', keys: 'enter' }, {}), (e) => e.code === 'INVALID_ARGS');
+});
+
+test('mô tả công cụ: gui.do within bắt buộc, gui.act nêu GUI_FOCUS_LOST; mã lỗi có trong DeviceErrorCode', async () => {
+  const { DeviceErrorCode } = await import('../bin/lib/remote/constants.mjs');
+  assert.equal(DeviceErrorCode.GUI_FOCUS_LOST, 'GUI_FOCUS_LOST');
+  const tools = buildGuiTools(createGuiController({ host: fakeHost({}), notify: () => {} }));
+  assert.match(tools.find((t) => t.name === 'gui.do').input_schema.properties.within.description, /required/);
+  assert.match(tools.find((t) => t.name === 'gui.act').description, /GUI_FOCUS_LOST/);
+});
+
+test('host C#: chuột / phím thật kiểm cửa sổ trên cùng + điểm bấm, gõ dài kiểm từng lô, act không node_id đòi cửa sổ, ảnh màn hình chỉ khi không bị che (02/11/2026)', async () => {
+  const { WINDOWS_HOST_CSHARP: cs } = await import('../bin/lib/remote/gui/windowsHostSource.mjs');
+  const body = (name) => {
+    const start = cs.indexOf(`static ${name}`);
+    assert.ok(start >= 0, name);
+    return cs.slice(start, cs.indexOf('\n    }\n', start));
+  };
+  const mouse = body('void MouseAt(');
+  assert.ok(mouse.indexOf('RequireForeground(window)') >= 0 && mouse.indexOf('RequireForeground(window)') < mouse.indexOf('PointFor('), 'đưa cửa sổ lên (khôi phục) trước khi tính toạ độ');
+  assert.match(mouse, /AssertPointOnWindow\(x, y, window\)/);
+  assert.match(body('void FocusTarget('), /RequireForeground\(window\)/);
+  assert.match(body('bool ForceForeground('), /return BelongsTo\(Native\.GetForegroundWindow\(\), h\)/);
+  assert.match(body('void RequireForeground('), /GUI_FOCUS_LOST/);
+  assert.match(body('bool PointOnWindow('), /WindowFromPoint/);
+  assert.match(body('bool BelongsTo('), /RootOf/);
+  const batch = body('void SendTextBatch(');
+  assert.match(batch, /UserTouchedSince/);
+  assert.match(batch, /AssertStillForeground\(window, done\)/);
+  assert.match(body('void TypeText('), /SendTextBatch\(list, window/);
+  assert.match(body('void KeyCombo('), /AssertStillForeground/);
+  assert.match(body('object Act('), /ResolveWindow\(a, true\)/);
+  const grab = body('Bitmap GrabWindow(');
+  assert.ok(grab.indexOf('ScreenCopyBlocker') >= 0 && grab.indexOf('ScreenCopyBlocker') < grab.indexOf('CopyFromScreen'), 'chỉ chụp màn hình sau khi kiểm không bị che');
+  assert.match(body('string ScreenCopyBlocker('), /GetForegroundWindow/);
+  assert.match(cs, /res\["image_error"\] = imageError/);
+  // Thao tác theo pattern (Invoke / Value / chạy nền) không bị buộc lên trên cùng.
+  const doAction = body('string DoAction(');
+  const setValue = doAction.slice(doAction.indexOf('case "set_value"'), doAction.indexOf('case "type"'));
+  assert.ok(setValue.indexOf('vp.SetValue') < setValue.indexOf('FocusTarget'), 'set_value theo pattern chạy trước, không đòi foreground');
+});
+
+test('windowsHost: host được báo tệp PID bản Office ẩn để dọn mồ côi', async () => {
+  const { EventEmitter } = await import('events');
+  const { PassThrough } = await import('stream');
+  const { createWindowsHost, OFFICE_ORPHANS_FILE } = await import('../bin/lib/remote/gui/windowsHost.mjs');
+  let env = null;
+  const host = createWindowsHost({
+    spawnImpl: (cmd, args, opts) => {
+      const proc = new EventEmitter();
+      if (cmd === 'taskkill') return proc;
+      env = opts.env;
+      proc.pid = 1; proc.stdin = new PassThrough(); proc.stdout = new PassThrough(); proc.stderr = new PassThrough();
+      setImmediate(() => proc.stdout.write(`${JSON.stringify({ ready: true })}\n`));
+      proc.stdin.on('data', (chunk) => {
+        for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) proc.stdout.write(`${JSON.stringify({ id: JSON.parse(line).id, ok: true, result: {} })}\n`);
+      });
+      return proc;
+    },
+  });
+  await host.call('ping');
+  assert.equal(env.AIVIN_GUI_ORPHANS, OFFICE_ORPHANS_FILE);
+  assert.match(OFFICE_ORPHANS_FILE, /gui[\\/]office-orphans\.txt$/);
+  host.close();
 });

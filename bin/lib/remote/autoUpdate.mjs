@@ -62,6 +62,14 @@ export function createAutoUpdater({
       if (minVersion) noticeOnce(`min-off:${minVersion}`, `⚠️  Máy chủ cần aivin ${tagOf(minVersion)} trở lên (máy này ${tagOf(current)}), tự cập nhật đang tắt — chạy \`aivin update\`.`);
       return;
     }
+    // Đã có bản mới chờ khởi động lại (cài ở lần kiểm trước / cửa sổ khác) → không kiểm / cài lại (02/11/2026: sự kiện UPDATE của máy chủ
+    // gọi checkNow cài chồng, đè `.prev`). Ngoại lệ: máy chủ đòi bản tối thiểu cao hơn bản đang chờ.
+    const waiting = ready || installedNewer();
+    if (waiting && !(minVersion && compareVersions(waiting, minVersion) < 0)) {
+      ready = waiting;
+      nextCheckAt = now() + jitter(checkEveryMs);
+      return { status: UpdateStatus.INSTALLED, latest: waiting, current: tagOf(current), already: true };
+    }
     try {
       const res = await install({ deviceId, urgent: urgent && !!minVersion && compareVersions(current, minVersion) < 0, holdVersions });
       nextCheckAt = now() + jitter(checkEveryMs);

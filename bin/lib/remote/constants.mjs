@@ -221,6 +221,8 @@ export const DeviceErrorCode = Object.freeze({
   GUI_NO_EFFECT: 'GUI_NO_EFFECT',
   /** Người dùng đang dùng chuột / bàn phím — AI dừng, hỏi trước khi làm tiếp. */
   GUI_USER_ACTIVE: 'GUI_USER_ACTIVE',
+  /** Chuột / phím thật không tới được cửa sổ đích (không lên được trên cùng / cửa sổ khác che điểm bấm / mất focus giữa lúc gõ) — không bấm, không gõ tiếp. */
+  GUI_FOCUS_LOST: 'GUI_FOCUS_LOST',
   /** Ứng dụng không được điều khiển (quản lý mật khẩu, hộp nâng quyền, terminal khi không toàn quyền…). */
   GUI_BLOCKED_APP: 'GUI_BLOCKED_APP',
   /** Gõ vào ô mật khẩu — người dùng tự gõ. */

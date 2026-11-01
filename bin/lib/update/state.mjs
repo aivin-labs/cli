@@ -81,6 +81,16 @@ export function installedNewerThanRunning({ target = process.execPath, current =
   return loadUpdateSettings(settingsFile).skip.includes(tagOf(marker.version)) ? null : tagOf(marker.version);
 }
 
+/**
+ * Đĩa đang giữ một bản ĐÃ CÀI mà chưa chạy (mới hơn bản đang chạy, đúng tệp chạy này) — kể cả bản nằm trong danh sách bỏ qua. Trả phiên
+ * bản hoặc null. Dùng để không cài chồng / không đè `.prev` (02/11/2026).
+ */
+export function diskAheadOfRunning({ target = process.execPath, current = currentCliVersion(), file = UPDATE_INSTALLED_FILE } = {}) {
+  const marker = readInstalledMarker(file);
+  if (!marker || !samePath(marker.path, target) || compareVersions(marker.version, current) <= 0) return null;
+  return tagOf(marker.version);
+}
+
 /** Tiến trình vừa khởi động chính là tệp đang nằm trên đĩa → dấu "đã cài bản mới" cho tệp này đã cũ (cài lại bằng bộ cài, đã lùi bản…). */
 export function clearStaleInstalledMarker({ target = process.execPath, file = UPDATE_INSTALLED_FILE } = {}) {
   const marker = readInstalledMarker(file);

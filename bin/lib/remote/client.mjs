@@ -7,6 +7,7 @@ import { DEFAULT_AIVIN_BASE_URL } from '../context.mjs';
 import { logActivity } from './activityLog.mjs';
 import { DEFAULT_SCOPE_LIMITS, DEVICE_NAMESPACE, DeviceAccess, DeviceErrorCode, DeviceEvent, HoldPhase, MAX_RESULT_BYTES, PROTOCOL_VERSION, REMOTE_IDEM_FILE, REMOTE_OUTBOX_FILE, ServerFeature } from './constants.mjs';
 import { CallState, createCallLedger } from './callLedger.mjs';
+import { fallBackToPreviousToken, settleRotation } from './tokenRotation.mjs';
 import { configureProxy, proxyAgentFor } from './netProxy.mjs';
 import { createKeepAwake } from './keepAwake.mjs';
 import { createPolicyGuard, describeCall, evaluateLocalPolicy } from './localPolicy.mjs';
@@ -336,7 +337,7 @@ export async function startRemoteClient(options = {}) {
   const scheduler = createScheduler(multiUser ? { scopeLimits: DEFAULT_SCOPE_LIMITS } : undefined);
   // Linh vật trên màn hình (mascot/): việc chính đang làm + nhật ký chi tiết; nút tạm dừng = công tắc ngắt. Máy tính tổ chức: không có.
   const mascot = createMascot({
-    enabled: !multiUser && options.mascot !== false && process.env.AIVIN_MASCOT !== '0',
+    enabled: !multiUser && options.mascot !== false && process.env.AIVIN_MASCOT !== '0', lang: creds?.lang,
     onPause: () => setRemotePaused(true),
     onResume: () => setRemotePaused(false),
     say: (m) => say(chalk.gray(`   ${m}`)),
@@ -417,6 +418,8 @@ export async function startRemoteClient(options = {}) {
   const heartbeat = setInterval(() => {
     if (socket.connected) socket.emit(DeviceEvent.HEARTBEAT, multiUser ? { busy: processes.hasRunning() } : {});
     ledger.prune();
+    // Kết quả đã gửi mà lỡ ack (BE quá tải) khi socket vẫn nối → gửi lại có giãn nhịp, cùng call_id (callLedger.dueForResend, 02/11/2026).
+    if (socket.connected && serverResume) ledger.dueForResend().forEach(sendResult);
     syncProcAwake();
   }, HEARTBEAT_MS);
 
@@ -449,6 +452,7 @@ export async function startRemoteClient(options = {}) {
       socket.emit(DeviceEvent.RESULT, payload);
       return ledger.markSent(payload.call_id);
     }
+    ledger.markAttempt(payload.call_id);
     socket.timeout(RESULT_ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.RESULT, payload)
       .then(() => ledger.markSent(payload.call_id), () => ledger.persist());
   };
@@ -531,12 +535,13 @@ export async function startRemoteClient(options = {}) {
   const rotateToken = async (token) => {
     const previous = creds.device_token;
     try {
-      const fallback = saveDeviceCredentials({ ...creds, device_token: token });
+      // Giữ token cũ tới khi máy chủ xác nhận (tokenRotation.mjs) — 02/11/2026.
+      const fallback = saveDeviceCredentials({ ...creds, device_token: token }, { previousToken: previous });
       if (fallback) say(chalk.yellow(`   ⚠️  Kho bí mật của máy lỗi (${fallback}) — token mới nằm trong tệp thường`));
       // Đọc lại thật từ tệp + kho bí mật (không qua bộ nhớ đệm): ghi hỏng mà vẫn báo BE là lần khởi động sau máy bị khoá ngoài.
       if (readStoredTokenFresh() !== token) throw new Error('saved token does not read back');
     } catch (e) {
-      try { saveDeviceCredentials({ ...creds, device_token: previous }); } catch { /* giữ nguyên tệp */ }
+      try { saveDeviceCredentials({ ...creds, device_token: previous }, { previousToken: null }); } catch { /* giữ nguyên tệp */ }
       say(chalk.yellow(`   ⚠️  Không lưu được token mới (${e.message}) — tiếp tục dùng token cũ`));
       return;
     }
@@ -544,6 +549,7 @@ export async function startRemoteClient(options = {}) {
     socket.auth = { ...socket.auth, device_token: token };
     // Gửi kèm chính token mới: BE chỉ chốt khi băm của nó đúng token đang chờ (chứng minh máy này nhận được token đó).
     const ack = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.ROTATED, { token }).catch(() => null);
+    if (ack?.ok === true) settleRotation(token);
     logActivity({ type: 'token_rotated', deviceId: creds.device_id, confirmed: ack?.ok === true });
     say(chalk.gray(ack?.ok
       ? '   🔑 Đã đổi token máy định kỳ (token cũ hết hiệu lực)'
@@ -578,6 +584,7 @@ export async function startRemoteClient(options = {}) {
         cancelGating(orphaned);
         ledger.drop(orphaned);
       }
+      if (!envCreds) settleRotation(creds.device_token); // chào được bằng token đang dùng → bỏ token cũ còn giữ (nếu có)
       if (typeof hello?.rotate_token === 'string' && !envCreds) await rotateToken(hello.rotate_token);
       // BE cần bản CLI tối thiểu (tính năng mới phía máy) → kiểm cập nhật ngay thay vì chờ tới lượt.
       if (hello?.cli) updater?.setServerHints(hello.cli);
@@ -613,7 +620,7 @@ export async function startRemoteClient(options = {}) {
   };
 
   const localGate = async (call, tool) => {
-    if (tool.internal) return;
+    // Công cụ nội bộ cũng qua sàn luật (phần cấm luôn áp; phần hỏi do evaluateLocalPolicy miễn) — 02/11/2026.
     const policy = policyGuard.read();
     const verdict = evaluateLocalPolicy(policy, tool, call.args || {});
     if (verdict.action !== 'confirm' || !confirmer) return;
@@ -754,6 +761,8 @@ export async function startRemoteClient(options = {}) {
       return;
     }
     if (err?.message === 'DEVICE_UNAUTHORIZED') {
+      // Token xoay vòng chưa được chốt → thử lại bằng token cũ trước khi xoá ghép máy (02/11/2026).
+      if (!envCreds && fallBackToPreviousToken({ creds, socket, isStopped: () => stopped })) return void say(chalk.yellow('   ⚠️  Máy chủ chưa nhận token mới — nối lại bằng token cũ'));
       const replaced = !clearDeviceCredentials(creds.device_token);
       console.log(chalk.red(replaced
         ? '❌ Máy này vừa được ghép lại bởi một cửa sổ khác — cửa sổ này dừng, cửa sổ mới tiếp tục nhận việc.'

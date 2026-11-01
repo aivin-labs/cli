@@ -9,8 +9,9 @@ import { VOICE_CS } from './voiceSource.mjs';
  *
  * - Không viền, nền trong suốt (vùng trong suốt bấm xuyên qua), luôn nằm trên, không có trên thanh tác vụ / Alt+Tab.
  * - KHÔNG cướp focus (WS_EX_NOACTIVATE): người dùng đang gõ, hoặc AI đang điều khiển một ứng dụng, không bị cửa sổ này giật phím.
- * - Không có trong ảnh chụp màn hình (WDA_EXCLUDEFROMCAPTURE, Windows 10 2004+): ảnh AI chụp để điều khiển giao diện, chia sẻ màn hình
- *   khi họp không thấy linh vật. Thử nghiệm cần chụp được thì đặt AIVIN_MASCOT_CAPTURABLE=1.
+ * - CÓ trong ảnh chụp màn hình (từ 01/11/2026, commit efa202c): WDA_EXCLUDEFROMCAPTURE trên cửa sổ layered trong suốt làm linh vật vô
+ *   hình ngay trên màn hình thật ở một số máy, nên đã tắt. Ảnh AI chụp / chia sẻ màn hình khi họp / Desktop Cast thấy linh vật; khi AI
+ *   bấm / chụp cửa sổ (lệnh `gui`) linh vật tự tránh đường. AIVIN_MASCOT_CAPTURABLE không còn tác dụng.
  * - Kéo để di chuyển (nhớ chỗ), bấm để mở / thu bảng nhật ký; bảng mở về phía còn chỗ trên màn hình, kẹp trong vùng màn hình.
  * - Chuyển động của bot: rigSource.mjs (C#, theo nhịp màn hình) — PowerShell chỉ báo trạng thái / rê chuột / nhấn / kéo cho rig.
  * Lệnh vào: state | main | log | gui | show | quit. Sự kiện ra: ready | pos | pause | resume | hide | off.
@@ -223,7 +224,7 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
       <DockPanel LastChildFill="False">
        <TextBlock x:Name="QuickChatText" DockPanel.Dock="Left" FontSize="11" Foreground="${B.ink}" FontWeight="Medium" VerticalAlignment="Center"/>
        <Border DockPanel.Dock="Right" Background="#FFFFFF" BorderBrush="#DCDFE6" BorderThickness="1" CornerRadius="4" Padding="4,1,4,1" VerticalAlignment="Center" Margin="4,0,0,0">
-        <TextBlock x:Name="QuickChatKey" Text="Ctrl+Alt+C" FontSize="9.5" FontWeight="SemiBold" Foreground="${B.brand}"/>
+        <TextBlock x:Name="QuickChatKey" Text="" FontSize="9.5" FontWeight="SemiBold" Foreground="${B.brand}"/>
        </Border>
       </DockPanel>
      </Button>
@@ -231,7 +232,7 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
       <DockPanel LastChildFill="False">
        <TextBlock x:Name="QuickVoiceText" DockPanel.Dock="Left" FontSize="11" Foreground="${B.ink}" FontWeight="Medium" VerticalAlignment="Center"/>
        <Border DockPanel.Dock="Right" Background="#FFFFFF" BorderBrush="#DCDFE6" BorderThickness="1" CornerRadius="4" Padding="4,1,4,1" VerticalAlignment="Center" Margin="4,0,0,0">
-        <TextBlock x:Name="QuickVoiceKey" Text="Ctrl+Alt+Space" FontSize="9.5" FontWeight="SemiBold" Foreground="${B.brand}"/>
+        <TextBlock x:Name="QuickVoiceKey" Text="" FontSize="9.5" FontWeight="SemiBold" Foreground="${B.brand}"/>
        </Border>
       </DockPanel>
      </Button>
@@ -344,6 +345,8 @@ $script:mascotMutex = New-Object System.Threading.Mutex($true, "Local\AivinMasco
 if (-not $createdNew) { exit 0 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
 $utf8 = New-Object Text.UTF8Encoding $false
+# stderr (errors, Dbg) in UTF-8: the daemon reads it as UTF-8 (stdout has its own UTF-8 writer, AivinMascot.Output).
+try { [Console]::OutputEncoding = $utf8 } catch {}
 $dir = $env:AIVIN_MASCOT_DIR
 function ReadText($name) { [IO.File]::ReadAllText((Join-Path $dir $name), $utf8) }
 $cfg = ReadText 'config.json' | ConvertFrom-Json
@@ -352,6 +355,15 @@ $T = $cfg.strings; $P = $cfg.palette
 function Send($o) { [AivinMascot.Output]::Line(($o | ConvertTo-Json -Compress)) }
 # Debug trace: stderr + debug.log in the host folder (stderr is only kept as the last error line by the daemon).
 function Dbg($text) { if ($env:AIVIN_MASCOT_DEBUG) { $line = "$([DateTime]::Now.ToString('HH:mm:ss.fff')) $text"; [Console]::Error.WriteLine("mascot: $line"); try { [IO.File]::AppendAllText((Join-Path $dir 'debug.log'), ($line + [Environment]::NewLine), $utf8) } catch {} } }
+# Clicking a bubble / log row / chat row opens its link in the browser: http(s) only (the daemon filters too) - Process.Start would run
+# file:, shell: or a program path as is.
+function OpenWebUrl($u) {
+  $s = [string]$u; if (-not $s) { return }
+  $uri = $null
+  if ([Uri]::TryCreate($s, [UriKind]::Absolute, [ref]$uri) -and ($uri.Scheme -eq 'http' -or $uri.Scheme -eq 'https')) {
+    try { [void][System.Diagnostics.Process]::Start($uri.AbsoluteUri) } catch {}
+  } else { Dbg "open url refused: $s" }
+}
 # Win32 calls + a background thread that reads stdin lines into a queue (stream ReadLineAsync faults on a console pipe in .NET Framework)
 # + the bot's per-frame motion rig (C#, see rigSource.mjs) + live voice: mic / speaker streaming (C#, see voiceSource.mjs).
 Add-Type -ReferencedAssemblies ${RIG_REFERENCES_PS} -TypeDefinition @'
@@ -396,6 +408,30 @@ namespace AivinMascot {
       // WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE + SPI_SETWORKAREA.
       if (msg == 0x007E || msg == 0x02E0 || (msg == 0x001A && wp.ToInt64() == 0x2F)) {
         System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, changed);
+      }
+      return IntPtr.Zero;
+    }
+  }
+  /** Global hotkeys (RegisterHotKey): the first free combination of each list (the daemon writes the lists into config.json). WM_HOTKEY is
+      picked out here in C# and only then handed to PowerShell (a PowerShell hook would run for every window message). */
+  public static class HotKeys {
+    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr h, int id, uint mods, uint vk);
+    static Action<int> pressed; static System.Windows.Interop.HwndSourceHook hook;
+    public static void Start(IntPtr h, Action<int> onPressed) {
+      if (hook != null) return;
+      pressed = onPressed; hook = Hook;
+      System.Windows.Interop.HwndSource.FromHwnd(h).AddHook(hook);
+    }
+    /** Registers the first combination that is free; returns its index in the list, -1 = none (all taken / empty list). */
+    public static int RegisterFirst(IntPtr h, int id, uint[] mods, uint[] vks) {
+      if (mods == null || vks == null) return -1;
+      for (int i = 0; i < mods.Length && i < vks.Length; i++) if (RegisterHotKey(h, id, mods[i], vks[i])) return i;
+      return -1;
+    }
+    static IntPtr Hook(IntPtr h, int msg, IntPtr wp, IntPtr lp, ref bool handled) {
+      if (msg == 0x0312 && pressed != null) {
+        int id = wp.ToInt32(); var cb = pressed; handled = true;
+        System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Normal, (Action)(() => cb(id)));
       }
       return IntPtr.Zero;
     }
@@ -495,12 +531,12 @@ SyncNotifyDesc $script:notifyFreq
   }
 })
 
-# No focus stealing + no Alt+Tab entry; hidden from screen capture (AI screenshots, screen sharing).
+# No focus stealing + no Alt+Tab entry. NOT hidden from screen capture: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE = 0x11) on this
+# transparent layered window made the bot invisible on the real desktop on some machines (commit efa202c, 01/11/2026), so it stays off.
 $w.Add_SourceInitialized({
   $h = (New-Object Windows.Interop.WindowInteropHelper $w).Handle
   $ex = [AivinMascot.Native]::GetWindowLong($h, -20)
   [void][AivinMascot.Native]::SetWindowLong($h, -20, ($ex -bor 0x08000000 -bor 0x00000080))
-  # if (-not $env:AIVIN_MASCOT_CAPTURABLE) { [void][AivinMascot.Native]::SetWindowDisplayAffinity($h, 0x11) }
   $script:hwnd = $h
   [AivinMascot.TopKeeper]::Start($h)
   [AivinMascot.DisplayWatch]::Start($h, [Action]{ Dbg 'display changed'; Place })
@@ -765,9 +801,7 @@ function ShowBubble($text, $url = $null) {
   if ($script:state -ne 'working' -and $script:state -ne 'thinking' -and $script:state -ne 'waiting') { $script:bubbleTimer.Start() }
 }
 (E 'BubbleBox').Add_MouseLeftButtonUp({
-  if ($script:bubbleUrl) {
-    try { [System.Diagnostics.Process]::Start([string]$script:bubbleUrl) } catch {}
-  }
+  if ($script:bubbleUrl) { OpenWebUrl $script:bubbleUrl }
 })
 
 $script:rows = @{}; $script:order = New-Object System.Collections.Generic.Queue[string]
@@ -786,10 +820,9 @@ function LogEntry($m) {
     $row = @{ glyph = $g; time = $tm; title = $ti; sub = $sub; url = [string]$m.url }
     if ($m.url) {
       $dp.Cursor = [Windows.Input.Cursors]::Hand
-      $dp.ToolTip = [string]$m.url
-      $dp.Add_MouseLeftButtonUp({
-        if ($row.url) { try { [System.Diagnostics.Process]::Start([string]$row.url) } catch {} }
-      })
+      $dp.ToolTip = [string]$m.url; $dp.Tag = [string]$m.url
+      # The link rides on the row itself (Tag): the handler is not a closure, $row at click time is not this row.
+      $dp.Add_MouseLeftButtonUp({ param($s) OpenWebUrl $s.Tag })
     }
     if ($m.id) { $script:rows[[string]$m.id] = $row; $script:order.Enqueue([string]$m.id) }
     while ($list.Children.Count -gt 150) { $list.Children.RemoveAt($list.Children.Count - 1) }

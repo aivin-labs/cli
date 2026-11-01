@@ -7,6 +7,7 @@ import { cloudOnlyFiles, inCloudFolder } from './cloudFiles.mjs';
 import { extractDocText, isDocFile, wellFormed } from './docText.mjs';
 import { FolderKind, classifyDir, folderSummary, skipDir, skipFile } from './folderRules.mjs';
 import { isProtectedPath } from './sandbox.mjs';
+import { createWatchBatcher } from './watchBatcher.mjs';
 import { openSqlite } from './sqliteDb.mjs';
 import { decodeInt8, int8Cosine, tokenize } from './textIndex.mjs';
 
@@ -39,6 +40,10 @@ const MAX_HEAD_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_IDENTIFIERS = 200;
 const STAT_CONCURRENCY = 64;
 const WATCH_DEBOUNCE_MS = 800;
+/** Lô theo dõi chạy chậm nhất sau chừng này kể từ sự kiện đầu (tệp bị ghi liên tục không giữ lô mãi) — 02/11/2026. */
+const WATCH_MAX_WAIT_MS = 5_000;
+/** Quá chừng này đường dẫn chờ → bỏ danh sách, quét lại tăng dần cả cây. */
+const WATCH_MAX_PENDING = 5_000;
 /** Từ trong câu hỏi dài từ chừng này trở lên thì khớp cả tiền tố ("auth" ↔ "authentication"). */
 const PREFIX_MIN = 4;
 /** Số vector đọc mỗi lần khi tìm theo nghĩa. */
@@ -481,12 +486,20 @@ export function createFileIndex(roots) {
    * Tệp bộ theo dõi báo đổi: có lập chỉ mục không, và có nằm trong kho git không. null = bỏ (thư mục ẩn / rác, tệp tạm, trong thư mục ứng
    * dụng, tệp không phải tài liệu trong thư mục hàng loạt hay kho git).
    */
-  function ruleFor(abs) {
+  /** Phần rẻ của `ruleFor` (không duyệt danh sách thư mục gộp): thư mục / tệp gốc của đường dẫn, null = bỏ ngay. */
+  function watchBase(abs) {
     const folder = indexFolders.filter((d) => within(d, abs)).sort((a, b) => b.length - a.length)[0];
     const base = folder || resolvedRoots.find((r) => within(r, abs));
     if (!base || isProtectedPath(abs)) return null;
     const segs = path.relative(base, abs).split(path.sep);
     if (segs.slice(0, -1).some((d) => skipDir(d, activeExcludes)) || skipFile(segs[segs.length - 1], activeExcludes)) return null;
+    return { base, folder };
+  }
+
+  function ruleFor(abs) {
+    const hit = watchBase(abs);
+    if (!hit) return null;
+    const { base, folder } = hit;
     let repo = false;
     for (const c of collapsed) {
       // Chỉ thư mục gộp nằm GIỮA gốc và tệp; gộp bao trùm cả gốc (thư mục làm việc nằm trong một kho git…) không tính.
@@ -499,13 +512,15 @@ export function createFileIndex(roots) {
     return { repo };
   }
 
-  function watchDir(dir, pending, flush, fallBackToRescan) {
+  function watchDir(dir, fallBackToRescan) {
     if (watchers.has(dir)) return;
     try {
       const w = fs.watch(dir, { recursive: true }, (_event, name) => {
         if (!name) return;
-        pending.add(path.join(dir, String(name)));
-        flush();
+        const abs = path.join(dir, String(name));
+        // Lọc ngay (thư mục ẩn / rác / node_modules…, 02/11/2026): sự kiện của đường bị bỏ không giữ lô chờ, không vào tập chờ.
+        if (!watchBase(abs)) return;
+        batcher?.add(abs);
       });
       // Không có listener 'error' thì lỗi của bộ theo dõi (gốc bị xoá, rút ổ ngoài, hết inotify) ném ra ngoài và làm sập daemon.
       w.on('error', () => {
@@ -519,14 +534,11 @@ export function createFileIndex(roots) {
   }
 
   let rewatch = () => {};
+  let batcher = null;
 
   function watch() {
     watching = true;
-    const pending = new Set();
-    let timer;
-    const run = async () => {
-      const batch = [...pending];
-      pending.clear();
+    const run = async (batch) => {
       const cloud = [];
       await mapLimit(batch, STAT_CONCURRENCY, async (abs) => {
         const rule = ruleFor(abs);
@@ -536,10 +548,12 @@ export function createFileIndex(roots) {
       await refreshCloud(cloud);
       scheduleVectorize(5_000);
     };
-    const flush = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => void run(), WATCH_DEBOUNCE_MS);
-    };
+    // Có trần chờ (maxWait) + trần cỡ tập chờ: quá → quét lại tăng dần cả cây thay vì giữ hàng chục nghìn đường dẫn (watchBatcher.mjs).
+    batcher?.close();
+    batcher = createWatchBatcher({
+      debounceMs: WATCH_DEBOUNCE_MS, maxWaitMs: WATCH_MAX_WAIT_MS, maxPending: WATCH_MAX_PENDING,
+      onBatch: run, onOverflow: () => build().catch(() => undefined),
+    });
     const fallBackToRescan = () => {
       // Bộ theo dõi hỏng: chuyển sang quét lại định kỳ (tăng dần — chỉ đọc tệp có mtime / size đổi).
       if (rescanTimer) return;
@@ -549,7 +563,7 @@ export function createFileIndex(roots) {
     rewatch = () => {
       const want = [...resolvedRoots, ...indexFolders.filter((d) => !resolvedRoots.some((r) => within(r, d)))];
       for (const [dir, w] of watchers) if (!want.includes(dir)) { try { w.close(); } catch { /* đã đóng */ } watchers.delete(dir); }
-      for (const dir of want) watchDir(dir, pending, flush, fallBackToRescan);
+      for (const dir of want) watchDir(dir, fallBackToRescan);
     };
     rewatch();
     // `aivin remote index add|remove` (tiến trình khác) sửa danh sách → quét lại tăng dần.
@@ -655,6 +669,8 @@ export function createFileIndex(roots) {
     if (rescanTimer) { clearInterval(rescanTimer); rescanTimer = null; }
     for (const w of watchers.values()) { try { w.close(); } catch { /* đã đóng */ } }
     watchers.clear();
+    batcher?.close();
+    batcher = null;
     if (watching) {
       fs.unwatchFile(INDEX_FOLDERS_FILE);
       fs.unwatchFile(INDEX_EXCLUDES_FILE);

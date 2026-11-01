@@ -11,7 +11,8 @@
  *   bấm → `{ t: 'voice_start', window }`, daemon mở phiên thoại trên BE rồi gửi `voice_begin { in_rate, out_rate }` → mở mic + loa (voiceSource.mjs,
  *   âm thanh đi thẳng giữa C# và stdin/stdout). Đang nghe mà bấm → `voice_stop`; bot đang nói mà bấm → `voice_interrupt` (ngắt lời; có
  *   khử tiếng vọng thì nói chen bằng giọng cũng được). BE cũ chưa có nói chuyện: `voice_begin { state: 'recording' }` — nói xong bấm mic để gửi.
- *   Phím tắt (Ctrl+Alt+Space, bị chiếm thì Win+Alt+Space / Ctrl+Alt+V; hiện trong chú thích nút mic) ở đâu cũng = bấm mic. Trạng thái "đang nói" giữ tới khi loa im thật (BE báo xong sớm hơn loa phát hết); mặt bot theo
+ *   Phím tắt nói (`hotkeys.voice` trong config.json do daemon ghi theo hotkey.mjs — mặc định Win+Alt+Space, chủ máy đặt riêng / tắt bằng
+ *   `aivin remote mascot hotkey`; hiện trong chú thích nút mic) ở đâu cũng = bấm mic; phím tắt chat (`hotkeys.chat`) = mở ô hỏi. Trạng thái "đang nói" giữ tới khi loa im thật (BE báo xong sớm hơn loa phát hết); mặt bot theo
  *   trạng thái nói chuyện (nghe / nghĩ / nói).
  * - `window` = `{ window: '0x..', title, process }` của cửa sổ chủ máy đang dùng ngay trước khi rê / bấm vào bot hay nhấn phím tắt (không tính
  *   chính bot, thanh tác vụ, màn nền), hoặc null — để "cái này" trong câu hỏi trỏ đúng cửa sổ đó.
@@ -55,7 +56,6 @@ namespace AivinMascotAsk {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
-    [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr h, int id, uint mods, uint vk);
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
     public static bool ClickOutside() { return (GetAsyncKeyState(1) & 0x8000) != 0; }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
@@ -297,18 +297,17 @@ function ChatRow($m) {
     $rise = New-Object Windows.Media.Animation.DoubleAnimation 6, 0, ([TimeSpan]::FromMilliseconds(240)); $rise.EasingFunction = $ease
     $b.BeginAnimation([Windows.UIElement]::OpacityProperty, $fade); $slide.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $rise)
     $row = @{ box = $b; text = $tb; url = $null }
-    $b.Add_MouseLeftButtonUp({
-      if ($row.url) { try { [System.Diagnostics.Process]::Start([string]$row.url) } catch {} }
-    })
+    # The link rides on the bubble itself (Tag, updated below): the handler is not a closure, $row at click time is not this row.
+    $b.Add_MouseLeftButtonUp({ param($s) OpenWebUrl $s.Tag })
     if ($id) { $script:chatRows[$id] = $row }
     while ($list.Children.Count -gt 40) { $list.Children.RemoveAt(0) }
   }
   if ($m.url) {
-    $row.url = [string]$m.url
+    $row.url = [string]$m.url; $row.box.Tag = [string]$m.url
     $row.box.Cursor = [Windows.Input.Cursors]::Hand
     $row.box.ToolTip = [string]$m.url
   } else {
-    $row.url = $null
+    $row.url = $null; $row.box.Tag = $null
     $row.box.Cursor = [Windows.Input.Cursors]::Arrow
     $row.box.ToolTip = $null
   }
@@ -475,38 +474,36 @@ function VoiceToggle {
   elseif (StopMode) { $script:canCancel = $false; (E 'MicBtn').Opacity = 0.5; SyncAction; Send @{ t = 'cancel' } }
   else { VoiceToggle }
 })
-# A hotkey anywhere = the mic button (no need to reach for the bot): the first free of Ctrl+Alt+Space, Win+Alt+Space, Ctrl+Alt+V
-# (other apps often hold the first one). Shown in the mic button's tooltip; none free -> no hotkey.
+# Hotkeys anywhere (no need to reach for the bot): voice = the mic button, chat = open the ask box. Each is the first free combination of
+# the list the daemon wrote into config.json (hotkey.mjs: the owner's own choice first, then the defaults; "hotkey off" = empty lists ->
+# none). Shown in the mic button's tooltip / the panel; none free -> no hotkey. WM_HOTKEY is filtered in C# (AivinMascot.HotKeys).
+function RegisterKeyList($id, $list) {
+  $keys = @(@($list) | Where-Object { $_ -and $_.n })
+  if (-not $keys.Count) { return $null }
+  $mods = [uint32[]]@($keys | ForEach-Object { [uint32]$_.m }); $vks = [uint32[]]@($keys | ForEach-Object { [uint32]$_.v })
+  $i = [AivinMascot.HotKeys]::RegisterFirst($script:hwnd, $id, $mods, $vks)
+  if ($i -lt 0) { Dbg ('hotkey ' + $id + ': none free'); return $null }
+  [string]$keys[$i].n
+}
 $w.Add_ContentRendered({
   if (-not $script:hwnd) { return }
   # Quick buttons in Panel
   (E 'QuickChatBtn').Add_Click({ OpenAsk; (E 'AskBox').Focus() })
   (E 'QuickVoiceBtn').Add_Click({ VoiceToggle })
 
-  # Global system hotkeys
-  $voiceKeys = @(@{ n = 'Ctrl+Alt+Space'; m = 0x4003; v = 0x20 }, @{ n = 'Win+Alt+Space'; m = 0x4009; v = 0x20 }, @{ n = 'Ctrl+Alt+V'; m = 0x4003; v = 0x56 })
-  $voiceKey = $null
-  foreach ($k in $voiceKeys) { if ([AivinMascotAsk.Native]::RegisterHotKey($script:hwnd, 0xA171, $k.m, $k.v)) { $voiceKey = $k; break } }
+  $voiceKey = RegisterKeyList 0xA171 $cfg.hotkeys.voice
   if ($voiceKey) {
-    (E 'QuickVoiceKey').Text = $voiceKey.n
-    $T.ask_mic = "$($T.ask_mic) ($($voiceKey.n))"; SyncAction
+    (E 'QuickVoiceKey').Text = $voiceKey
+    $T.ask_mic = "$($T.ask_mic) ($voiceKey)"; SyncAction
+  } else { (E 'QuickVoiceKey').Parent.Visibility = 'Collapsed' }
+  $chatKey = RegisterKeyList 0xA172 $cfg.hotkeys.chat
+  if ($chatKey) { (E 'QuickChatKey').Text = $chatKey } else { (E 'QuickChatKey').Parent.Visibility = 'Collapsed' }
+  if ($voiceKey -or $chatKey) {
+    [AivinMascot.HotKeys]::Start($script:hwnd, [Action[int]]{ param($id)
+      if ($id -eq 0xA171) { VoiceToggle }
+      elseif ($id -eq 0xA172) { OpenAsk; [void](E 'AskBox').Focus() }
+    })
   }
-
-  $chatKeys = @(@{ n = 'Ctrl+Alt+C'; m = 0x4003; v = 0x43 }, @{ n = 'Win+Alt+C'; m = 0x4009; v = 0x43 }, @{ n = 'Ctrl+Shift+Space'; m = 0x4006; v = 0x20 })
-  $chatKey = $null
-  foreach ($k in $chatKeys) { if ([AivinMascotAsk.Native]::RegisterHotKey($script:hwnd, 0xA172, $k.m, $k.v)) { $chatKey = $k; break } }
-  if ($chatKey) {
-    (E 'QuickChatKey').Text = $chatKey.n
-  }
-
-  [System.Windows.Interop.HwndSource]::FromHwnd($script:hwnd).AddHook([System.Windows.Interop.HwndSourceHook]{
-    param($h, $msg, $wp, $lp, [ref]$handled)
-    if ($msg -eq 0x0312) {
-      if ($wp.ToInt32() -eq 0xA171) { VoiceToggle; $handled.Value = $true }
-      elseif ($wp.ToInt32() -eq 0xA172) { OpenAsk; (E 'AskBox').Focus(); $handled.Value = $true }
-    }
-    [IntPtr]::Zero
-  })
 })
 
 # Route the ask-box commands; everything else goes to the base handler of hostSource.mjs.

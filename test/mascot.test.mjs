@@ -257,8 +257,109 @@ test('ngôn ngữ linh vật: nhận ngôn ngữ từ người dùng liên kết
   m.setLang('vi');
   assert.equal(m.lang, 'vi');
 
-  // Dựng lại cửa sổ với ngôn ngữ mới
-  await sleep(250);
+  // Dựng lại cửa sổ với ngôn ngữ mới (cửa sổ cũ được báo quit, không tự thoát thì bị kill sau 300 ms)
+  await sleep(400);
   assert.ok(host.spawned.length >= 2, 'cửa sổ được dựng lại với ngôn ngữ mới');
   m.close();
+});
+
+test('ngôn ngữ ban đầu = ngôn ngữ đã lưu → HELLO cùng ngôn ngữ không dựng lại cửa sổ; đang nói chuyện thì chờ xong mới dựng lại, không tính là lần chết', async () => {
+  const { m, host } = makeMascot({ lang: 'vi', env: {}, restartDelaysMs: [] });
+  m.setLang('vi');
+  await sleep(400);
+  assert.equal(host.spawned.length, 1, 'cùng ngôn ngữ: không kill / mở lại');
+  const first = host.spawned[0];
+  first.send({ t: HostEvent.READY });
+  first.send({ t: HostEvent.VOICE_START });
+  await tick();
+  m.setLang('en');
+  assert.equal(m.lang, 'en');
+  await sleep(400);
+  assert.equal(host.spawned.length, 1, 'đang nói chuyện: chưa dựng lại');
+  assert.ok(!first.sent.some((c) => c.t === HostCommand.QUIT));
+  first.send({ t: HostEvent.VOICE_STOP });
+  await sleep(400);
+  assert.equal(host.spawned.length, 2, 'nói xong → dựng lại ngay (restartDelaysMs rỗng vẫn mở: không tính là cửa sổ chết)');
+  assert.ok(first.sent.some((c) => c.t === HostCommand.QUIT));
+  m.close();
+});
+
+test('tin chat tới lúc cửa sổ chưa sẵn sàng → giữ lại (dòng cập nhật theo id), gửi khi ready; url lạ trong báo bị bỏ', async () => {
+  const { m, host } = makeMascot();
+  m.chat({ t: 'chat', role: 'user', id: 'u1', text: 'hỏi' });
+  m.chat({ t: 'chat', role: 'assistant', id: 'a1', text: 'đang viết', partial: true });
+  m.chat({ t: 'chat', role: 'assistant', id: 'a1', text: 'xong rồi' });
+  m.chat({ t: 'chat_busy', busy: false });
+  m.alert({ kind: 'done', text: 'Xong việc', url: 'file:///C:/Windows/System32/calc.exe' });
+  const child = host.spawned[0];
+  assert.equal(child.sent.length, 0, 'chưa ready: chưa gửi gì');
+  child.send({ t: HostEvent.READY });
+  await tick();
+  const chats = child.sent.filter((c) => c.t === 'chat');
+  assert.deepEqual(chats.map((c) => c.text), ['hỏi', 'xong rồi']);
+  assert.ok(child.sent.some((c) => c.t === 'chat_busy' && c.busy === false));
+  assert.ok(!child.sent.some((c) => c.url), 'không gửi url file: cho cửa sổ');
+  m.alert({ kind: 'done', text: 'Xong việc 2', url: 'https://beta.aivin.vn/?session_id=s1' });
+  assert.ok(child.sent.some((c) => c.t === HostCommand.MAIN && c.url === 'https://beta.aivin.vn/?session_id=s1'));
+  m.close();
+});
+
+test('mascot.json: ghi nguyên tử, giữ phím tắt khi lưu vị trí; tệp hỏng thì không ghi đè', async () => {
+  const { saveMascotSettings, MascotSettingsUnreadable } = await import('../bin/lib/remote/mascot/index.mjs');
+  const dir = tmp();
+  const file = path.join(dir, 'mascot.json');
+  saveMascotSettings({ hotkey: 'Win+Alt+K', notify_freq: 2 }, file);
+  saveMascotSettings({ x: 10, y: 20 }, file);
+  assert.deepEqual(loadMascotSettings(file), { enabled: true, notify_freq: 2, hotkey: 'Win+Alt+K', x: 10, y: 20 });
+  saveMascotSettings({ hotkey: null }, file);
+  assert.equal(loadMascotSettings(file).hotkey, undefined, 'hotkey default = bỏ khoá');
+  assert.deepEqual(fs.readdirSync(dir), ['mascot.json'], 'không sót tệp tạm');
+  fs.writeFileSync(file, '{"enabled": false, "x": 1, "y"');
+  assert.throws(() => saveMascotSettings({ x: 5, y: 6 }, file), MascotSettingsUnreadable);
+  assert.equal(fs.readFileSync(file, 'utf8'), '{"enabled": false, "x": 1, "y"', 'tệp hỏng giữ nguyên');
+  fs.writeFileSync(file, '\uFEFF{"enabled": false}');
+  assert.equal(loadMascotSettings(file).enabled, false, 'đọc được tệp có BOM');
+});
+
+test('config.json của cửa sổ mang danh sách phím tắt theo mascot.json; hotkey off → rỗng', async () => {
+  const { writeHostFiles } = await import('../bin/lib/remote/mascot/index.mjs');
+  const dir = tmp();
+  const cfg = (settings) => JSON.parse(fs.readFileSync(path.join(writeHostFiles({ dir, lang: 'vi', settings }), 'config.json'), 'utf8'));
+  const def = cfg({}).hotkeys;
+  assert.deepEqual(def.voice[0], { n: 'Win+Alt+Space', m: 0x4009, v: 0x20 });
+  assert.equal(def.chat[0].n, 'Win+Alt+C');
+  assert.equal(cfg({ hotkey: 'ctrl+shift+f9' }).hotkeys.voice[0].n, 'Ctrl+Shift+F9');
+  assert.deepEqual(cfg({ hotkey: 'off' }).hotkeys, { voice: [], chat: [] });
+});
+
+test('host.ps1: phím tắt đọc từ config + lọc WM_HOTKEY trong C# (không hook PowerShell); mở link chỉ qua OpenWebUrl (http/https)', async () => {
+  const { hostScript } = await import('../bin/lib/remote/mascot/index.mjs');
+  const script = hostScript();
+  assert.ok(script.includes('$cfg.hotkeys.voice') && script.includes('$cfg.hotkeys.chat'));
+  assert.ok(script.includes('public static class HotKeys') && script.includes('msg == 0x0312'));
+  assert.ok(!script.includes('[System.Windows.Interop.HwndSourceHook]{'), 'không còn hook bằng scriptblock PowerShell');
+  assert.ok(!/Ctrl\+Alt\+(Space|V|C)'/.test(script), 'không còn tổ hợp cứng');
+  assert.equal((script.match(/Diagnostics\.Process\]::Start\(/g) || []).length, 1, 'chỉ một chỗ Process.Start — trong OpenWebUrl');
+  assert.ok(script.includes("$uri.Scheme -eq 'http' -or $uri.Scheme -eq 'https'"));
+});
+
+test('mã C# nhúng của cửa sổ linh vật biên dịch được (Windows có .NET Framework)', { skip: process.platform !== 'win32', timeout: 120_000 }, async () => {
+  const { execFileSync } = await import('child_process');
+  const { hostScript } = await import('../bin/lib/remote/mascot/index.mjs');
+  const fw = path.join(process.env.WINDIR || 'C:/Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319');
+  const csc = path.join(fw, 'csc.exe');
+  if (!fs.existsSync(csc)) return;
+  const blocks = [...hostScript().matchAll(/-TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/g)].map((x) => x[1]);
+  assert.ok(blocks.length >= 2, 'khối Add-Type của cửa sổ + ô hỏi');
+  const dir = tmp();
+  const wpf = path.join(fw, 'WPF');
+  const refs = ['PresentationCore.dll', 'PresentationFramework.dll', 'WindowsBase.dll'].map((r) => `-r:${path.join(wpf, r)}`).concat(['-r:System.Xaml.dll']);
+  blocks.forEach((src, i) => {
+    const file = path.join(dir, `b${i}.cs`);
+    fs.writeFileSync(file, src);
+    const out = (() => {
+      try { return execFileSync(csc, ['-nologo', '-codepage:65001', '-target:library', `-out:${path.join(dir, `b${i}.dll`)}`, ...refs, file], { encoding: 'utf8' }); } catch (e) { return String(e.stdout || e.message); }
+    })();
+    assert.doesNotMatch(out, /error CS\d+/, out);
+  });
 });

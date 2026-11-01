@@ -207,6 +207,14 @@ export function createGuiController({
    */
   const target = (args) => (args.window ? { window: args.window } : { ...defaultWindow() });
   const windowInfoOf = (args, ctx) => host.call('window_info', target(args), ctx);
+  /**
+   * Thao tác có thay đổi mà không nêu cửa sổ (02/11/2026): không lấy cửa sổ đang focus — người dùng có thể vừa chuyển sang cửa sổ khác. Chỉ
+   * cho khi hỏi từ linh vật (có cửa sổ chủ máy dùng ngay trước đó); host kiểm lại đúng lúc thao tác (linh vật có đang được focus không).
+   */
+  const assertWindowNamed = (windowArg) => {
+    if (windowArg || defaultWindow()?.fallback) return;
+    throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Name the window for this action (window / within: a handle 0x… or a title/process from gui.windows) — input is never sent to whatever window happens to be focused');
+  };
 
   async function observe(args, ctx) {
     const res = await host.call('observe', {
@@ -258,6 +266,7 @@ export function createGuiController({
       key: GuiAction.KEY, scroll: GuiAction.SCROLL,
     }[command];
     if (!action) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Unknown semantic action: ${args.do || ''}`);
+    assertWindowNamed(args.within || args.window);
 
     if ((command === 'key' || command === 'scroll') && !args.target) {
       const result = await act({
@@ -337,6 +346,8 @@ export function createGuiController({
     const action = String(args.action || GuiAction.CLICK);
     if (!Object.values(GuiAction).includes(action)) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Unknown action: ${action}`);
     const snap = args.node_id ? String(args.node_id).split('.')[0] : null;
+    // node_id đã chỉ đúng phần tử của một lần observe (kèm cửa sổ của nó) — chỉ thao tác không node_id mới phải nêu cửa sổ.
+    if (!snap) assertWindowNamed(args.window);
     const windowInfo = snap ? snapshotWindows.get(snap) : await windowInfoOf(args, ctx);
     if (snap && !windowInfo) throw new DeviceToolError(DeviceErrorCode.GUI_STALE_NODE, `Node ${args.node_id} is from an old observation — observe again`);
     assertWindowAllowed(windowInfo, { fullAccess });
@@ -415,21 +426,21 @@ export function createGuiController({
 export function buildGuiTools(gui) {
   const target = {
     node_id: str('target element id from the latest gui.observe (preferred)'),
-    window: str('window handle (0x…) or a title/process to match; default the focused window (asked from the mascot: the window the person was using)'),
+    window: str('window handle (0x…) or a title/process to match; reading defaults to the focused window, but an action without node_id must name it (asked from the mascot: the window the person was using)'),
   };
   return [
     { name: 'gui.do', group: ToolGroup.GUI, handler: (a, c, e) => gui.semanticDo(a, c, e),
       description: 'Fast semantic desktop action. State the intent briefly; the device finds one enabled visible target, refuses ambiguity, acts, and verifies simple value/state changes. Use precise gui.find/gui.act only after an ambiguous result.',
       input_schema: schema({
         do: str('click | fill | select | toggle | key | scroll | open'), target: str('short visible label or app name'),
-        value: str('text, option, on/off, key chord, or scroll direction'), within: str('optional window title/process'),
+        value: str('text, option, on/off, key chord, or scroll direction'), within: str('window title/process to act in (required, except when asked from the mascot)'),
         role: str('optional role such as button or edit'), file: str('document path for open'),
       }, ['do']) },
     { name: 'gui.windows', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.windows(a, c),
       description: 'List open desktop windows: title, app process, handle, position, which is focused/minimized. blocked = the AI may not control it.',
       input_schema: schema({ include_dialogs: bool('also list owned dialogs') }) },
     { name: 'gui.observe', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.observe(a, c),
-      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window.',
+      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window. image_error = no screenshot this time (the app can only be captured from the screen and the window is behind/covered — gui.focus it first if a screenshot is needed).',
       input_schema: schema({
         window: target.window, include_image: bool('attach a screenshot even when the tree is good'), max_nodes: num('default 300'),
         ocr: bool('read the text on the window even when the tree is good (default: only when poor)'),
@@ -451,7 +462,7 @@ export function buildGuiTools(gui) {
       description: 'Bring a window to the front (restores it if minimized).',
       input_schema: schema({ window: target.window }, ['window']) },
     { name: 'gui.act', group: ToolGroup.GUI, handler: (a, c) => gui.act(a, c),
-      description: 'Do one action on an element (node_id) or at a point of the last screenshot: click, double_click, right_click, set_value (replace a field\'s text), type (keystrokes into the focused element), key (shortcut like "ctrl+s", "alt+f4", "enter"), scroll, select (option of a list/combo), toggle, expand, collapse, drag. Uses accessibility actions first (works even when the window is behind), real mouse/keyboard otherwise. Returns evidence: the element\'s new value/state, window title change, focused element. OCR text nodes ("4.t2") take click / double_click / right_click, or set_value / type (clicks there, then types). Stops with GUI_USER_ACTIVE if the person is using the mouse/keyboard.',
+      description: 'Do one action on an element (node_id) or at a point of the last screenshot: click, double_click, right_click, set_value (replace a field\'s text), type (keystrokes into the focused element), key (shortcut like "ctrl+s", "alt+f4", "enter"), scroll, select (option of a list/combo), toggle, expand, collapse, drag. Uses accessibility actions first (works even when the window is behind), real mouse/keyboard otherwise. Returns evidence: the element\'s new value/state, window title change, focused element. OCR text nodes ("4.t2") take click / double_click / right_click, or set_value / type (clicks there, then types). Without node_id give window. Stops with GUI_USER_ACTIVE if the person is using the mouse/keyboard, and with GUI_FOCUS_LOST (nothing clicked / the rest not typed) if real mouse/keyboard input could not reach the window — it could not come to the front, or another window covers the point.',
       input_schema: schema({
         action: str(Object.values(GuiAction).join(' | ')), ...target, text: str('text for set_value / type'), keys: str('for key: e.g. "ctrl+s", several separated by spaces'),
         option: str('for select: the option name'), state: str('for toggle: on | off'), direction: str('for scroll: up | down | left | right'), amount: num('scroll steps, default 3'),

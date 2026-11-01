@@ -231,8 +231,13 @@ export function withProcessCap(cmd, argv, { platform = process.platform, exists 
   return [PRLIMIT, [`--nproc=${n}:${n}`, '--', cmd, ...argv]];
 }
 
-/** Công cụ bị chặn khi hết dung lượng — đọc, liệt kê, xoá vẫn chạy để người dùng tự dọn chỗ. */
-export const QUOTA_GUARDED_TOOLS = new Set(['fs.write', 'fs.edit', 'fs.move', 'fs.move_many', 'fs.undo', 'shell.exec', 'proc.start']);
+/**
+ * Công cụ bị chặn khi hết dung lượng — đọc, liệt kê, xoá vẫn chạy để người dùng tự dọn chỗ. 02/11/2026 thêm `fs.copy` (chép cả thư mục),
+ * `fs.download` (tệp lớn qua HTTP), `proc.write` (gõ tiếp vào tiến trình nền — lệnh mới có thể ghi đĩa).
+ */
+export const QUOTA_GUARDED_TOOLS = new Set([
+  'fs.write', 'fs.edit', 'fs.copy', 'fs.move', 'fs.move_many', 'fs.undo', 'fs.download', 'shell.exec', 'proc.start', 'proc.write',
+]);
 const DISK_MEASURE_MS = 60_000;
 const DISK_RESERVE_MB = 64;
 const DISK_WARN_RATIO = 0.9;

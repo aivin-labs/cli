@@ -25,6 +25,7 @@ let sharedAgents = null;
 import { buildScheduleTools } from './schedule.mjs';
 import { buildWatchTools } from './deviceWatches.mjs';
 import { buildTransferTools } from './httpTransfer.mjs';
+import { safeGitArgv, safeGitEnv } from './gitSafe.mjs';
 import { buildMeetingTools } from './meeting/index.mjs';
 import { buildClipboardTools } from './clipboard.mjs';
 
@@ -626,9 +627,10 @@ async function systemInfo(_args, _ctx, env) {
   };
 }
 
+/** git chỉ đọc — không để cấu hình / hook / biến môi trường của kho chạy chương trình (gitSafe.mjs, 02/11/2026). */
 async function git(argv, args, ctx, env) {
   const cwd = resolveInRoots(env.roots, args.path || '');
-  const res = await runProcess('git', ['-C', cwd, ...argv], { cwd, signal: ctx.signal, maxOutput: 512 * 1024, runAs: env.runAs });
+  const res = await runProcess('git', safeGitArgv(cwd, argv), { cwd, signal: ctx.signal, maxOutput: 512 * 1024, runAs: env.runAs, env: safeGitEnv(scrubEnv()) });
   return { cwd: displayPath(env.roots, cwd), ...res };
 }
 

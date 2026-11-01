@@ -7,6 +7,9 @@ const UNSENT_KEEP_MS = 15 * 60_000;
 /** Kết quả đã gửi vẫn nhớ thêm chừng này (BE gửi lại đúng `call_id` vì ACK / kết quả lỡ mất → trả lại kết quả cũ, không chạy lần hai). */
 const SENT_KEEP_MS = 3 * 60_000;
 const MAX_UNSENT = 200;
+/** Gửi lại kết quả chưa có ack khi socket vẫn nối: lần đầu sau ~30 s (ack chờ 15 s), giãn gấp đôi, tối đa 4 phút. */
+const RESEND_BASE_MS = 30_000;
+const RESEND_MAX_MS = 4 * 60_000;
 /** Kết quả lớn hơn không ghi xuống đĩa (chỉ giữ trong bộ nhớ) — daemon chết thì BE nhận lỗi thay vì nội dung. */
 const PERSIST_RESULT_BYTES = 4 * 1024 * 1024;
 
@@ -180,6 +183,24 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
       if (changed) schedulePersist();
     },
     unsent: () => [...calls.values()].filter((e) => e.state === CallState.DONE && !e.sent).map((e) => e.payload),
+    /** Vừa gửi kết quả này (chờ ack) — `dueForResend` giãn nhịp theo số lần đã gửi. */
+    markAttempt(callId) {
+      const e = calls.get(callId);
+      if (!e || e.state !== CallState.DONE || e.sent) return;
+      e.attempts = (e.attempts || 0) + 1;
+      e.attemptAt = now();
+    },
+    /**
+     * Kết quả đã gửi mà chưa có ack quá hạn giãn nhịp (02/11/2026): máy chủ quá tải làm lỡ ack khi socket vẫn nối thì trước đây chỉ gửi lại
+     * lúc nối lại — BE chờ tới hết giờ rồi agent chạy lại bước. Nhịp: `baseMs` × 2^(lần−1), tối đa `maxMs`; mục chưa gửi lần nào không
+     * tính (đường gửi thường lo). Cùng `call_id` → BE bỏ bản trùng.
+     */
+    dueForResend({ baseMs = RESEND_BASE_MS, maxMs = RESEND_MAX_MS } = {}) {
+      const t = now();
+      return [...calls.values()]
+        .filter((e) => e.state === CallState.DONE && !e.sent && e.attempts > 0 && t - e.attemptAt >= Math.min(maxMs, baseMs * 2 ** (e.attempts - 1)))
+        .map((e) => e.payload);
+    },
     heldIds: () => [...calls.entries()].filter(([, e]) => e.state === CallState.RUNNING || (e.state === CallState.DONE && !e.sent)).map(([id]) => id),
     runningIds: () => [...calls.entries()].filter(([, e]) => e.state === CallState.RUNNING).map(([id]) => id),
     prune,

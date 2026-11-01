@@ -484,3 +484,59 @@ test('khoá ký phát hành: thư mục ~/.aivin-release bị chặn với công
     if (prev === undefined) delete process.env.AIVIN_RELEASE_KEY_PASSPHRASE; else process.env.AIVIN_RELEASE_KEY_PASSPHRASE = prev;
   }
 });
+
+test('02/11/2026: đã có bản chờ khởi động lại → không cài lại, không đè .prev; cài bản mới hơn nữa vẫn giữ .prev là bản đang chạy', async () => {
+  const { target, opts } = sandbox();
+  const first = await serve(release('v1.0.8', 'BUILD 108'));
+  try {
+    assert.equal((await installUpdate({ ...opts, root: first.root })).status, UpdateStatus.INSTALLED);
+    const gzHits = first.hits.filter((u) => u.endsWith('.gz')).length;
+    // Máy chủ gửi UPDATE → kiểm lại: đĩa đã có v1.0.8 → không tải, không thay tệp.
+    const again = await installUpdate({ ...opts, root: first.root });
+    assert.equal(again.status, UpdateStatus.INSTALLED);
+    assert.equal(again.already, true);
+    assert.equal(first.hits.filter((u) => u.endsWith('.gz')).length, gzHits);
+    assert.equal(fs.readFileSync(`${target}.prev`, 'utf8'), 'OLD BUILD');
+  } finally {
+    await first.close();
+  }
+  const second = await serve(release('v1.0.9', 'BUILD 109'));
+  try {
+    assert.equal((await installUpdate({ ...opts, root: second.root })).status, UpdateStatus.INSTALLED);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'BUILD 109');
+    assert.equal(fs.readFileSync(`${target}.prev`, 'utf8'), 'OLD BUILD', '.prev vẫn là bản đang chạy (1.0.7), không phải bản 1.0.8 chưa từng chạy');
+  } finally {
+    await second.close();
+  }
+});
+
+test('02/11/2026: replaceBinary keepBackup giữ nguyên .prev', () => {
+  const dir = tmpDir();
+  const target = path.join(dir, 'aivin');
+  const fresh = path.join(dir, 'fresh');
+  fs.writeFileSync(target, 'PENDING');
+  fs.writeFileSync(`${target}.prev`, 'RUNNING');
+  fs.writeFileSync(fresh, 'NEWER');
+  assert.equal(replaceBinary({ newFile: fresh, target, keepBackup: true }), `${target}.prev`);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'NEWER');
+  assert.equal(fs.readFileSync(`${target}.prev`, 'utf8'), 'RUNNING');
+  assert.equal(fs.existsSync(`${target}.new`), false);
+});
+
+test('02/11/2026: tự cập nhật — đã có bản chờ (ready / đĩa có bản mới) thì checkNow không gọi cài; máy chủ đòi bản cao hơn thì vẫn cài', async () => {
+  const calls = [];
+  const u = createAutoUpdater({
+    supervised: true, tickMs: 1e9, firstCheckMs: 1e9, current: '1.0.7', installedNewer: () => 'v1.0.8', settings: () => ({ auto: true, skip: [] }),
+    install: async (o) => { calls.push(o); return { status: UpdateStatus.UP_TO_DATE, latest: 'v1.0.9', current: 'v1.0.7' }; }, record: () => {},
+  });
+  try {
+    const res = await u.checkNow({ urgent: true });
+    assert.equal(res.already, true);
+    assert.equal(calls.length, 0);
+    u.setMinVersion('1.0.9');
+    await u.checkNow({ urgent: true });
+    assert.equal(calls.length, 1);
+  } finally {
+    u.close();
+  }
+});

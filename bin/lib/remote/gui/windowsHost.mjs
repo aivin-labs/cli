@@ -15,6 +15,8 @@ import { WINDOWS_HOST_CSHARP, WINDOWS_HOST_PS1 } from './windowsHostSource.mjs';
 
 const GUI_DIR = path.join(REMOTE_CONFIG_DIR, 'gui');
 const READY_TIMEOUT_MS = 60_000;
+/** PID các bản Excel / Word ẩn host đang giữ (officeHostSource.mjs) — host bị giết giữa chừng thì lần khởi động sau dọn (02/11/2026). */
+export const OFFICE_ORPHANS_FILE = path.join(GUI_DIR, 'office-orphans.txt');
 
 function hostFiles() {
   const hash = createHash('sha256').update(WINDOWS_HOST_CSHARP).update(WINDOWS_HOST_PS1).digest('hex').slice(0, 16);
@@ -54,7 +56,7 @@ export function createWindowsHost({ spawnImpl = spawn } = {}) {
     starting = new Promise((resolve, reject) => {
       const files = hostFiles();
       const c = spawnImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', files.ps1], {
-        env: { ...process.env, AIVIN_GUI_SRC: files.src, AIVIN_GUI_DLL: files.dll },
+        env: { ...process.env, AIVIN_GUI_SRC: files.src, AIVIN_GUI_DLL: files.dll, AIVIN_GUI_ORPHANS: OFFICE_ORPHANS_FILE },
         windowsHide: true,
       });
       child = c;

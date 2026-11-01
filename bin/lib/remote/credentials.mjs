@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto';
 import { DEVICE_API_PREFIX, DEVICE_CREDENTIALS_FILE, DEVICE_ID_FILE, REMOTE_CONFIG_DIR } from './constants.mjs';
 import { parseApiKeyClient } from '../auth.mjs';
 import { TokenStoreKind, forgetToken, openToken, preferredTokenStore, sealToken } from './tokenStore.mjs';
+import { writeFileAtomic } from './atomicFile.mjs';
 
 /** Mã máy ổn định (~/.aivin/device-id.json), giữ qua các lần chạy. */
 export function getOrCreateDeviceId() {
@@ -43,13 +44,32 @@ function readRecord() {
   }
 }
 
+/** Ghi nguyên tử (02/11/2026 — trước đây ghi thẳng, máy tắt / daemon bị giết giữa lúc ghi là tệp cụt → mất ghép máy). */
 function writeRecord(record) {
-  fs.mkdirSync(REMOTE_CONFIG_DIR, { recursive: true });
   const raw = JSON.stringify(record, null, 2) + '\n';
-  fs.writeFileSync(DEVICE_CREDENTIALS_FILE, raw, { mode: 0o600 });
+  writeFileAtomic(DEVICE_CREDENTIALS_FILE, raw);
   try { fs.chmodSync(DEVICE_CREDENTIALS_FILE, 0o600); } catch { /* Windows: quyền theo ACL hồ sơ người dùng */ }
   return raw;
 }
+
+/**
+ * Trường do TỆP làm chủ (02/11/2026) — bản trong bộ nhớ của người gọi có thể đã cũ (daemon nạp lúc khởi động), nên khi lưu luôn lấy theo
+ * tệp trên đĩa, trừ khi đổi tường minh qua tham số:
+ * - `previous_sealed`: token CŨ (cất vào kho bí mật như token chính) giữ tới khi máy chủ xác nhận token xoay vòng mới;
+ * - `policy_sealed_at`: máy này đã từng có luật tại máy CÓ CHỮ KÝ (localPolicy.mjs) — xoá cả tệp luật lẫn tệp khoá không đưa được luật về
+ *   mặc định một cách lặng lẽ.
+ */
+const DISK_OWNED_FIELDS = ['previous_sealed', 'policy_sealed_at'];
+const PREVIOUS_SUFFIX = ':previous';
+
+function sealPrevious(token, deviceId) {
+  const account = `${deviceId}${PREVIOUS_SUFFIX}`;
+  const { fallback_reason: _why, ...sealed } = sealToken(token, { account });
+  return { ...sealed, account };
+}
+
+const openPrevious = (rec) => (rec && typeof rec === 'object' ? openToken({ ...rec, device_id: rec.account }) : null);
+const forgetPrevious = (rec) => { if (rec && typeof rec === 'object') forgetToken({ ...rec, device_id: rec.account }); };
 
 /** Cất vào kho bí mật hỏng gần đây → không thử lại mỗi lần đọc (mỗi lần thử là một tiến trình PowerShell). */
 const SEAL_RETRY_MS = 24 * 3600_000;
@@ -79,13 +99,68 @@ export function loadDeviceCredentials() {
  * Ghi token (kho bí mật của hệ điều hành; hỏng → tệp thường kèm `seal_failed` có lý do để báo người dùng, không lặng lẽ). Trả lý do hỏng
  * (`null` khi cất được hoặc máy vốn không có kho).
  */
-export function saveDeviceCredentials(creds) {
+export function saveDeviceCredentials(creds, { previousToken } = {}) {
   const { device_token: token, token_store: _s, token_enc: _e, seal_failed: _f, ...rest } = creds;
+  for (const f of DISK_OWNED_FIELDS) delete rest[f];
+  const disk = readRecord()?.data || {};
+  // Cùng mã máy → giữ trường của tệp; ghép máy khác thì token cũ không còn nghĩa.
+  const kept = {};
+  if (disk.device_id === creds.device_id && disk.previous_sealed) kept.previous_sealed = disk.previous_sealed;
+  if (disk.policy_sealed_at) kept.policy_sealed_at = disk.policy_sealed_at;
+  if (previousToken !== undefined) {
+    if (kept.previous_sealed) forgetPrevious(kept.previous_sealed);
+    delete kept.previous_sealed;
+    if (previousToken) kept.previous_sealed = sealPrevious(previousToken, creds.device_id);
+  }
   const sealed = sealToken(token, { account: creds.device_id });
   const { fallback_reason: reason, ...stored } = sealed;
-  const raw = writeRecord({ ...rest, ...stored, ...(reason ? { seal_failed: { at: Date.now(), reason } } : {}) });
+  const raw = writeRecord({ ...rest, ...stored, ...kept, ...(reason ? { seal_failed: { at: Date.now(), reason } } : {}) });
   opened = { raw, token };
   return reason || null;
+}
+
+/**
+ * Xoay vòng token (02/11/2026): token cũ giữ trong `previous_sealed` tới khi máy chủ xác nhận token mới. Trước đây ack ROTATED lỡ mất mà máy
+ * chủ không chốt được token mới → lần nối sau `DEVICE_UNAUTHORIZED` → xoá sạch ghép máy dù token cũ vẫn còn hiệu lực.
+ */
+export function pendingPreviousToken() {
+  return openPrevious(readRecord()?.data?.previous_sealed);
+}
+
+/** Máy chủ đã nhận token mới (ack ROTATED đúng / chào thành công bằng token mới) → bỏ token cũ. Trả true khi có bỏ. */
+export function confirmTokenRotation(currentToken) {
+  if (!readRecord()?.data?.previous_sealed) return false;
+  const creds = loadDeviceCredentials();
+  if (!creds || (currentToken && creds.device_token !== currentToken)) return false;
+  saveDeviceCredentials(creds, { previousToken: null });
+  return true;
+}
+
+/**
+ * Token `failedToken` bị máy chủ từ chối mà còn token cũ chưa bỏ (xoay vòng chưa chốt) → quay về token cũ, trả nó; không có → null (người
+ * gọi mới được xoá ghép máy).
+ */
+export function revertTokenRotation(failedToken) {
+  const creds = loadDeviceCredentials();
+  if (!creds || (failedToken && creds.device_token !== failedToken)) return null;
+  const previous = pendingPreviousToken();
+  if (!previous || previous === creds.device_token) return null;
+  saveDeviceCredentials({ ...creds, device_token: previous }, { previousToken: null });
+  return readStoredTokenFresh() === previous ? previous : null;
+}
+
+/** Dấu bền "máy đã từng có luật tại máy có chữ ký" (xem DISK_OWNED_FIELDS) — chỉ ghi khi đã ghép máy (có tệp thông tin ghép). */
+export function notePolicySealed() {
+  const rec = readRecord();
+  if (!rec?.data || rec.data.policy_sealed_at) return;
+  try {
+    const raw = writeRecord({ ...rec.data, policy_sealed_at: new Date().toISOString() });
+    if (opened.raw === rec.raw) opened = { raw, token: opened.token };
+  } catch { /* không ghi được: daemon vẫn nhớ trong bộ nhớ */ }
+}
+
+export function policySealedNoted() {
+  return !!readRecord()?.data?.policy_sealed_at;
 }
 
 /** Đọc lại token từ tệp + kho bí mật thật (không qua bộ nhớ đệm) — kiểm sau khi ghi token mới. */

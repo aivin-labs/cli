@@ -8,7 +8,8 @@ import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
 import { MASCOT_LAYERS } from './assets.mjs';
 import { MASCOT_GLYPHS, MASCOT_PALETTE, MASCOT_PS1, MASCOT_XAML } from './hostSource.mjs';
 import { ASK_PS1 } from './askHostSource.mjs';
-import { AskCommand, MAX_ATTACH, QUESTION_ROW } from './ask.mjs';
+import { AskCommand, MAX_ATTACH, QUESTION_ROW, safeWebUrl, VoiceCommand } from './ask.mjs';
+import { hostHotkeys } from './hotkey.mjs';
 
 const ASK_HOOK = '# @ASK_HOOK';
 import { describeStep } from './labels.mjs';
@@ -66,21 +67,52 @@ const QUEUE_LOGS = 40;
 /** Vắng lâu chừng này mà không có việc gì xảy ra → quay lại vẫn được vẫy chào (không bong bóng). */
 const AWAY_WAVE_MS = 30 * 60_000;
 
+/** mascot.json có nhưng không đọc được thành object JSON (đang ghi dở, hỏng tay…) → lượt lưu không ghi đè (02/11/2026). */
+export class MascotSettingsUnreadable extends Error {}
+
+function readMascotFile(file) {
+  let raw;
+  const unreadable = (why) => new MascotSettingsUnreadable(`${file} could not be read (${why}) — fix or delete it`);
+  try { raw = fs.readFileSync(file, 'utf8'); } catch (e) { if (e?.code === 'ENOENT') return null; throw unreadable(e?.code || e?.message); }
+  let data;
+  try { data = JSON.parse(raw.replace(/^\uFEFF/, '')); } catch (e) { throw unreadable(e?.message); }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw unreadable('not a JSON object');
+  return data;
+}
+
+function normalizeMascotSettings(data) {
+  const pos = Number.isFinite(data.x) && Number.isFinite(data.y) ? { x: data.x, y: data.y } : {};
+  const freq = Number.isInteger(data.notify_freq) && data.notify_freq >= 0 && data.notify_freq <= 2 ? { notify_freq: data.notify_freq } : {};
+  // `aivin remote mascot hotkey …` (cli.mjs): tổ hợp chủ máy đặt / 'off'; trước đây bị bỏ khi đọc → lượt lưu vị trí kế tiếp xoá mất.
+  const hotkey = typeof data.hotkey === 'string' && data.hotkey ? { hotkey: data.hotkey } : {};
+  return { enabled: data.enabled !== false, ...freq, ...hotkey, ...pos };
+}
+
 export function loadMascotSettings(file = MASCOT_SETTINGS_FILE) {
   try {
-    const data = JSON.parse(fs.readFileSync(file, 'utf8')) || {};
-    const pos = Number.isFinite(data.x) && Number.isFinite(data.y) ? { x: data.x, y: data.y } : {};
-    const freq = Number.isInteger(data.notify_freq) && data.notify_freq >= 0 && data.notify_freq <= 2 ? { notify_freq: data.notify_freq } : {};
-    return { enabled: data.enabled !== false, ...freq, ...pos };
+    return normalizeMascotSettings(readMascotFile(file) || {});
   } catch {
     return { enabled: true };
   }
 }
 
+/**
+ * Đọc–sửa–ghi mascot.json, ghi nguyên tử (tệp tạm + rename: daemon, lệnh CLI, khay Aivin.exe cùng ghi tệp này). Tệp có mà hỏng → ném
+ * MascotSettingsUnreadable, KHÔNG ghi đè (trước đây đọc hỏng = `{ enabled: true }` rồi ghi đè mất vị trí / phím tắt / mức báo); nơi gọi bỏ
+ * qua, lượt lưu sau thử lại.
+ */
 export function saveMascotSettings(patch, file = MASCOT_SETTINGS_FILE) {
-  const next = { ...loadMascotSettings(file), ...patch };
+  const next = { ...normalizeMascotSettings(readMascotFile(file) || {}), ...patch };
+  for (const [k, v] of Object.entries(next)) if (v === null || v === undefined) delete next[k];
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(next, null, 2) + '\n');
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n');
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* đã dọn */ }
+    throw e;
+  }
   return next;
 }
 
@@ -103,7 +135,7 @@ export function writeHostFiles({ dir, lang, settings }) {
   if (!fs.existsSync(path.join(home, 'logo.png'))) fs.writeFileSync(path.join(home, 'logo.png'), Buffer.from(AIVIN_LOGO_PNG_BASE64, 'base64'));
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
     strings: windowStrings(lang), palette: MASCOT_PALETTE, glyphs: MASCOT_GLYPHS, x: settings.x ?? null, y: settings.y ?? null, max_files: MAX_ATTACH,
-    notify_freq: settings.notify_freq ?? 1,
+    notify_freq: settings.notify_freq ?? 1, hotkeys: hostHotkeys(settings.hotkey),
   }));
   for (const name of fs.readdirSync(dir)) {
     if (name !== hash && /^[0-9a-f]{12}$/.test(name)) fs.rmSync(path.join(dir, name), { recursive: true, force: true });
@@ -163,6 +195,11 @@ export function createMascot({
   let lastPin = null;
   // Tệp thả vào bot đang chờ: cửa sổ dựng lại vẫn ôm thùng có số tệp.
   let lastFiles = null;
+  // Đang nói chuyện bằng giọng (cửa sổ báo voice_start … voice_stop / daemon gửi voice_end): đổi ngôn ngữ chờ tới khi xong mới dựng lại.
+  let voiceOn = false;
+  let langRebuild = false;
+  // Đang dựng lại cửa sổ có chủ đích (đổi ngôn ngữ): cửa sổ cũ đóng thì mở ngay, không tính là lần chết / không giãn thời gian thử lại.
+  let rebuilding = false;
   const send = (msg) => {
     if (msg.t === HostCommand.STATE) lastState = msg;
     if (msg.t === HostCommand.MAIN) lastMain = msg;
@@ -170,14 +207,38 @@ export function createMascot({
     if (msg.t === AskCommand.CHOICES) lastChoices = msg;
     if (msg.t === AskCommand.PIN) lastPin = msg;
     if (msg.t === AskCommand.FILES) lastFiles = msg;
+    if (msg.t === VoiceCommand.END) { voiceOn = false; if (langRebuild) timers.setTimeout(rebuildForLang, 0); }
     if (ready) return write(msg);
     if (msg.t === HostCommand.LOG) {
       pending.push(msg);
       if (pending.length > QUEUE_LOGS) pending.shift();
     }
+    queueChat(msg);
   };
+  // Ô hỏi lúc cửa sổ chưa sẵn sàng (đang mở / dựng lại): giữ dòng chat (theo id — dòng chữ chạy cập nhật tại chỗ), trạng thái bận, dòng
+  // trạng thái mới nhất; trước 02/11/2026 bị bỏ hết → câu trả lời tới đúng lúc cửa sổ dựng lại thì mất.
+  const pendingChat = new Map();
+  let pendingBusy = null;
+  let pendingStatus = null;
+  let rowSeq = 0;
+  function queueChat(msg) {
+    if (msg.t === AskCommand.CLEAR) { pendingChat.clear(); pendingChat.set('\0clear', msg); return; }
+    if (msg.t === AskCommand.BUSY) { pendingBusy = msg; return; }
+    if (msg.t === AskCommand.STATUS) { pendingStatus = msg; return; }
+    if (msg.t !== AskCommand.CHAT) return;
+    const id = String(msg.id || '');
+    if (msg.remove) { if (pendingChat.has(id)) { pendingChat.delete(id); return; } }
+    pendingChat.set(id || `\0row${rowSeq++}`, msg);
+    while (pendingChat.size > QUEUE_LOGS) pendingChat.delete(pendingChat.keys().next().value);
+  }
   const flush = () => {
     for (const msg of pending.splice(0)) write(msg);
+    for (const msg of pendingChat.values()) write(msg);
+    pendingChat.clear();
+    if (pendingBusy) write(pendingBusy);
+    if (pendingStatus) write(pendingStatus);
+    pendingBusy = null;
+    pendingStatus = null;
     if (lastState) write(lastState);
     if (lastMain) write({ ...lastMain, quiet: true });
     if (guiActive > 0) write({ t: HostCommand.GUI, active: true });
@@ -221,7 +282,12 @@ export function createMascot({
     if (msg.t === HostEvent.DROP && Array.isArray(msg.files)) return onDrop(msg.files.filter((f) => typeof f === 'string' && f));
     if (msg.t === HostEvent.AWAY) { away = { since: now(), done: 0, failed: 0, needs: 0 }; return; }
     if (msg.t === HostEvent.BACK) return welcomeBack();
-    if (msg.t === HostEvent.VOICE_START) return onVoice({ t: msg.t, window: userWindow(msg.window) });
+    if (msg.t === HostEvent.VOICE_START) { voiceOn = true; return onVoice({ t: msg.t, window: userWindow(msg.window) }); }
+    if (msg.t === HostEvent.VOICE_STOP || msg.t === HostEvent.VOICE_MIC_LOST) {
+      voiceOn = false;
+      onVoice(msg);
+      return rebuildForLang();
+    }
     if (VOICE_EVENTS.has(msg.t)) return onVoice(msg);
     if (msg.t === HostEvent.OFF) {
       try { saveMascotSettings({ enabled: false }, settingsFile); } catch { /* tắt trong phiên này vẫn được */ }
@@ -237,12 +303,21 @@ export function createMascot({
     quitHost();
   }
 
-  function quitHost() {
+  /** Dựng lại cửa sổ theo ngôn ngữ mới khi rảnh (không nói chuyện); chưa có cửa sổ / đang tắt → lần mở kế tiếp tự dùng chữ mới. */
+  function rebuildForLang() {
+    if (!langRebuild || voiceOn || closed) return;
+    langRebuild = false;
+    if (!child || dormant) return;
+    rebuilding = true;
+    quitHost(300);
+  }
+
+  function quitHost(killAfterMs = 1500) {
     const c = child;
     if (!c) return;
     write({ t: HostCommand.QUIT });
     try { c.stdin?.end(); } catch { /* đã đóng */ }
-    const kill = timers.setTimeout(() => { try { c.kill(); } catch { /* đã thoát */ } }, 1500);
+    const kill = timers.setTimeout(() => { try { c.kill(); } catch { /* đã thoát */ } }, killAfterMs);
     kill?.unref?.();
   }
 
@@ -297,7 +372,7 @@ export function createMascot({
     let c;
     try {
       c = spawnImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', path.join(home, 'host.ps1')], {
-        env: { ...env, AIVIN_MASCOT_DIR: home }, stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...env, AIVIN_MASCOT_DIR: home }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       });
     } catch {
       return;
@@ -305,6 +380,8 @@ export function createMascot({
     child = c;
     ready = false;
     let stderr = '';
+    // Chuỗi (không phải Buffer) theo UTF-8: ký tự nhiều byte bị cắt giữa hai mẩu không vỡ thành "�".
+    c.stderr?.setEncoding?.('utf8');
     c.stderr?.on('data', (d) => { stderr = (stderr + d).slice(-2000); });
     c.stdin?.on('error', () => { /* cửa sổ đã đóng */ });
     readline.createInterface({ input: c.stdout }).on('line', (line) => {
@@ -313,8 +390,10 @@ export function createMascot({
     c.on('error', () => { /* xử lý ở close */ });
     c.on('close', () => {
       if (child === c) { child = null; ready = false; }
+      voiceOn = false;
       onVoice({ t: HostEvent.VOICE_STOP });
       if (closed || dormant) return;
+      if (rebuilding) { rebuilding = false; return start(); }
       // Không có màn hình (phiên dịch vụ), WPF hỏng… → thử lại giãn dần, quá số lần thì thôi (daemon vẫn chạy bình thường).
       const delay = restartDelaysMs[restarts++];
       if (delay === undefined) { say(`(mascot: ${stderr.trim().split(/\r?\n/).pop() || 'window could not start'})`); return; }
@@ -491,8 +570,10 @@ export function createMascot({
      * Báo chủ động / câu trả lời của ô hỏi (ask.mjs `onAlert`): bong bóng ngắn + nét mặt — xong (nhảy, lấp lánh) / lỗi (lắc đầu) rồi về
      * chờ việc; cần bạn thì trạng thái do `needsYou` giữ. Đang có bước chạy trên máy thì chỉ hiện bong bóng, không đổi trạng thái.
      */
-    alert({ kind, text, url } = {}) {
+    alert({ kind, text, url: rawUrl } = {}) {
       if (!text) return;
+      // Cửa sổ mở link bằng Process.Start khi bấm bong bóng / dòng nhật ký: chỉ http(s).
+      const url = safeWebUrl(rawUrl);
       if (hiddenUntilWork) { hiddenUntilWork = false; send({ t: HostCommand.SHOW }); }
       const failed = kind === NotifyKind.FAILED;
       if (away) away[failed ? 'failed' : kind === NotifyKind.NEEDS_YOU ? 'needs' : 'done']++;
@@ -518,18 +599,17 @@ export function createMascot({
     /** Hiện linh vật + mở ô hỏi để gõ ngay (như `aivin ui`) — cho phím tắt / khay hệ thống; câu hỏi đang chờ (nếu có) đã nằm sẵn trong ô. */
     openAsk: wake,
     setNotifyFreq: (val) => send({ t: HostCommand.NOTIFY_FREQ, value: Number(val) }),
+    /**
+     * Ngôn ngữ người dùng trên Aivin (HELLO) khác ngôn ngữ đang hiện: chữ trên cửa sổ nằm trong config.json → phải dựng lại cửa sổ. Cùng
+     * ngôn ngữ → không làm gì; đang nói chuyện bằng giọng → chờ tới khi xong (02/11/2026: trước đây kill cửa sổ ngay mỗi lần nối lại).
+     */
     setLang(nextLang) {
       if (!nextLang) return;
       const resolved = mascotLang(env, platform, nextLang);
       if (resolved === currentLang) return;
       currentLang = resolved;
-      if (child && !dormant) {
-        try { write({ t: 'quit' }); } catch {}
-        try { child.kill(); } catch {}
-        child = null;
-        ready = false;
-        timers.setTimeout(start, 200);
-      }
+      langRebuild = true;
+      rebuildForLang();
     },
     pid: () => child?.pid ?? null,
     close,

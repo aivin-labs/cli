@@ -16,8 +16,22 @@ export function retire(file) {
  * Thay tệp chạy, giữ bản cũ ở `<tệp>.prev`. Windows: đổi tên bản đang chạy thành `.prev` rồi chép bản mới (chép hỏng thì trả tên cũ lại).
  * macOS / Linux: chép bản cũ ra `.prev`, chép bản mới cạnh bên rồi đổi tên nguyên khối. Trả đường dẫn bản cũ (null nếu chưa có).
  */
-export function replaceBinary({ newFile, target, platform = process.platform }) {
+export function replaceBinary({ newFile, target, platform = process.platform, keepBackup = false }) {
   const backup = `${target}.prev`;
+  // Tệp trên đĩa là bản mới CHƯA từng chạy (đã cài, chờ khởi động lại) → `.prev` đang là bản đang chạy / đã chạy ổn: giữ nguyên, chỉ thay
+  // tệp chạy (02/11/2026 — trước đây cài lần hai đè `.prev` bằng bản chưa kiểm, Windows còn dời chính tệp đang chạy vào `.trash`).
+  if (keepBackup && fs.existsSync(backup)) {
+    const staged = `${target}.new`;
+    fs.copyFileSync(newFile, staged);
+    if (platform !== 'win32') fs.chmodSync(staged, 0o755);
+    try {
+      fs.renameSync(staged, target);
+    } catch (e) {
+      fs.rmSync(staged, { force: true });
+      throw e;
+    }
+    return backup;
+  }
   if (fs.existsSync(backup)) retire(backup);
   const had = fs.existsSync(target);
   if (platform === 'win32') {
