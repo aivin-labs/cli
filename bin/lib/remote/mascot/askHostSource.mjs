@@ -174,7 +174,10 @@ function HideAskLater($ms) { if (-not $script:askManual) { $script:askHideTimer.
 # Focused but empty: only auto-hide if peeked, never if manually opened.
 $w.Add_MouseLeave({ if ($script:askOpen -and -not $script:askManual) { HideAskLater $(if ($script:askFocused) { 2500 } else { 600 }) } })
 # Clicked somewhere else: release keyboard focus, keep box open if manually opened.
-$w.Add_Deactivated({ if ($script:askFocused) { $script:askFocused = $false; SetActivatable $false; if (-not $w.IsMouseOver -and -not $script:askManual) { HideAskLater 600 } } })
+$w.Add_Deactivated({
+  $script:askFocused = $false; SetActivatable $false; $script:askManual = $false
+  if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag) { CloseAsk }
+})
 # Clicking into the peeking box = about to type: take keyboard focus.
 (E 'Ask').Add_PreviewMouseLeftButtonDown({ if (-not $script:askFocused) { OpenAsk } })
 # Right-click on the bot: the activity panel.
