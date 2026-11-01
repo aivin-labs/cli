@@ -405,7 +405,7 @@ $w.Add_SourceInitialized({
   $h = (New-Object Windows.Interop.WindowInteropHelper $w).Handle
   $ex = [AivinMascot.Native]::GetWindowLong($h, -20)
   [void][AivinMascot.Native]::SetWindowLong($h, -20, ($ex -bor 0x08000000 -bor 0x00000080))
-  if (-not $env:AIVIN_MASCOT_CAPTURABLE) { [void][AivinMascot.Native]::SetWindowDisplayAffinity($h, 0x11) }
+  # if (-not $env:AIVIN_MASCOT_CAPTURABLE) { [void][AivinMascot.Native]::SetWindowDisplayAffinity($h, 0x11) }
   $script:hwnd = $h
   [AivinMascot.TopKeeper]::Start($h)
   [AivinMascot.DisplayWatch]::Start($h, [Action]{ Dbg 'display changed'; Place })
