@@ -104,6 +104,8 @@ namespace AivinDesktop {
     static readonly Color ClrHover = Color.FromArgb(242, 243, 245);
     static readonly Color ClrText = Color.FromArgb(29, 33, 41);
     static readonly Color ClrMuted = Color.FromArgb(134, 144, 156);
+    static readonly Color ClrGreen = Color.FromArgb(0, 180, 42);
+    static readonly Color ClrOrange = Color.FromArgb(255, 125, 0);
 
     public ModernMenuRenderer() : base(new ModernColorTable()) { }
 
@@ -132,14 +134,46 @@ namespace AivinDesktop {
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
       Color textColor = !e.Item.Enabled ? ClrMuted : ClrText;
       int left = Math.Max(16, e.Item.Padding.Left);
-      Rectangle rect = new Rectangle(
+
+      if (e.Text != null && e.Text.Length > 0 && (e.Text[0] == '●' || e.Text[0] == '•' || e.Text[0] == '\u25CF' || e.Text[0] == '\u2022')) {
+        string remainingText = e.Text.Substring(1).TrimStart(' ');
+        string lower = remainingText.ToLowerInvariant();
+        Color dotColor = ClrMuted;
+        if (lower.Contains("chạy") || lower.Contains("running") || lower.Contains("sẵn sàng")) {
+          dotColor = ClrGreen;
+        } else if (lower.Contains("tạm dừng") || lower.Contains("paused")) {
+          dotColor = ClrOrange;
+        }
+
+        int dotSize = 8;
+        int dotY = (e.Item.Height - dotSize) / 2;
+        SmoothingMode oldMode = e.Graphics.SmoothingMode;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using (SolidBrush dotBrush = new SolidBrush(dotColor)) {
+          e.Graphics.FillEllipse(dotBrush, left, dotY, dotSize, dotSize);
+        }
+        e.Graphics.SmoothingMode = oldMode;
+
+        int textLeft = left + dotSize + 7;
+        Rectangle rect = new Rectangle(
+          textLeft,
+          0,
+          Math.Max(0, e.Item.Width - textLeft - 16),
+          e.Item.Height
+        );
+        TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+        TextRenderer.DrawText(e.Graphics, remainingText, e.TextFont, rect, textColor, flags);
+        return;
+      }
+
+      Rectangle r = new Rectangle(
         left,
         0,
         Math.Max(0, e.Item.Width - left - 16),
         e.Item.Height
       );
-      TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
-      TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, rect, textColor, flags);
+      TextFormatFlags f = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+      TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, r, textColor, f);
     }
 
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
