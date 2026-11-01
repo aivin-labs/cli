@@ -117,6 +117,8 @@ function PeekAsk {
   $script:askOpen = $true; AskShow 'Ask'; $w.FindResource('AskGlow').Begin($w, $true)
 }
 function OpenAsk {
+  $script:askHideTimer.Stop()
+  $script:askManual = $true
   NoteTarget; AskHide 'Panel'
   $script:askOpen = $true; AskShow 'Ask'; $w.FindResource('AskGlow').Begin($w, $true)
   $script:askFocused = $true; SetActivatable $true; $ok = [AivinMascotAsk.Native]::TakeFocus($script:hwnd); [void]$w.Activate(); Dbg "ask focus=$ok"
@@ -125,11 +127,12 @@ function OpenAsk {
 function CloseAsk {
   $script:askHideTimer.Stop()
   if (-not $script:askOpen) { return }
+  $script:askManual = $false
   if ($script:voiceLive) { StopVoice }
   $script:askOpen = $false; $script:askFocused = $false
   AskHide 'Ask'; SetActivatable $false; $w.FindResource('AskGlow').Stop($w)
 }
-function MascotClick { if ($script:askOpen -and (E 'Ask').Visibility -eq 'Visible' -and $script:askFocused) { CloseAsk } else { OpenAsk } }
+function MascotClick { if ($script:askOpen -and (E 'Ask').Visibility -eq 'Visible') { $script:askManual = $false; CloseAsk } else { OpenAsk } }
 # One box at a time: while the ask box is open, what the bot does on the machine only updates the text; the bubble
 # (notification) comes back with the latest step once the box closes, if the bot is still busy.
 $script:baseShowBubble = (Get-Item function:ShowBubble).ScriptBlock
@@ -155,23 +158,23 @@ function ChatBubble($text) {
   if ($script:chatBusy) { $script:bubbleTimer.Stop() } else { $script:bubbleTimer.Stop(); $script:bubbleTimer.Start() }
 }
 # Hover: the box peeks while the mouse is over the bot / the box and slips away shortly after it leaves, unless it is in use.
+$script:askManual = $false
 $script:askHideTimer = New-Object Windows.Threading.DispatcherTimer
 $script:askHideTimer.Add_Tick({ $script:askHideTimer.Stop(); if (-not (AskInUse)) { CloseAsk } })
-# In use = keep the box out: mouse over it, talking, dragging, a pinned question, or focused with unsent text. Waiting on a turn is not
-# in use - the box slips away and the bot shows what it is doing in the bubble on its head (ChatBubble).
+# In use = keep the box out: manual open, mouse over it, talking, dragging, a pinned question, or focused with unsent text.
 function AskInUse {
-  $w.IsMouseOver -or $script:voiceLive -or $script:drag -or $script:askPinned -or ($script:askFocused -and (E 'AskBox').Text.Trim())
+  $script:askManual -or $w.IsMouseOver -or $script:voiceLive -or $script:drag -or $script:askPinned -or ($script:askFocused -and (E 'AskBox').Text.Trim())
 }
 # Aivin is waiting for an answer (HIL): the box stays out with the question + option buttons until it is answered (no focus taken).
 $script:askPinned = $false
-function HideAskLater($ms) { $script:askHideTimer.Stop(); $script:askHideTimer.Interval = [TimeSpan]::FromMilliseconds($ms); $script:askHideTimer.Start() }
+function HideAskLater($ms) { if (-not $script:askManual) { $script:askHideTimer.Stop(); $script:askHideTimer.Interval = [TimeSpan]::FromMilliseconds($ms); $script:askHideTimer.Start() } }
 (E 'Mascot').ToolTip = $null
 (E 'Mascot').Add_MouseEnter({ $script:askHideTimer.Stop(); if ((E 'Panel').Visibility -ne 'Visible' -and -not $script:drag) { PeekAsk } })
 (E 'Ask').Add_MouseEnter({ $script:askHideTimer.Stop() })
-# Focused but empty: a longer grace (clicked the bot, then moved the mouse off to type).
-$w.Add_MouseLeave({ if ($script:askOpen) { HideAskLater $(if ($script:askFocused) { 2500 } else { 600 }) } })
-# Clicked somewhere else: give the keyboard back and let the box go once the mouse is away too.
-$w.Add_Deactivated({ if ($script:askFocused) { $script:askFocused = $false; SetActivatable $false; if (-not $w.IsMouseOver) { HideAskLater 600 } } })
+# Focused but empty: only auto-hide if peeked, never if manually opened.
+$w.Add_MouseLeave({ if ($script:askOpen -and -not $script:askManual) { HideAskLater $(if ($script:askFocused) { 2500 } else { 600 }) } })
+# Clicked somewhere else: release keyboard focus, keep box open if manually opened.
+$w.Add_Deactivated({ if ($script:askFocused) { $script:askFocused = $false; SetActivatable $false; if (-not $w.IsMouseOver -and -not $script:askManual) { HideAskLater 600 } } })
 # Clicking into the peeking box = about to type: take keyboard focus.
 (E 'Ask').Add_PreviewMouseLeftButtonDown({ if (-not $script:askFocused) { OpenAsk } })
 # Right-click on the bot: the activity panel.

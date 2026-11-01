@@ -284,8 +284,8 @@ export function createMascot({
     }
     let c;
     try {
-      c = spawnImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-File', path.join(home, 'host.ps1')], {
-        env: { ...env, AIVIN_MASCOT_DIR: home }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      c = spawnImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', path.join(home, 'host.ps1')], {
+        env: { ...env, AIVIN_MASCOT_DIR: home }, stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch {
       return;

@@ -445,7 +445,7 @@ function Place {
   # inside it instead. One SetWindowPos (device pixels) - setting Left then Top moved the window twice.
   $px = [Math]::Round((Clamp ($script:cx - ${WINDOW.w / 2}) $ml ($mr - ${WINDOW.w})) * $k)
   $py = [Math]::Round((Clamp ($script:cy - ${WINDOW.h - ROOT_MARGIN - (MASCOT_BOX.h - MASCOT_CENTER.y)}) $mt ($mb - ${WINDOW.h})) * $k)
-  if ($script:hwnd) { [void][AivinMascot.Native]::SetWindowPos($script:hwnd, [IntPtr]::Zero, [int]$px, [int]$py, 0, 0, 0x0015) }
+  if ($script:hwnd) { [void][AivinMascot.Native]::SetWindowPos($script:hwnd, [IntPtr]::Zero, [int]$px, [int]$py, 0, 0, 0x0055) }
   else { $w.Left = $px / $k; $w.Top = $py / $k }
   $script:mx = $script:cx - $px / $k; $script:my = $script:cy - $py / $k
   $m = E 'Mascot'; [Windows.Controls.Canvas]::SetLeft($m, $script:mx - ${MASCOT_CENTER.x}); [Windows.Controls.Canvas]::SetTop($m, $script:my - ${MASCOT_CENTER.y})
