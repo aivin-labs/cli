@@ -56,6 +56,8 @@ namespace AivinMascotAsk {
     [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr h, int id, uint mods, uint vk);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
+    public static bool ClickOutside() { return (GetAsyncKeyState(1) & 0x8000) != 0; }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -178,6 +180,28 @@ $w.Add_Deactivated({
   $script:askFocused = $false; SetActivatable $false; $script:askManual = $false
   if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag) { CloseAsk }
 })
+# Click outside detection: transparent window region or anywhere on other windows
+$w.Add_PreviewMouseLeftButtonDown({ param($s, $e)
+  if (-not $script:askOpen -or $script:drag) { return }
+  $pt = $e.GetPosition($w)
+  $askBox = E 'Ask'; $mascot = E 'Mascot'; $panel = E 'Panel'
+  $inAsk = $askBox.Visibility -eq 'Visible' -and (New-Object Windows.Rect ($askBox.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $askBox.RenderSize).Contains($pt)
+  $inMascot = (New-Object Windows.Rect ($mascot.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $mascot.RenderSize).Contains($pt)
+  $inPanel = $panel.Visibility -eq 'Visible' -and (New-Object Windows.Rect ($panel.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $panel.RenderSize).Contains($pt)
+  if (-not $inAsk -and -not $inMascot -and -not $inPanel) {
+    $script:askManual = $false; CloseAsk
+  }
+})
+$script:clickCheckTimer = New-Object Windows.Threading.DispatcherTimer
+$script:clickCheckTimer.Interval = [TimeSpan]::FromMilliseconds(50)
+$script:clickCheckTimer.Add_Tick({
+  if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag) {
+    if (-not $w.IsMouseOver -and [AivinMascotAsk.Native]::ClickOutside()) {
+      $script:askManual = $false; CloseAsk
+    }
+  }
+})
+$script:clickCheckTimer.Start()
 # Clicking into the peeking box = about to type: take keyboard focus.
 (E 'Ask').Add_PreviewMouseLeftButtonDown({ if (-not $script:askFocused) { OpenAsk } })
 # Right-click on the bot: the activity panel.
