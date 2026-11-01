@@ -29,9 +29,21 @@ export function isExtensionUrl(url) {
   return /^\s*(chrome|edge)-extension:/i.test(String(url ?? ''));
 }
 
+/** Chỉ các scheme này được mở từ xa; còn lại (file:, chrome:, javascript:, scheme lạ…) chặn. */
+const ALLOWED_PROTOCOLS = new Set(['http:', 'https:', 'about:', 'data:', 'blob:']);
+
 export function isBlockedUrl(url) {
-  const u = String(url ?? '');
-  return BLOCKED_URL_RE.test(u) || BLOCKED_ABOUT_RE.test(u);
+  // Trình duyệt bỏ ký tự điều khiển / khoảng trắng đầu-cuối và tab / xuống dòng ở giữa trước khi đọc scheme ("\u0001file:", "fi\tle:" vẫn là
+  // file:) — chuẩn hoá y như vậy rồi mới xét, không thì regex lọt (02/11/2026).
+  const u = String(url ?? '').replace(/^[\u0000- ]+|[\u0000- ]+$/g, '').replace(/[\t\n\r]/g, '');
+  if (!u) return false;
+  if (BLOCKED_URL_RE.test(u) || BLOCKED_ABOUT_RE.test(u)) return true;
+  try {
+    return !ALLOWED_PROTOCOLS.has(new URL(u).protocol);
+  } catch {
+    // Không phải URL tuyệt đối (đường tương đối) → không có scheme để lách; có dáng scheme mà không parse được → chặn.
+    return /^[a-z][a-z0-9+.-]*:/i.test(u);
+  }
 }
 
 /**

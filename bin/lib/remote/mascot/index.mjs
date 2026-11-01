@@ -263,7 +263,9 @@ export function createMascot({
   }
 
   // Yêu cầu hiện/ẩn linh vật từ khay hệ thống hoặc lệnh `aivin ui`: tệp đánh dấu đổi giờ sửa.
-  let showSeenAt = 0;
+  // Tệp đánh dấu còn lại từ lần bật trước (không bao giờ bị xoá) không được bật lại linh vật mỗi lần daemon khởi động dù chủ máy đã tắt —
+  // chỉ yêu cầu mới trong khoảng ân hạn (vd `aivin ui` vừa chạy, daemon đang lên) mới tính, như tệp ẩn (02/11/2026).
+  let showSeenAt = now() - SHOW_REQUEST_GRACE_MS;
   let hideSeenAt = now() - SHOW_REQUEST_GRACE_MS;
   const showWatch = setInterval(() => {
     try {

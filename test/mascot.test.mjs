@@ -88,6 +88,25 @@ test('không phải Windows → no-op; đã tắt → không mở cửa sổ (ng
   assert.equal(host.spawned.length, 0);
 });
 
+test('tệp mascot-show cũ còn sót lại không bật lại linh vật đã tắt mỗi lần daemon khởi động; yêu cầu mới thì có (02/11/2026)', async () => {
+  const host = fakeHost();
+  const dir = tmp();
+  const settingsFile = path.join(dir, 'm.json');
+  const showFile = path.join(dir, 'show');
+  fs.writeFileSync(settingsFile, JSON.stringify({ enabled: false }));
+  fs.writeFileSync(showFile, '1');
+  const old = new Date(Date.now() - 3600_000);
+  fs.utimesSync(showFile, old, old);
+  const m = createMascot({ platform: 'win32', spawnImpl: host.spawnImpl, settingsFile, dir, showFile, hideFile: path.join(dir, 'hide') });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(host.spawned.length, 0);
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).enabled, false);
+  fs.writeFileSync(showFile, String(Date.now()));
+  await new Promise((r) => setTimeout(r, 400));
+  m.close();
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).enabled, true);
+});
+
 test('ui --demo: không cần ghép máy, chạy đủ 8 trạng thái theo vòng và dọn timer khi đóng', async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough(); child.stderr = new PassThrough();

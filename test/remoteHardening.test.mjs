@@ -20,6 +20,11 @@ test('bộ lọc CDP: không mở file:// / trang nội bộ, không chọn tệ
     assert.ok(applyDevicePolicy({ id: 1, method: 'Target.createTarget', params: { url } }, { downloadsDir: DL }).error, url);
   }
   for (const url of ['https://mail.google.com', 'about:blank', 'http://example.com/file:x']) assert.equal(isBlockedUrl(url), false, url);
+  // Lách bằng ký tự điều khiển / tab / xuống dòng mà trình duyệt bỏ trước khi đọc scheme (02/11/2026), scheme lạ ngoài danh sách cho phép.
+  for (const url of ['\u0001file:///etc/passwd', 'fi\tle:///C:/x', 'fi\nle:///C:/x', ' \u0000chrome://settings', 'ms-settings:privacy', 'vbscript:x']) {
+    assert.ok(isBlockedUrl(url), JSON.stringify(url));
+  }
+  for (const url of ['/relative/path', 'https://x.vn/?q=file:a', 'data:text/plain,hi']) assert.equal(isBlockedUrl(url), false, url);
   for (const method of ['Target.exposeDevToolsProtocol', 'Target.sendMessageToTarget', 'Network.loadNetworkResource', 'DOM.setFileInputFiles', 'Browser.close']) {
     assert.ok(applyDevicePolicy({ id: 2, method, params: {} }, { downloadsDir: DL }).error, method);
   }

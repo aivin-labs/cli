@@ -493,6 +493,8 @@ async function fsCopy(args, _ctx, env) {
   const stat = await fs.promises.stat(src).catch(() => null);
   if (!stat) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `Not found: ${args.sourcePath}`);
   if (path.resolve(src) === path.resolve(dest)) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Source and destination are the same');
+  // Chép một thư mục BAO TRỌN `.aivin` (vd cả thư mục nhà) là đưa token / khoá ký / cookie ra chỗ đọc được — như fs.move / fs.delete.
+  if (containsProtectedPath(src)) throw new DeviceToolError(DeviceErrorCode.PROTECTED_PATH, 'Folder holds Aivin credentials and cannot be copied remotely');
   const exists = fs.existsSync(dest);
   if (exists && args.overwrite !== true) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Destination exists (set overwrite to replace it): ${args.destinationPath}`);
   const undo = undoOf(args, env, 'copy');

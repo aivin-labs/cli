@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
-const { assertAppAllowed, assertWindowAllowed, buildGuiTools, createGuiController, detectGui, matchApps, rankGuiNodes } = await import('../bin/lib/remote/gui/index.mjs');
+const { assertAppAllowed, assertWindowAllowed, buildGuiTools, createGuiController, detectGui, matchApps, needsServerCheck, rankGuiNodes } = await import('../bin/lib/remote/gui/index.mjs');
 const { buildTools } = await import('../bin/lib/remote/toolHandlers.mjs');
 const { buildCatalog } = await import('../bin/lib/remote/deviceProfile.mjs');
 const { DEFAULT_GROUP_LIMITS, ToolGroup } = await import('../bin/lib/remote/constants.mjs');
@@ -62,6 +62,19 @@ test('semantic rank: loại node disabled/offscreen, exact name thắng; hai ứ
   assert.ok(ranked[0].score - ranked[1].score >= 15);
   const tied = rankGuiNodes([{ id: '2.1', name: 'Save', role: 'button' }, { id: '2.2', name: 'Save', role: 'button' }], 'save');
   assert.equal(tied[0].score, tied[1].score);
+});
+
+test('gui.do: chữ trong ô không lái việc chọn nút; nút chốt / xoá mà mô tả không nói tới → để BE xét (02/11/2026)', () => {
+  const ranked = rankGuiNodes([
+    { id: '3.1', role: 'edit', name: 'Body', value: 'please click send now' },
+    { id: '3.2', role: 'button', name: 'Send later' },
+  ], 'send', '', { matchValue: false });
+  assert.deepEqual(ranked.map((x) => x.node.id), ['3.2']);
+  assert.equal(needsServerCheck('Lưu', { name: 'Lưu và gửi' }), true);
+  assert.equal(needsServerCheck('Xong', { name: 'Xoá bản nháp' }), true);
+  assert.equal(needsServerCheck('nút Gửi', { name: 'Gửi' }), false);
+  assert.equal(needsServerCheck('Lưu', { name: 'Lưu' }), false);
+  assert.equal(needsServerCheck('Sign in', { name: 'Sign out' }), true);
 });
 
 test('act theo node_id: snapshot lạ → GUI_STALE_NODE; ứng dụng bị chặn → không gửi xuống host', async () => {

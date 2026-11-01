@@ -95,7 +95,7 @@ const normalizeName = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g
  * before scoring; exact accessible names and AutomationIds beat loose word matches. The margin between the
  * first two candidates is used by gui.do to refuse ambiguous actions instead of guessing.
  */
-export function rankGuiNodes(nodes, query, role = '') {
+export function rankGuiNodes(nodes, query, role = '', { matchValue = true } = {}) {
   const q = normalizeName(query);
   const words = q.split(' ').filter(Boolean);
   const wantedRole = String(role || '').toLowerCase();
@@ -105,7 +105,7 @@ export function rankGuiNodes(nodes, query, role = '') {
     .map((node, order) => {
       const name = normalizeName(node.name);
       const aid = normalizeName(node.automation_id);
-      const value = normalizeName(node.value);
+      const value = matchValue ? normalizeName(node.value) : '';
       const help = normalizeName(node.help);
       const combined = [name, aid, value, help].filter(Boolean).join(' ');
       const hits = words.filter((word) => combined.includes(word)).length;
@@ -123,6 +123,28 @@ export function rankGuiNodes(nodes, query, role = '') {
     })
     .filter(Boolean)
     .sort((a, b) => b.score - a.score || b.hits - a.hits || a.order - b.order);
+}
+
+/**
+ * Nhãn nút chốt / phá huỷ (đã bỏ dấu, viết thường). Cổng duyệt trên BE xét câu mô tả, nên khi máy tự chọn phần tử có nhãn kiểu này mà câu
+ * mô tả không nói tới (vd "Lưu" khớp tiền tố "Lưu và gửi") thì không bấm thẳng — trả mơ hồ để BE phân giải + xét sàn an toàn trên đúng nút.
+ */
+const RISKY_LABEL_WORDS = new Set([
+  'send', 'submit', 'post', 'publish', 'delete', 'remove', 'erase', 'pay', 'purchase', 'buy', 'order', 'confirm', 'approve', 'transfer', 'logout', 'signout',
+  'gui', 'dang', 'xoa', 'go', 'huy', 'mua', 'chuyen', 'duyet',
+]);
+const RISKY_LABEL_PHRASES = ['sign out', 'log out', 'thanh toan', 'xac nhan', 'dang xuat', 'dat hang', 'chuyen tien', 'go bo'];
+
+export function riskyLabelWords(label) {
+  const n = normalizeName(label);
+  const words = n.split(' ').filter((w) => RISKY_LABEL_WORDS.has(w));
+  return [...words, ...RISKY_LABEL_PHRASES.filter((p) => ` ${n} `.includes(` ${p} `))];
+}
+
+/** Phần tử đã chọn mang nhãn chốt / phá huỷ mà câu mô tả không có → không bấm thẳng. */
+export function needsServerCheck(query, node) {
+  const asked = new Set(riskyLabelWords(query));
+  return riskyLabelWords(node?.name || node?.automation_id).some((w) => !asked.has(w));
 }
 
 /** Chọn ứng dụng theo tên: trùng hẳn > bắt đầu bằng > chứa. Nhiều ứng viên ngang nhau → trả danh sách để Planner chọn lại. */
@@ -213,7 +235,8 @@ export function createGuiController({
     const role = String(args.role || '').toLowerCase();
     const max = Math.max(1, Math.min(Number(args.max) || FIND_DEFAULT, FIND_MAX));
     const res = await observe({ ...args, max_nodes: 1500 }, ctx);
-    const scored = rankGuiNodes(res.nodes, args.query, role);
+    // gui.do chọn phần tử để BẤM: không tính nội dung ô — chữ trên màn hình (thư, trang web) không được lái việc chọn nút (02/11/2026).
+    const scored = rankGuiNodes(res.nodes, args.query, role, { matchValue: args.match_value !== false });
     const all = scored.filter((x) => x.hits === words.length);
     const pool = all.length ? all : scored.filter((x) => x.hits === scored[0]?.hits);
     const picked = pool.slice(0, max);
@@ -246,9 +269,9 @@ export function createGuiController({
 
     const query = String(args.target || '').trim();
     if (!query) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give target');
-    let found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES }, ctx);
+    let found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, match_value: false }, ctx);
     if (!found.nodes.length && !found.ocr && found.tree_quality !== 'poor') {
-      found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, ocr: true }, ctx);
+      found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, match_value: false, ocr: true }, ctx);
     }
     if (!found.nodes.length) throw new DeviceToolError(DeviceErrorCode.GUI_TARGET_NOT_FOUND, `No enabled visible target matched "${query}"`);
     if (found.ambiguous) {
@@ -260,6 +283,13 @@ export function createGuiController({
     }
 
     const node = found.nodes[0];
+    if (command !== 'fill' && needsServerCheck(query, node)) {
+      return {
+        ok: false, code: DeviceErrorCode.GUI_AMBIGUOUS_TARGET,
+        choices: found.nodes.map((n) => ({ ref: n.id, label: [n.name || n.automation_id || n.role, n.role].filter(Boolean).join(' — ') })),
+        observation: found._raw_observation,
+      };
+    }
     if (command === 'fill' && node.password) {
       throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'AI may not fill password or secret fields — ask the user to enter it');
     }
