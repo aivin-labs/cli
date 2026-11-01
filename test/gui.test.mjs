@@ -340,3 +340,25 @@ test('gui.prewarm: làm ấm trước danh sách ứng dụng, các lời gọi 
   await gui.prewarm();
   assert.equal(scans, 1, 'dùng lại bộ nhớ đệm đã làm ấm');
 });
+
+
+test('gui.do: trả kèm screen_point từ host.act để hiển thị con trỏ AI trên Desktop Cast', async () => {
+  const host = fakeHost({
+    observe: () => ({
+      snapshot: 40,
+      window: NOTEPAD,
+      tree_quality: 'good',
+      nodes: [{ id: '40.1', role: 'button', name: 'Save' }],
+    }),
+    act: (a) => ({
+      action: a.action,
+      method: 'invoke',
+      target: { exists: true },
+      screen_point: { x: 520, y: 340 },
+    }),
+  });
+  const gui = createGuiController({ host, notify: () => {} });
+  const res = await gui.semanticDo({ do: 'click', target: 'Save', role: 'button' }, {}, {});
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.screen_point, { x: 520, y: 340 });
+});

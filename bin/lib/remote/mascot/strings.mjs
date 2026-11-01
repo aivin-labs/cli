@@ -101,6 +101,13 @@ export const MascotText = Object.freeze({
   NOTIFY_DONE: 'notify_done',
   NOTIFY_FAILED: 'notify_failed',
   NOTIFY_NEEDS_YOU: 'notify_needs_you',
+  NOTIFY_FREQ_LABEL: 'notify_freq_label',
+  NOTIFY_FREQ_MIN: 'notify_freq_min',
+  NOTIFY_FREQ_MID: 'notify_freq_mid',
+  NOTIFY_FREQ_MAX: 'notify_freq_max',
+  SHORTCUTS_LABEL: 'shortcuts_label',
+  QUICK_CHAT: 'quick_chat',
+  QUICK_VOICE: 'quick_voice',
   UI_SHOWN: 'ui_shown',
   UI_STARTING: 'ui_starting',
   UI_STARTED: 'ui_started',
@@ -201,7 +208,7 @@ const STRINGS = {
     [MascotText.ASK_MORE]: "(chi tiết trên Aivin)",
     [MascotText.ASK_NO_REPLY]: "Chưa nghe Aivin trả lời — có kết quả sẽ hiện ở đây, hoặc xem trên Aivin",
     [MascotText.ASK_STOP]: "Dừng việc này",
-    [MascotText.NEW_CHAT]: "Phiên chat mới",
+    [MascotText.NEW_CHAT]: "Phiên mới",
     [MascotText.NEW_CHAT_TIP]: "Bắt đầu phiên chat mới với Aivin (phiên cũ vẫn xem được trên Aivin)",
     [MascotText.ASK_NEW_CHAT_DONE]: "Đã mở phiên chat mới",
     [MascotText.ASK_CANCELLED]: "Đã dừng",
@@ -213,6 +220,13 @@ const STRINGS = {
     [MascotText.NOTIFY_DONE]: "Xong",
     [MascotText.NOTIFY_FAILED]: "Lỗi",
     [MascotText.NOTIFY_NEEDS_YOU]: "Cần bạn",
+    [MascotText.NOTIFY_FREQ_LABEL]: "TẦN SUẤT THÔNG BÁO",
+    [MascotText.NOTIFY_FREQ_MIN]: "Phiên này & cần xử lý",
+    [MascotText.NOTIFY_FREQ_MID]: "Việc trên máy & cần xử lý",
+    [MascotText.NOTIFY_FREQ_MAX]: "Tất cả thông báo hệ thống",
+    [MascotText.SHORTCUTS_LABEL]: "PHÍM TẮT NHANH",
+    [MascotText.QUICK_CHAT]: "Quick chat",
+    [MascotText.QUICK_VOICE]: "Quick voice",
     [MascotText.UI_SHOWN]: "Linh vật Aivin đã hiện trên màn hình — gõ hoặc bấm mic để hỏi.",
     [MascotText.UI_STARTING]: "Đang bật Aivin trên máy này…",
     [MascotText.UI_STARTED]: "Đã bật Aivin chạy nền — linh vật hiện trong giây lát.",
@@ -304,7 +318,7 @@ const STRINGS = {
     [MascotText.ASK_MORE]: "(details in Aivin)",
     [MascotText.ASK_NO_REPLY]: "No reply from Aivin yet — the result will show up here, or check Aivin",
     [MascotText.ASK_STOP]: "Stop this",
-    [MascotText.NEW_CHAT]: "New chat session",
+    [MascotText.NEW_CHAT]: "New Session",
     [MascotText.NEW_CHAT_TIP]: "Start a new chat with Aivin (the old one stays in Aivin)",
     [MascotText.ASK_NEW_CHAT_DONE]: "Started a new chat",
     [MascotText.ASK_CANCELLED]: "Stopped",
@@ -316,6 +330,13 @@ const STRINGS = {
     [MascotText.NOTIFY_DONE]: "Done",
     [MascotText.NOTIFY_FAILED]: "Failed",
     [MascotText.NOTIFY_NEEDS_YOU]: "Needs you",
+    [MascotText.NOTIFY_FREQ_LABEL]: "NOTIFICATION FREQUENCY",
+    [MascotText.NOTIFY_FREQ_MIN]: "This session & required actions",
+    [MascotText.NOTIFY_FREQ_MID]: "Device tasks & required actions",
+    [MascotText.NOTIFY_FREQ_MAX]: "All system notifications",
+    [MascotText.SHORTCUTS_LABEL]: "QUICK SHORTCUTS",
+    [MascotText.QUICK_CHAT]: "Quick chat",
+    [MascotText.QUICK_VOICE]: "Quick voice",
     [MascotText.UI_SHOWN]: "The Aivin mascot is on screen — type or click the mic to ask.",
     [MascotText.UI_STARTING]: "Starting Aivin on this computer…",
     [MascotText.UI_STARTED]: "Aivin is running in the background — the mascot shows up in a moment.",
@@ -349,8 +370,8 @@ export const SUPPORTED_LANGS = Object.keys(STRINGS);
  * Ngôn ngữ của máy: AIVIN_LANG → LANG / LC_ALL (trừ Windows: ở đó chỉ shell kiểu Unix như Git Bash đặt, không phải người dùng chọn) →
  * ngôn ngữ hệ điều hành (Intl); không có bản dịch → en.
  */
-export function mascotLang(env = process.env, platform = process.platform) {
-  const candidates = [env.AIVIN_LANG, ...(platform === 'win32' ? [] : [env.LC_ALL, env.LANG])];
+export function mascotLang(env = process.env, platform = process.platform, preferredLang = null) {
+  const candidates = [env.AIVIN_LANG, preferredLang, ...(platform === 'win32' ? [] : [env.LC_ALL, env.LANG])];
   try { candidates.push(Intl.DateTimeFormat().resolvedOptions().locale); } catch { /* không có Intl */ }
   for (const c of candidates) {
     const code = String(c || '').toLowerCase().split(/[-_.]/)[0];

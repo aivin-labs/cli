@@ -12,9 +12,24 @@ export function packDesktopFrame(frame) {
     t: 'frame', sessionId: frame?.sessionId, seq: frame?.seq, ts: frame?.ts,
     width: frame?.width, height: frame?.height,
     screenWidth: frame?.screenWidth, screenHeight: frame?.screenHeight,
+    screenX: frame?.screenX, screenY: frame?.screenY,
+    monitor: frame?.monitor, screens: frame?.screens,
     mime: 'image/jpeg', bytes: image.length,
   }) + '\n');
   return Buffer.concat([meta, image]);
+}
+
+export function unpackDesktopFrame(packet) {
+  const buf = Buffer.isBuffer(packet) ? packet : Buffer.from(packet);
+  const nl = buf.indexOf(0x0a);
+  if (nl <= 0) return null;
+  try {
+    const meta = JSON.parse(buf.subarray(0, nl).toString('utf8'));
+    const imageBytes = buf.subarray(nl + 1);
+    return { meta, imageBytes, jpeg: imageBytes };
+  } catch {
+    return null;
+  }
 }
 
 export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => {}, loadRuntime } = {}) {

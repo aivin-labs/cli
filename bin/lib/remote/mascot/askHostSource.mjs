@@ -180,6 +180,7 @@ $w.Add_MouseLeave({ if ($script:askOpen -and -not $script:askManual) { HideAskLa
 $w.Add_Deactivated({
   $script:askFocused = $false; SetActivatable $false; $script:askManual = $false
   if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag) { CloseAsk }
+  if ((E 'Panel').Visibility -eq 'Visible') { ClosePanel }
 })
 # Click outside detection: transparent window region or anywhere on other windows
 $w.Add_PreviewMouseLeftButtonDown({ param($s, $e)
@@ -192,6 +193,9 @@ $w.Add_PreviewMouseLeftButtonDown({ param($s, $e)
   if (-not $inAsk -and -not $inMascot -and -not $inPanel) {
     $script:askManual = $false; CloseAsk
   }
+  if (-not $inPanel -and (E 'Panel').Visibility -eq 'Visible' -and -not $inMascot) {
+    ClosePanel
+  }
 })
 $script:clickCheckTimer = New-Object Windows.Threading.DispatcherTimer
 $script:clickCheckTimer.Interval = [TimeSpan]::FromMilliseconds(50)
@@ -201,12 +205,17 @@ $script:clickCheckTimer.Add_Tick({
       $script:askManual = $false; CloseAsk
     }
   }
+  if ((E 'Panel').Visibility -eq 'Visible' -and -not $script:drag) {
+    if (-not $w.IsMouseOver -and [AivinMascotAsk.Native]::ClickOutside()) {
+      ClosePanel
+    }
+  }
 })
 $script:clickCheckTimer.Start()
 # Clicking into the peeking box = about to type: take keyboard focus.
 (E 'Ask').Add_PreviewMouseLeftButtonDown({ if (-not $script:askFocused) { OpenAsk } })
 # Right-click on the bot: the activity panel.
-(E 'Mascot').Add_MouseRightButtonUp({ param($s, $e) CloseAsk; TogglePanel; $e.Handled = $true })
+(E 'Mascot').Add_MouseRightButtonUp({ param($s, $e) CloseAsk; OpenPanel; $e.Handled = $true })
 # One button: empty box = mic, typed text = send.
 # Waiting on a turn the server can stop (chat_busy { cancel }): the empty-box button is a stop button instead of the mic.
 function StopMode { $script:chatBusy -and $script:canCancel -and -not $script:voiceLive -and -not (E 'AskBox').Text.Trim() }
@@ -470,15 +479,32 @@ function VoiceToggle {
 # (other apps often hold the first one). Shown in the mic button's tooltip; none free -> no hotkey.
 $w.Add_ContentRendered({
   if (-not $script:hwnd) { return }
-  $keys = @(@{ n = 'Ctrl+Alt+Space'; m = 0x4003; v = 0x20 }, @{ n = 'Win+Alt+Space'; m = 0x4009; v = 0x20 }, @{ n = 'Ctrl+Alt+V'; m = 0x4003; v = 0x56 })
-  $key = $null
-  foreach ($k in $keys) { if ([AivinMascotAsk.Native]::RegisterHotKey($script:hwnd, 0xA171, $k.m, $k.v)) { $key = $k; break } }
-  if (-not $key) { Dbg 'voice hotkey: all taken'; return }
-  Dbg "voice hotkey: $($key.n)"
-  $T.ask_mic = "$($T.ask_mic) ($($key.n))"; SyncAction
+  # Quick buttons in Panel
+  (E 'QuickChatBtn').Add_Click({ OpenAsk; (E 'AskBox').Focus() })
+  (E 'QuickVoiceBtn').Add_Click({ VoiceToggle })
+
+  # Global system hotkeys
+  $voiceKeys = @(@{ n = 'Ctrl+Alt+Space'; m = 0x4003; v = 0x20 }, @{ n = 'Win+Alt+Space'; m = 0x4009; v = 0x20 }, @{ n = 'Ctrl+Alt+V'; m = 0x4003; v = 0x56 })
+  $voiceKey = $null
+  foreach ($k in $voiceKeys) { if ([AivinMascotAsk.Native]::RegisterHotKey($script:hwnd, 0xA171, $k.m, $k.v)) { $voiceKey = $k; break } }
+  if ($voiceKey) {
+    (E 'QuickVoiceKey').Text = $voiceKey.n
+    $T.ask_mic = "$($T.ask_mic) ($($voiceKey.n))"; SyncAction
+  }
+
+  $chatKeys = @(@{ n = 'Ctrl+Alt+C'; m = 0x4003; v = 0x43 }, @{ n = 'Win+Alt+C'; m = 0x4009; v = 0x43 }, @{ n = 'Ctrl+Shift+Space'; m = 0x4006; v = 0x20 })
+  $chatKey = $null
+  foreach ($k in $chatKeys) { if ([AivinMascotAsk.Native]::RegisterHotKey($script:hwnd, 0xA172, $k.m, $k.v)) { $chatKey = $k; break } }
+  if ($chatKey) {
+    (E 'QuickChatKey').Text = $chatKey.n
+  }
+
   [System.Windows.Interop.HwndSource]::FromHwnd($script:hwnd).AddHook([System.Windows.Interop.HwndSourceHook]{
     param($h, $msg, $wp, $lp, [ref]$handled)
-    if ($msg -eq 0x0312 -and $wp.ToInt32() -eq 0xA171) { VoiceToggle; $handled.Value = $true }
+    if ($msg -eq 0x0312) {
+      if ($wp.ToInt32() -eq 0xA171) { VoiceToggle; $handled.Value = $true }
+      elseif ($wp.ToInt32() -eq 0xA172) { OpenAsk; (E 'AskBox').Focus(); $handled.Value = $true }
+    }
     [IntPtr]::Zero
   })
 })

@@ -228,3 +228,18 @@ test('ô hỏi: cửa sổ chủ máy đang dùng (từ cửa sổ linh vật) t
   assert.equal(voice[0].window.title.length, 200);
   m.close();
 });
+
+
+test('ngôn ngữ linh vật: nhận ngôn ngữ từ người dùng liên kết; setLang cập nhật linh vật và dựng lại cửa sổ', async () => {
+  const { m, host } = makeMascot({ lang: 'en', env: {} });
+  assert.equal(m.lang, 'en');
+
+  // Đổi sang ngôn ngữ tiếng Việt (vi)
+  m.setLang('vi');
+  assert.equal(m.lang, 'vi');
+
+  // Dựng lại cửa sổ với ngôn ngữ mới
+  await sleep(250);
+  assert.ok(host.spawned.length >= 2, 'cửa sổ được dựng lại với ngôn ngữ mới');
+  m.close();
+});

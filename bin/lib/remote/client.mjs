@@ -19,7 +19,7 @@ import { createScheduler } from './scheduler.mjs';
 import { acquireDaemonLock, lockHolder } from './daemonLock.mjs';
 import { randomUUID } from 'crypto';
 import { DeviceToolError, fullAccessRoots, isRemotePaused, setRemotePaused } from './sandbox.mjs';
-import { createMascot, HostEvent as MascotHostEvent } from './mascot/index.mjs';
+import { createMascot, HostEvent as MascotHostEvent, loadMascotSettings } from './mascot/index.mjs';
 import { createMascotChat } from './mascot/ask.mjs';
 import { mascotLang } from './mascot/strings.mjs';
 import { showOSNotification } from './notify.mjs';
@@ -294,7 +294,7 @@ export async function startRemoteClient(options = {}) {
   // Ghi chú cuộc họp + chụp màn hình (meeting/) — Windows, máy cá nhân; tắt: --no-meetings / AIVIN_REMOTE_MEETINGS=0.
   const media = !multiUser && mediaSupported() && options.meetings !== false && process.env.AIVIN_REMOTE_MEETINGS !== '0' ? createMediaHost() : null;
   const meetings = media ? createMeetingManager({
-    roots, media, lang: mascotLang(),
+    roots, media, lang: mascotLang(process.env, process.platform, creds?.lang),
     say: (m) => say(chalk.cyan(m)),
     notify: showOSNotification,
     isPaused: isRemotePaused,
@@ -346,6 +346,7 @@ export async function startRemoteClient(options = {}) {
     onChoose: (id) => { void mascotChat?.choose(id); },
     onCancel: () => { void mascotChat?.cancel(); },
     onNewChat: () => { void mascotChat?.newChat(); },
+    onNotifyFreq: (val) => { mascotChat?.setNotifyFreq(val); },
     // Thả tệp vào bot → đi kèm câu gõ kế tiếp.
     onDrop: (files) => mascotChat?.attach(files),
     // Nói chuyện trực tiếp: mic / loa ở cửa sổ, phiên thoại realtime trên BE (mascot/ask.mjs).
@@ -553,6 +554,18 @@ export async function startRemoteClient(options = {}) {
     try {
       if (!multiUser) profile.update = updateProfile({ enabled: autoUpdateEnabled });
       const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash, inflight: ledger.heldIds() });
+      const userLang = hello?.user_lang || hello?.lang;
+      if (userLang && mascot.enabled) {
+        const resolvedLang = mascotLang(process.env, process.platform, userLang);
+        if (resolvedLang !== mascot.lang) {
+          mascot.setLang(resolvedLang);
+          mascotChat?.setLang(resolvedLang);
+          if (creds && creds.lang !== resolvedLang) {
+            creds.lang = resolvedLang;
+            saveDeviceCredentials(creds);
+          }
+        }
+      }
       serverResume = Array.isArray(hello?.features) && hello.features.includes(ServerFeature.RESUME);
       mascotChat?.setServerFeatures(hello?.features);
       // Báo chủ động lỡ trong lúc offline + câu hỏi đang ghim đã đóng ở nơi khác (BE có hộp báo).
@@ -784,7 +797,8 @@ export async function startRemoteClient(options = {}) {
       socket: () => socket, send: (cmd) => mascot.chat(cmd), lang: mascot.lang,
       onAlert: (alert) => mascot.alert(alert), onPending: (on) => mascot.needsYou(on),
       micBusy: () => !!meetings?.status()?.recording,
-      serverUrl: credentials?.server_url,
+      serverUrl: creds?.server_url || serverUrl,
+      notifyFreq: loadMascotSettings().notify_freq ?? 1,
     });
     socket.on(DeviceEvent.CHAT_EVENT, guarded(DeviceEvent.CHAT_EVENT, (payload) => mascotChat.onChatEvent(payload)));
     // Báo chủ động: việc của chủ máy (web, chạy nền, automation…) xong / lỗi / cần trả lời.
@@ -803,30 +817,40 @@ export async function startRemoteClient(options = {}) {
     const webRtcStarted = payload?.transport === 'webrtc' && sessionId && viewerId
       ? await desktopWebRtc.start({ sessionId, viewerId, iceServers: payload?.ice_servers || [] }).catch(() => false)
       : false;
-    if (!desktopCast.isActive()) desktopCast.start({
-      sessionId: payload?.session_id,
-      maxFps: payload?.max_fps || 15,
-      maxWidth: payload?.max_width || 1366,
-      quality: payload?.quality || 65,
-      monitor: payload?.monitor ?? -1,
-      onFrame: (frame) => {
-        desktopWebRtc.push(frame);
-        // Chưa nối xong WebRTC hoặc runtime native không có → JPEG fallback vẫn cho first frame ngay.
-        if (desktopWebRtc.needsFallback() && socket.connected) socket.volatile.emit(DeviceEvent.DESKTOP_CAST_FRAME, frame);
-      },
-      onReady: (meta) => {
-        say(chalk.cyan(`  🖥️  Desktop Cast đang phát trực tiếp (${meta.bounds?.width}x${meta.bounds?.height})`));
-        if (socket.connected) socket.emit(DeviceEvent.DESKTOP_CAST_STATUS, {
-          session_id: sessionId, viewer_id: viewerId, state: 'ready', transport: webRtcStarted ? 'webrtc' : 'jpeg', bounds: meta.bounds,
-        });
-      },
-      onError: (err) => {
-        say(chalk.yellow(`  ⚠️  Desktop Cast lỗi: ${err?.message || err}`));
-      },
-      onStop: () => {
-        say(chalk.gray(`  ⏹  Desktop Cast đã dừng`));
-      },
-    });
+    if (!desktopCast.isActive()) {
+      desktopCast.start({
+        sessionId: payload?.session_id,
+        maxFps: payload?.max_fps || 15,
+        maxWidth: payload?.max_width || 1366,
+        quality: payload?.quality || 65,
+        monitor: payload?.monitor ?? -1,
+        onFrame: (frame) => {
+          desktopWebRtc.push(frame);
+          // Chưa nối xong WebRTC hoặc runtime native không có → JPEG fallback vẫn cho first frame ngay.
+          if (desktopWebRtc.needsFallback() && socket.connected) socket.volatile.emit(DeviceEvent.DESKTOP_CAST_FRAME, frame);
+        },
+        onReady: (meta) => {
+          say(chalk.cyan(`  🖥️  Desktop Cast đang phát trực tiếp (${meta.bounds?.width}x${meta.bounds?.height})`));
+          if (socket.connected) socket.emit(DeviceEvent.DESKTOP_CAST_STATUS, {
+            session_id: sessionId, viewer_id: viewerId, state: 'ready', transport: webRtcStarted ? 'webrtc' : 'jpeg', bounds: meta.bounds,
+          });
+        },
+        onError: (err) => {
+          say(chalk.yellow(`  ⚠️  Desktop Cast lỗi: ${err?.message || err}`));
+        },
+        onStop: () => {
+          say(chalk.gray(`  ⏹  Desktop Cast đã dừng`));
+        },
+      });
+    } else {
+      desktopCast.setSessionId?.(payload?.session_id);
+      desktopCast.config({
+        max_fps: payload?.max_fps || 15,
+        max_width: payload?.max_width || 1366,
+        quality: payload?.quality || 65,
+        monitor: payload?.monitor ?? -1,
+      });
+    }
     if (!webRtcStarted && socket.connected) socket.emit(DeviceEvent.DESKTOP_CAST_STATUS, {
       session_id: sessionId, viewer_id: viewerId, state: 'degraded', transport: 'jpeg', reason: 'webrtc_runtime_unavailable',
     });

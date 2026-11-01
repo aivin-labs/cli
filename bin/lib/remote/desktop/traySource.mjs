@@ -242,7 +242,7 @@ namespace AivinDesktop {
     Config cfg;
     NotifyIcon tray;
     Icon colorIcon, greyIcon, shownIcon;
-    ToolStripMenuItem status, updateItem, open, pause, startup, mascot, quit;
+    ToolStripMenuItem status, updateItem, open, pause, startup, mascot, terminal, quit;
     System.Windows.Forms.Timer timer;
     Control invoker;
     EventWaitHandle openEvent, quitEvent;
@@ -279,6 +279,7 @@ namespace AivinDesktop {
 
       mascot = Item(cfg.T("mascot"), delegate { ToggleMascot(); });
       pause = Item("", delegate { TogglePause(); });
+      terminal = Item(cfg.T("terminal"), delegate { OpenTerminal(); });
       startup = Item(cfg.T("startup"), delegate { SetStartup(!StartupEnabled()); Refresh(); });
       updateItem = Item("", delegate { CheckOrApplyUpdate(); });
 
@@ -560,6 +561,7 @@ namespace AivinDesktop {
       open.Text = cfg.T(paired ? "open" : "connect");
       pause.Text = cfg.T(paused ? "resume" : "pause");
       pause.Visible = paired;
+      terminal.Text = cfg.T("terminal");
       bool startupOn = StartupEnabled();
       startup.Text = (startupOn ? "✓  " : "    ") + cfg.T("startup");
       bool mascotOn = IsMascotEnabled();
@@ -623,6 +625,31 @@ namespace AivinDesktop {
         Tick();
       }
       Refresh();
+    }
+
+    void OpenTerminal() {
+      try {
+        string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string workDir = !string.IsNullOrEmpty(userProfile) && Directory.Exists(userProfile) ? userProfile : Program.Home;
+        ProcessStartInfo psi = new ProcessStartInfo();
+        psi.WorkingDirectory = workDir;
+        psi.UseShellExecute = true;
+
+        try {
+          psi.FileName = "wt.exe";
+          Process.Start(psi);
+          return;
+        } catch { }
+
+        try {
+          psi.FileName = "powershell.exe";
+          Process.Start(psi);
+          return;
+        } catch { }
+
+        psi.FileName = "cmd.exe";
+        Process.Start(psi);
+      } catch { }
     }
 
     void TogglePause() {

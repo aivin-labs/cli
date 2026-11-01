@@ -90,12 +90,14 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
         onReady?.(msg);
       } else if (msg.t === 'frame') {
         onFrame?.({
-          sessionId,
+          sessionId: session.sessionId,
           image: msg.image,
           width: msg.width,
           height: msg.height,
           screenWidth: msg.screenWidth,
           screenHeight: msg.screenHeight,
+          screenX: msg.screenX,
+          screenY: msg.screenY,
           monitor: msg.monitor,
           screens: msg.screens,
           ts: msg.ts,
@@ -107,11 +109,11 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
 
     child.on('error', (err) => {
       onError?.(err);
-      activeSession = null;
+      if (activeSession === session) activeSession = null;
     });
 
     child.on('close', () => {
-      activeSession = null;
+      if (activeSession === session) activeSession = null;
       onStop?.();
     });
 
@@ -136,8 +138,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     }
 
     function stop() {
-      if (!activeSession) return;
-      activeSession = null;
+      if (activeSession === session) activeSession = null;
       try {
         if (child.stdin && !child.stdin.destroyed) {
           child.stdin.write('stop\n');
@@ -154,15 +155,22 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       }, 500);
     }
 
-    activeSession = {
+    const session = {
       sessionId,
       child,
       sendInput,
       config,
       stop,
     };
+    activeSession = session;
 
     return activeSession;
+  }
+
+  function setSessionId(sessionId) {
+    if (activeSession && sessionId) {
+      activeSession.sessionId = sessionId;
+    }
   }
 
   function sendInput(inputCmd) {
@@ -190,6 +198,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
 
   return {
     start,
+    setSessionId,
     sendInput,
     config,
     stop,

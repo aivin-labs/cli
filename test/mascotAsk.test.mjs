@@ -377,3 +377,27 @@ test('màn hình: cửa sổ chủ máy đang dùng đi kèm câu hỏi / nói c
   await v.chat.voiceStart(win);
   assert.deepEqual(v.socket.emitted[0], { event: 'device:voice_start', payload: { context: { window: win }, codec: 'ima-adpcm' } });
 });
+
+
+test('tần suất thông báo: min (0) chỉ báo phiên hiện tại hoặc việc cần xử lý; max (2) báo mọi thông báo', async () => {
+  const { chat, sent } = setup(() => ({ ok: true, session_id: 's1' }), {}, { notifyFreq: 0 });
+  await chat.ask('bắt đầu phiên s1');
+
+  // Mức 0 (Min): thông báo từ phiên khác không có question -> bỏ qua
+  chat.onNotify({ session_id: 's_other', kind: 'done', text: 'thông báo nền phiên khác' });
+  assert.ok(!rows(sent).some((r) => r.text?.includes('thông báo nền phiên khác')));
+
+  // Mức 0 (Min): thông báo từ phiên hiện tại -> nhận
+  chat.onNotify({ session_id: 's1', kind: 'done', text: 'thông báo phiên này' });
+  assert.ok(rows(sent).some((r) => r.text?.includes('thông báo phiên này')));
+
+  // Mức 0 (Min): việc cần người dùng xử lý (có question) từ phiên khác -> vẫn nhận
+  chat.onNotify({ session_id: 's_other', kind: 'needs_you', text: 'cần duyệt thao tác', question: { reply_id: 'q1', kind: 'choice', options: [] } });
+  assert.ok(rows(sent).some((r) => r.text?.includes('cần duyệt thao tác')));
+
+  // Đổi sang mức 2 (Max): mọi thông báo đều nhận
+  chat.setNotifyFreq(2);
+  assert.equal(chat.getNotifyFreq(), 2);
+  chat.onNotify({ session_id: 's_other', kind: 'done', text: 'thông báo hệ thống toàn cục' });
+  assert.ok(rows(sent).some((r) => r.text?.includes('thông báo hệ thống toàn cục')));
+});

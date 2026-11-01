@@ -195,23 +195,64 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
     </DockPanel>
     <TextBlock x:Name="NowLabel" DockPanel.Dock="Top" Margin="0,14,0,4" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
     <TextBlock x:Name="NowText" DockPanel.Dock="Top" Margin="0,0,6,0" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap" LineHeight="20"/>
+    <!-- Tần suất thông báo: Min (chỉ phiên này/HIL) -> Max (tất cả hệ thống) -->
+    <DockPanel DockPanel.Dock="Top" Margin="0,14,0,2">
+     <TextBlock x:Name="NotifyFreqLabel" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}" VerticalAlignment="Center"/>
+     <TextBlock x:Name="NotifyFreqValue" DockPanel.Dock="Right" FontSize="11" Foreground="${B.brand}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+    </DockPanel>
+    <Grid DockPanel.Dock="Top" Margin="0,4,6,6">
+     <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="Auto"/>
+      <ColumnDefinition Width="*"/>
+      <ColumnDefinition Width="Auto"/>
+     </Grid.ColumnDefinitions>
+     <TextBlock Text="Min" Grid.Column="0" FontSize="10.5" FontWeight="SemiBold" Foreground="${B.muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+     <Slider x:Name="NotifySlider" Grid.Column="1" Minimum="0" Maximum="2" TickFrequency="1" IsSnapToTickEnabled="True"
+             VerticalAlignment="Center" Cursor="Hand" Height="22"/>
+     <TextBlock Text="Max" Grid.Column="2" FontSize="10.5" FontWeight="SemiBold" Foreground="${B.muted}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+    </Grid>
+    <!-- Phím tắt nhanh: Quick chat & Quick voice -->
+    <TextBlock x:Name="ShortcutsLabel" DockPanel.Dock="Top" Margin="0,10,0,4" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
+    <Grid DockPanel.Dock="Top" Margin="0,2,6,6">
+     <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="*"/>
+      <ColumnDefinition Width="8"/>
+      <ColumnDefinition Width="*"/>
+     </Grid.ColumnDefinitions>
+     <Button x:Name="QuickChatBtn" Grid.Column="0" Style="{StaticResource Btn}" Height="30" Padding="8,0" Background="#F7F8FA" BorderBrush="#E5E6EB" BorderThickness="1" Tag="#EBF5FF" Cursor="Hand">
+      <DockPanel LastChildFill="False">
+       <TextBlock x:Name="QuickChatText" DockPanel.Dock="Left" FontSize="11" Foreground="${B.ink}" FontWeight="Medium" VerticalAlignment="Center"/>
+       <Border DockPanel.Dock="Right" Background="#FFFFFF" BorderBrush="#DCDFE6" BorderThickness="1" CornerRadius="4" Padding="4,1,4,1" VerticalAlignment="Center" Margin="4,0,0,0">
+        <TextBlock x:Name="QuickChatKey" Text="Ctrl+Alt+C" FontSize="9.5" FontWeight="SemiBold" Foreground="${B.brand}"/>
+       </Border>
+      </DockPanel>
+     </Button>
+     <Button x:Name="QuickVoiceBtn" Grid.Column="2" Style="{StaticResource Btn}" Height="30" Padding="8,0" Background="#F7F8FA" BorderBrush="#E5E6EB" BorderThickness="1" Tag="#EBF5FF" Cursor="Hand">
+      <DockPanel LastChildFill="False">
+       <TextBlock x:Name="QuickVoiceText" DockPanel.Dock="Left" FontSize="11" Foreground="${B.ink}" FontWeight="Medium" VerticalAlignment="Center"/>
+       <Border DockPanel.Dock="Right" Background="#FFFFFF" BorderBrush="#DCDFE6" BorderThickness="1" CornerRadius="4" Padding="4,1,4,1" VerticalAlignment="Center" Margin="4,0,0,0">
+        <TextBlock x:Name="QuickVoiceKey" Text="Ctrl+Alt+Space" FontSize="9.5" FontWeight="SemiBold" Foreground="${B.brand}"/>
+       </Border>
+      </DockPanel>
+     </Button>
+    </Grid>
     <!-- Hàng nút: phiên chat mới (nút chính); "Cho AI làm tiếp" chỉ hiện khi AI đang tạm dừng (dừng bằng aivin remote pause); tắt linh vật (đỏ). -->
     <DockPanel DockPanel.Dock="Bottom" Margin="0,12,6,0" LastChildFill="False">
-     <Button x:Name="NewChatBtn" Style="{StaticResource Btn}" Height="34" Padding="12,0,14,0" Background="${B.brand}" Foreground="White"
+     <Button x:Name="NewChatBtn" Style="{StaticResource Btn}" Height="28" FontSize="12" Padding="9,0,11,0" Background="${B.brand}" Foreground="White"
              BorderThickness="0" Tag="#1F000000">
       <StackPanel Orientation="Horizontal">
        <Path Data="${ICON_NEW_CHAT}" Stroke="White" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-             Width="14" Height="14" Stretch="Uniform" Margin="0,0,7,0" VerticalAlignment="Center"/>
+             Width="12" Height="12" Stretch="Uniform" Margin="0,0,5,0" VerticalAlignment="Center"/>
        <TextBlock x:Name="NewChatText" VerticalAlignment="Center"/>
       </StackPanel>
      </Button>
-     <Button x:Name="PauseBtn" Style="{StaticResource Btn}" Height="34" Padding="14,0" Margin="8,0,0,0" Background="White" Foreground="${B.ink}"
+     <Button x:Name="PauseBtn" Style="{StaticResource Btn}" Height="28" FontSize="12" Padding="10,0" Margin="8,0,0,0" Background="White" Foreground="${B.ink}"
              BorderBrush="#C9CDD4" BorderThickness="1" Tag="#0F000000" Visibility="Collapsed"/>
-     <Button x:Name="OffBtn" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="34" Padding="10,0" Background="Transparent"
+     <Button x:Name="OffBtn" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="28" FontSize="12" Padding="8,0" Background="Transparent"
              Foreground="${OFF_RED}" BorderThickness="0" Tag="#FFECE8" FontWeight="Normal">
       <StackPanel Orientation="Horizontal">
        <Path Data="${ICON_POWER}" Stroke="${OFF_RED}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-             Width="13" Height="13" Stretch="Uniform" Margin="0,0,6,0" VerticalAlignment="Center"/>
+             Width="12" Height="12" Stretch="Uniform" Margin="0,0,5,0" VerticalAlignment="Center"/>
        <TextBlock x:Name="OffText" VerticalAlignment="Center"/>
       </StackPanel>
      </Button>
@@ -220,7 +261,7 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
     <Border CornerRadius="10" Background="#F7F8FA" BorderBrush="#EEF0F4" BorderThickness="1" Margin="0,0,6,0">
      <Grid>
       <TextBlock x:Name="Empty" Margin="12,14" FontSize="12.5" Foreground="${B.muted}" TextWrapping="Wrap"/>
-      <ScrollViewer Height="260" VerticalScrollBarVisibility="Auto"><StackPanel x:Name="LogList" Margin="0,4"/></ScrollViewer>
+      <ScrollViewer Height="210" VerticalScrollBarVisibility="Auto"><StackPanel x:Name="LogList" Margin="0,4"/></ScrollViewer>
      </Grid>
     </Border>
    </DockPanel>
@@ -434,6 +475,25 @@ $script:rig = [AivinMascot.Rig]::new($w)
 $w.Title = $T.window_title; (E 'Mascot').ToolTip = $T.tooltip; (E 'PanelTitle').Text = $T.panel_title
 (E 'NowLabel').Text = $T.now_label; (E 'LogLabel').Text = $T.log_label; (E 'Empty').Text = $T.nothing_yet; (E 'NowText').Text = $T.ready
 (E 'OffText').Text = $T.turn_off; (E 'PanelClose').ToolTip = $T.close
+(E 'NotifyFreqLabel').Text = $T.notify_freq_label; (E 'ShortcutsLabel').Text = $T.shortcuts_label; (E 'QuickChatText').Text = $T.quick_chat; (E 'QuickVoiceText').Text = $T.quick_voice
+function SyncNotifyDesc($val) {
+  (E 'NotifyFreqValue').Text = switch ([int]$val) {
+    0 { $T.notify_freq_min }
+    1 { $T.notify_freq_mid }
+    default { $T.notify_freq_max }
+  }
+}
+$script:notifyFreq = if ($cfg.notify_freq -ne $null) { [int]$cfg.notify_freq } else { 1 }
+(E 'NotifySlider').Value = $script:notifyFreq
+SyncNotifyDesc $script:notifyFreq
+(E 'NotifySlider').Add_ValueChanged({ param($s, $e)
+  $v = [int]$s.Value
+  if ($v -ne $script:notifyFreq) {
+    $script:notifyFreq = $v
+    SyncNotifyDesc $v
+    Send @{ t = 'notify_freq'; value = $v }
+  }
+})
 
 # No focus stealing + no Alt+Tab entry; hidden from screen capture (AI screenshots, screen sharing).
 $w.Add_SourceInitialized({
@@ -741,15 +801,48 @@ function LogEntry($m) {
   if ($m.time) { $row.time.Text = $m.time }
 }
 
-function TogglePanel {
+function ClosePanel {
   $p = E 'Panel'
   if ($p.Visibility -eq 'Visible') {
+    if ($script:panelHideTimer) { $script:panelHideTimer.Stop() }
     $sb = $w.FindResource('PanelOut').Clone(); $sb.Add_Completed({ (E 'Panel').Visibility = 'Collapsed' }); $sb.Begin($p)
-  } else {
-    $script:bubbleTimer.Stop(); (E 'Bubble').Visibility = 'Collapsed'; (E 'Bubble').Opacity = 0
+  }
+}
+
+function OpenPanel {
+  $script:bubbleTimer.Stop(); (E 'Bubble').Visibility = 'Collapsed'; (E 'Bubble').Opacity = 0
+  $p = E 'Panel'
+  if ($p.Visibility -ne 'Visible') {
     $p.Visibility = 'Visible'; $w.FindResource('PanelIn').Begin($p)
   }
 }
+
+function TogglePanel {
+  $p = E 'Panel'
+  if ($p.Visibility -eq 'Visible') { ClosePanel }
+  else { OpenPanel }
+}
+
+# Auto-hide panel when mouse leaves panel area
+$script:panelHideTimer = New-Object Windows.Threading.DispatcherTimer
+$script:panelHideTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+$script:panelHideTimer.Add_Tick({
+  $script:panelHideTimer.Stop()
+  if ((E 'Panel').Visibility -eq 'Visible') {
+    if (-not (E 'Panel').IsMouseOver -and -not (E 'Mascot').IsMouseOver) {
+      ClosePanel
+    }
+  }
+})
+
+(E 'Panel').Add_MouseEnter({ $script:panelHideTimer.Stop() })
+(E 'Mascot').Add_MouseEnter({ $script:panelHideTimer.Stop() })
+
+(E 'Panel').Add_MouseLeave({
+  if ((E 'Panel').Visibility -eq 'Visible') {
+    $script:panelHideTimer.Start()
+  }
+})
 
 $script:userHidden = $false; $script:guiHidden = $false
 function ApplyVisibility { $w.Visibility = if ($script:userHidden -or $script:guiHidden) { 'Hidden' } else { 'Visible' } }
@@ -818,6 +911,11 @@ function Handle($m) {
   if ($env:AIVIN_MASCOT_DEBUG) { Dbg "recv $($m.t) $($m.state)$($m.text)$($m.title)" }
   switch ($m.t) {
     'state' { SetState $m.state }
+    'notify_freq' {
+      $script:notifyFreq = [int]$m.value
+      (E 'NotifySlider').Value = $script:notifyFreq
+      SyncNotifyDesc $script:notifyFreq
+    }
     'main' { if ($m.quiet) { (E 'NowText').Text = $m.text } else { ShowBubble $m.text $m.url } }
     'log' { LogEntry $m }
     'gui' { $script:guiHidden = [bool]$m.active; ApplyVisibility }

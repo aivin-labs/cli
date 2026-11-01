@@ -282,6 +282,7 @@ export function createGuiController({
     return {
       ok: true, action: command, target: node.name || node.automation_id || node.role,
       ...(verified === undefined ? {} : { verified }),
+      ...(result.screen_point ? { screen_point: result.screen_point } : {}),
       effect: result.window_title_changed || result.target || result.focused_element || command,
     };
   }

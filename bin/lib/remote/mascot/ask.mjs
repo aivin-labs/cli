@@ -122,10 +122,13 @@ const MAX_PENDING = 20;
  */
 export function createMascotChat({
   socket, send, lang, timers = { setTimeout, clearTimeout }, now = Date.now, onAlert = () => {}, onPending = () => {}, micBusy = () => false,
-  serverUrl = '',
+  serverUrl = '', notifyFreq = 1,
 }) {
-  const t = (key, vars) => mascotText(lang, key, vars);
+  let currentLang = lang || 'vi';
+  const t = (key, vars) => mascotText(currentLang, key, vars);
   let current = null;
+  let currentNotifyFreq = Number.isInteger(notifyFreq) ? notifyFreq : 1;
+  let currentSessionId = null;
   /** Năng lực BE (ack của HELLO, `setServerFeatures`): hộp báo + kiểm câu hỏi, dừng lượt, chat mới. */
   const features = { inbox: false, cancel: false, newChat: false };
   /** Câu hỏi đang chờ theo thứ tự đến: `{ session_id, reply_id, kind, options, text }`; đầu hàng = câu đang có nút. */
@@ -309,10 +312,12 @@ export function createMascotChat({
     streaming = null;
     setBusy(true);
     row(ChatRole.PROGRESS, t(MascotText.ASK_THINKING), PROGRESS_ROW, { typing: true });
+    if (extra?.session_id) currentSessionId = extra.session_id;
     let ack;
     try {
       // `stream`: xin chữ chạy của câu trả lời (`delta`) — BE cũ bỏ qua trường này.
       ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT, { text, request_id: current, stream: true, ...context(), ...extra });
+      if (ack?.session_id) currentSessionId = ack.session_id;
     } catch (e) {
       finish();
       return row(ChatRole.ERROR, failedSend(e));
@@ -383,6 +388,7 @@ export function createMascotChat({
   /** Sự kiện của lượt đang hỏi (sự kiện của câu cũ / máy khác cùng phòng bị bỏ qua). */
   function onChatEvent(payload) {
     if (!payload) return;
+    if (payload.session_id) currentSessionId = payload.session_id;
     if (stale && payload.request_id === stale && stale !== current) return lateEvent(payload);
     if (payload.request_id !== current) return;
     received(payload.notice_id);
@@ -478,6 +484,7 @@ export function createMascotChat({
     streaming = null;
     stale = null;
     target = null;
+    currentSessionId = null;
     files.splice(0);
     attachRow = null;
     syncFiles();
@@ -548,6 +555,20 @@ export function createMascotChat({
   function onNotify(payload) {
     if (!payload || typeof payload.kind !== 'string' || !NOTIFY_LABEL[payload.kind]) return;
     if (payload.id && !received(payload.id)) return;
+
+    const isHil = payload.kind === NotifyKind.NEEDS_YOU && !!payload.question;
+    const isCurrentSession = !!(currentSessionId && payload.session_id === currentSessionId);
+
+    // Lọc theo tần suất thông báo:
+    // 0 = Min: chỉ session hiện tại của linh vật HOẶC câu hỏi HIL cần xử lý.
+    // 1 = Mid: session hiện tại, việc trên máy, HOẶC câu hỏi HIL cần xử lý.
+    // 2 = Max: mọi thông báo trên hệ thống.
+    if (currentNotifyFreq === 0) {
+      if (!isCurrentSession && !isHil) return;
+    } else if (currentNotifyFreq === 1) {
+      if (!isCurrentSession && !isHil && payload.session_id && currentSessionId) return;
+    }
+
     const label = t(NOTIFY_LABEL[payload.kind]);
     const title = typeof payload.title === 'string' ? payload.title.trim() : '';
     const text = typeof payload.text === 'string' ? payload.text.trim() : '';
@@ -697,7 +718,7 @@ export function createMascotChat({
     if (!s?.connected) return status(t(MascotText.ASK_OFFLINE));
     let res;
     try {
-      res = await s.timeout(STT_TIMEOUT_MS).emitWithAck(DeviceEvent.STT, { audio: pcmToWav(Buffer.concat(rec.chunks)), lang });
+      res = await s.timeout(STT_TIMEOUT_MS).emitWithAck(DeviceEvent.STT, { audio: pcmToWav(Buffer.concat(rec.chunks)), lang: currentLang });
     } catch (e) {
       return status(failedSend(e));
     }
@@ -772,7 +793,7 @@ export function createMascotChat({
         endCall(voiceErrorText(payload.message));
         return;
       case VoiceEventKind.CLOSED:
-        endCall(t(TIMED_OUT_REASONS.has(payload.reason) ? MascotText.VOICE_TIMED_OUT : MascotText.VOICE_ENDED));
+        endCall(TIMED_OUT_REASONS.has(payload.reason) ? t(MascotText.VOICE_TIMED_OUT) : '');
         return;
       default:
     }
@@ -781,5 +802,10 @@ export function createMascotChat({
   return {
     ask, reply, choose, attach, cancel, newChat, onChatEvent, onNotify, syncInbox, checkQuestions, setServerFeatures, busy: () => !!current || !!call, hasPending: () => queue.length > 0, userWindow: () => target,
     voiceStart, voiceAudio, voiceInterrupt, voiceStop, voiceMicLost, voiceDisconnected, onVoiceEvent, setVoiceSupported, inCall: () => !!call,
+    setNotifyFreq: (val) => { const v = Number(val); if (Number.isInteger(v) && v >= 0 && v <= 2) currentNotifyFreq = v; },
+    setLang: (l) => { if (l) currentLang = l; },
+    getLang: () => currentLang,
+    getNotifyFreq: () => currentNotifyFreq,
+    getCurrentSessionId: () => currentSessionId,
   };
 }

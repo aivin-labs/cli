@@ -467,6 +467,15 @@ namespace AivinGui {
       int maxDepth = Math.Max(2, Math.Min(Int(a, "max_depth", 25), 60));
       var sw = Stopwatch.StartNew();
       AssertWindowResponsive(h);
+      if (Native.IsIconic(h)) {
+        IntPtr fgBefore = Native.GetForegroundWindow();
+        Native.ShowWindow(h, 4);
+        if (fgBefore != IntPtr.Zero && fgBefore != h) {
+          RestoreForeground(fgBefore, h);
+          SendToBack(h);
+        }
+        Thread.Sleep(60);
+      }
       AutomationElement root = AutomationElement.FromHandle(h);
       var cache = BuildCache();
       var nodes = new List<object>();
@@ -597,12 +606,30 @@ namespace AivinGui {
 
     static bool IsMostlyBlack(Bitmap b) {
       int dark = 0, total = 0;
-      for (int x = 0; x < b.Width; x += Math.Max(1, b.Width / 16)) {
-        for (int y = 0; y < b.Height; y += Math.Max(1, b.Height / 16)) {
+      int w = b.Width, h = b.Height;
+      if (w <= 0 || h <= 0) return true;
+      var data = b.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+      try {
+        int stride = Math.Abs(data.Stride);
+        byte[] bytes = new byte[stride * h];
+        Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
+        int stepX = Math.Max(1, w / 16), stepY = Math.Max(1, h / 16);
+        for (int y = 0; y < h; y += stepY) {
+          int row = y * stride;
+          for (int x = 0; x < w; x += stepX) {
+            int idx = row + x * 4;
+            total++;
+            if (bytes[idx + 2] < 8 && bytes[idx + 1] < 8 && bytes[idx] < 8) dark++;
+          }
+        }
+      } finally { b.UnlockBits(data); }
+      // Đã thay GetPixel bằng LockBits + Marshal.Copy để đọc mảng byte trực tiếp trên bộ nhớ.
+      /*
           var c = b.GetPixel(x, y); total++;
           if (c.R < 8 && c.G < 8 && c.B < 8) dark++;
         }
       }
+      */
       return total > 0 && dark * 10 >= total * 9;
     }
 
@@ -695,6 +722,11 @@ namespace AivinGui {
         if (isPassword && (action == "type" || action == "set_value")) throw new GuiError("GUI_PASSWORD_FIELD", "Typing into a password field is not allowed — ask the user to type it");
       }
       AssertWindowResponsive(window);
+      Dictionary<string, object> screenPoint = null;
+      try {
+        var sp = PointFor(el, window, a);
+        screenPoint = new Dictionary<string, object> { { "x", (int)Math.Round(sp.X) }, { "y", (int)Math.Round(sp.Y) } };
+      } catch { }
       IntPtr fgBefore = Native.GetForegroundWindow();
       string used = DoAction(action, method, el, window, a);
       // Thao tác theo pattern không cần cửa sổ đích ở trên cùng, nhưng nhiều ứng dụng (WinForms qua MSAA) tự lấy focus khi bị SetValue /
@@ -708,6 +740,7 @@ namespace AivinGui {
       int defaultSettle = used == "mouse" || used == "keyboard" ? 250 : 30;
       Thread.Sleep(Math.Max(0, Math.Min(Int(a, "settle_ms", defaultSettle), 3000)));
       var res = new Dictionary<string, object> { { "action", action }, { "method", used } };
+      if (screenPoint != null) res["screen_point"] = screenPoint;
       if (restored) res["focus_returned_to_user"] = true;
       if (el != null) res["target"] = Live(el);
       IntPtr fg = Native.GetForegroundWindow();

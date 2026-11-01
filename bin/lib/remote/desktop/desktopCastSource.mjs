@@ -54,6 +54,7 @@ namespace AivinDesktopCast {
     public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
     public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
     public const uint MOUSEEVENTF_WHEEL = 0x0800;
+    public const uint MOUSEEVENTF_HWHEEL = 0x01000;
 
     public const uint KEYEVENTF_KEYUP = 0x0002;
     public const uint KEYEVENTF_UNICODE = 0x0004;
@@ -140,7 +141,6 @@ namespace AivinDesktopCast {
         g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
         g.DrawImage(src, 0, 0, maxWidth, h);
       }
-      src.Dispose();
       return dst;
     }
 
@@ -167,11 +167,24 @@ namespace AivinDesktopCast {
         using (var g = Graphics.FromImage(small)) {
           g.DrawImage(src, 0, 0, 64, 36);
         }
-        for (int y = 0; y < 36; y++) {
-          for (int x = 0; x < 64; x++) {
-            var c = small.GetPixel(x, y);
-            t[y * 64 + x] = (byte)((c.R * 3 + c.G * 6 + c.B) / 10);
+        var data = small.LockBits(new Rectangle(0, 0, 64, 36), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+        try {
+          int stride = Math.Abs(data.Stride);
+          var raw = new byte[stride * 36];
+          Marshal.Copy(data.Scan0, raw, 0, raw.Length);
+          for (int y = 0; y < 36; y++) {
+            int rowOffset = y * stride;
+            int outOffset = y * 64;
+            for (int x = 0; x < 64; x++) {
+              int idx = rowOffset + x * 3;
+              int b = raw[idx];
+              int gVal = raw[idx + 1];
+              int r = raw[idx + 2];
+              t[outOffset + x] = (byte)((r * 3 + gVal * 6 + b) / 10);
+            }
           }
+        } finally {
+          small.UnlockBits(data);
         }
       }
       return t;
@@ -240,10 +253,16 @@ namespace AivinDesktopCast {
               lastThumb = thumb;
               lastSendMs = nowMs;
 
-              using (var scaled = CastScreen.Scale(new Bitmap(rawBmp), targetMaxWidth)) {
-                currentImageWidth = scaled.Width;
-                currentImageHeight = scaled.Height;
-                byte[] jpegBytes = CastScreen.Jpeg(scaled, targetQuality);
+              Bitmap scaled = null;
+              try {
+                Bitmap encodeBmp = rawBmp;
+                if (rawBmp.Width > targetMaxWidth) {
+                  scaled = CastScreen.Scale(rawBmp, targetMaxWidth);
+                  encodeBmp = scaled;
+                }
+                currentImageWidth = encodeBmp.Width;
+                currentImageHeight = encodeBmp.Height;
+                byte[] jpegBytes = CastScreen.Jpeg(encodeBmp, targetQuality);
                 string base64 = Convert.ToBase64String(jpegBytes);
 
                 var frameMsg = Out.Msg("frame");
@@ -252,10 +271,16 @@ namespace AivinDesktopCast {
                 frameMsg["height"] = currentImageHeight;
                 frameMsg["screenWidth"] = currentBounds.Width;
                 frameMsg["screenHeight"] = currentBounds.Height;
+                frameMsg["screenX"] = currentBounds.X;
+                frameMsg["screenY"] = currentBounds.Y;
                 frameMsg["monitor"] = currentMonitor;
                 frameMsg["screens"] = CastScreen.GetScreens();
                 frameMsg["ts"] = nowMs;
                 Out.Send(frameMsg);
+              } finally {
+                if (scaled != null && !object.ReferenceEquals(scaled, rawBmp)) {
+                  scaled.Dispose();
+                }
               }
             }
           }
@@ -373,13 +398,45 @@ namespace AivinDesktopCast {
         case "f11": return 0x7A;
         case "f12": return 0x7B;
         case "printscreen": case "prtsc": return 0x2C;
+        case "capslock": return 0x14;
+        case "numlock": return 0x90;
+        case "scrolllock": return 0x91;
+        case "contextmenu": case "apps": return 0x5D;
         default:
           if (name.Length == 1) {
             char ch = char.ToUpperInvariant(name[0]);
             if (ch >= 'A' && ch <= 'Z') return (byte)ch;
             if (ch >= '0' && ch <= '9') return (byte)ch;
+            short vks = Native.VkKeyScan(name[0]);
+            if (vks != -1) return (byte)(vks & 0xFF);
           }
           return 0;
+      }
+    }
+
+    static List<byte> ExtractModifiers(Dictionary<string, object> cmd) {
+      var list = new List<byte>();
+      if (!cmd.ContainsKey("modifiers") || cmd["modifiers"] == null) return list;
+      System.Collections.ArrayList raw = cmd["modifiers"] as System.Collections.ArrayList;
+      if (raw != null) {
+        for (int i = 0; i < raw.Count; i++) {
+          byte vk = KeyNameToVk(Convert.ToString(raw[i]));
+          if (vk != 0 && !list.Contains(vk)) list.Add(vk);
+        }
+      }
+      return list;
+    }
+
+    static void PressModifiers(List<byte> mods) {
+      for (int i = 0; i < mods.Count; i++) {
+        Native.keybd_event(mods[i], 0, 0, UIntPtr.Zero);
+      }
+      if (mods.Count > 0) Thread.Sleep(8);
+    }
+
+    static void ReleaseModifiers(List<byte> mods) {
+      for (int i = mods.Count - 1; i >= 0; i--) {
+        Native.keybd_event(mods[i], 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
       }
     }
 
@@ -388,6 +445,7 @@ namespace AivinDesktopCast {
         string action = cmd.ContainsKey("action") ? Convert.ToString(cmd["action"]) : "";
         double rx = cmd.ContainsKey("x") ? Convert.ToDouble(cmd["x"]) : 0;
         double ry = cmd.ContainsKey("y") ? Convert.ToDouble(cmd["y"]) : 0;
+        var mods = ExtractModifiers(cmd);
 
         int targetX = currentBounds.X;
         int targetY = currentBounds.Y;
@@ -402,49 +460,76 @@ namespace AivinDesktopCast {
           int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
           Native.SetCursorPos(targetX, targetY);
           Thread.Sleep(10);
-          if (button == 2) {
-            Native.mouse_event(Native.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
-            Thread.Sleep(15);
-            Native.mouse_event(Native.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-          } else if (button == 1) {
-            Native.mouse_event(Native.MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0);
-            Thread.Sleep(15);
-            Native.mouse_event(Native.MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0);
-          } else {
-            Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-            Thread.Sleep(15);
-            Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+          PressModifiers(mods);
+          try {
+            if (button == 2) {
+              Native.mouse_event(Native.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+              Thread.Sleep(15);
+              Native.mouse_event(Native.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+            } else if (button == 1) {
+              Native.mouse_event(Native.MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0);
+              Thread.Sleep(15);
+              Native.mouse_event(Native.MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0);
+            } else {
+              Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+              Thread.Sleep(15);
+              Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            }
+          } finally {
+            ReleaseModifiers(mods);
           }
         } else if (action == "dblclick") {
           Native.SetCursorPos(targetX, targetY);
           Thread.Sleep(10);
-          Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-          Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-          Thread.Sleep(40);
-          Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-          Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+          PressModifiers(mods);
+          try {
+            Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+            Thread.Sleep(40);
+            Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+          } finally {
+            ReleaseModifiers(mods);
+          }
         } else if (action == "rightclick") {
           Native.SetCursorPos(targetX, targetY);
           Thread.Sleep(10);
-          Native.mouse_event(Native.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
-          Thread.Sleep(15);
-          Native.mouse_event(Native.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+          PressModifiers(mods);
+          try {
+            Native.mouse_event(Native.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+            Thread.Sleep(15);
+            Native.mouse_event(Native.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+          } finally {
+            ReleaseModifiers(mods);
+          }
         } else if (action == "mousedown") {
           int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
           Native.SetCursorPos(targetX, targetY);
+          PressModifiers(mods);
           if (button == 2) Native.mouse_event(Native.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
           else if (button == 1) Native.mouse_event(Native.MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0);
           else Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
         } else if (action == "mouseup") {
           int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
           Native.SetCursorPos(targetX, targetY);
-          if (button == 2) Native.mouse_event(Native.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-          else if (button == 1) Native.mouse_event(Native.MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0);
-          else Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+          try {
+            if (button == 2) Native.mouse_event(Native.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+            else if (button == 1) Native.mouse_event(Native.MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0);
+            else Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+          } finally {
+            ReleaseModifiers(mods);
+          }
         } else if (action == "scroll") {
           int deltaY = cmd.ContainsKey("deltaY") ? Convert.ToInt32(cmd["deltaY"]) : 0;
+          int deltaX = cmd.ContainsKey("deltaX") ? Convert.ToInt32(cmd["deltaX"]) : 0;
           Native.SetCursorPos(targetX, targetY);
-          Native.mouse_event(Native.MOUSEEVENTF_WHEEL, 0, 0, -deltaY, 0);
+          PressModifiers(mods);
+          try {
+            if (deltaY != 0) Native.mouse_event(Native.MOUSEEVENTF_WHEEL, 0, 0, -deltaY, 0);
+            if (deltaX != 0) Native.mouse_event(Native.MOUSEEVENTF_HWHEEL, 0, 0, deltaX, 0);
+          } finally {
+            ReleaseModifiers(mods);
+          }
         } else if (action == "type") {
           string text = cmd.ContainsKey("text") ? Convert.ToString(cmd["text"]) : "";
           if (!string.IsNullOrEmpty(text)) {

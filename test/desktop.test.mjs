@@ -149,3 +149,44 @@ test('chữ menu theo hệ điều hành; launch.cfg mang khoá riêng; kịch b
   assert.ok(cfg.split('\r\n').includes('s.startup=Open at login'));
   assert.match(posixRunScript(['/x/aivin', 'remote', 'start'], { supervisor: 'tray' }), /^'\/x\/aivin' 'remote' 'start' "\$@"$/m);
 });
+
+
+const { packDesktopFrame, unpackDesktopFrame } = await import('../bin/lib/remote/desktop/desktopWebRtc.mjs');
+const { DESKTOP_CAST_CSHARP } = await import('../bin/lib/remote/desktop/desktopCastSource.mjs');
+
+test('packDesktopFrame + unpackDesktopFrame: đóng gói và giải mã khung hình nhị phân kèm toạ độ màn hình', () => {
+  const rawJpeg = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0xFF, 0xD9]);
+  const packed = packDesktopFrame({
+    seq: 42,
+    ts: 1730000000000,
+    width: 1280,
+    height: 720,
+    screenWidth: 1920,
+    screenHeight: 1080,
+    screenX: 1920,
+    screenY: 0,
+    monitor: 1,
+    screens: [{ index: 0, name: '\\\\.\\DISPLAY1' }, { index: 1, name: '\\\\.\\DISPLAY2' }],
+    image: rawJpeg.toString('base64'),
+  });
+  const unpacked = unpackDesktopFrame(packed);
+  assert.ok(unpacked);
+  assert.equal(unpacked.meta.seq, 42);
+  assert.equal(unpacked.meta.width, 1280);
+  assert.equal(unpacked.meta.height, 720);
+  assert.equal(unpacked.meta.screenWidth, 1920);
+  assert.equal(unpacked.meta.screenHeight, 1080);
+  assert.equal(unpacked.meta.screenX, 1920);
+  assert.equal(unpacked.meta.screenY, 0);
+  assert.equal(unpacked.meta.monitor, 1);
+  assert.equal(unpacked.meta.screens.length, 2);
+  assert.deepEqual(unpacked.jpeg, rawJpeg);
+});
+
+test('DESKTOP_CAST_CSHARP: chỉ dùng cú pháp C# 5 và hỗ trợ LockBits, modifiers, cuộn ngang', () => {
+  assert.ok(!/\$"/.test(DESKTOP_CAST_CSHARP), 'không có chuỗi nội suy C# 6');
+  assert.ok(!/\?\./.test(DESKTOP_CAST_CSHARP), 'không có ?. của C# 6');
+  assert.ok(DESKTOP_CAST_CSHARP.includes('LockBits'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('ExtractModifiers'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('MOUSEEVENTF_HWHEEL'));
+});

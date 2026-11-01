@@ -32,7 +32,7 @@ export const MascotState = Object.freeze({
 });
 export const LogStatus = Object.freeze({ RUN: 'run', OK: 'ok', FAIL: 'fail', INFO: 'info', WARN: 'warn' });
 /** Lệnh gửi cửa sổ / sự kiện cửa sổ gửi về (một dòng JSON mỗi lệnh). */
-export const HostCommand = Object.freeze({ STATE: 'state', MAIN: 'main', LOG: 'log', GUI: 'gui', SHOW: 'show', QUIT: 'quit', OPEN_ASK: 'open_ask', GESTURE: 'gesture' });
+export const HostCommand = Object.freeze({ STATE: 'state', MAIN: 'main', LOG: 'log', GUI: 'gui', SHOW: 'show', QUIT: 'quit', OPEN_ASK: 'open_ask', GESTURE: 'gesture', NOTIFY_FREQ: 'notify_freq' });
 
 /** `aivin ui` (terminal khác) chạm tệp này → daemon đang chạy hiện linh vật + mở ô hỏi (mascot/ui.mjs). */
 export const MASCOT_SHOW_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-show');
@@ -53,7 +53,7 @@ export function requestMascotHide(file = MASCOT_HIDE_FILE) {
 }
 export const HostEvent = Object.freeze({
   READY: 'ready', POS: 'pos', PAUSE: 'pause', RESUME: 'resume', HIDE: 'hide', OFF: 'off', ASK: 'ask', CHOOSE: 'choose', CANCEL: 'cancel', NEW_CHAT: 'new_chat',
-  DROP: 'drop', AWAY: 'away', BACK: 'back',
+  DROP: 'drop', AWAY: 'away', BACK: 'back', NOTIFY_FREQ: 'notify_freq',
   VOICE_START: 'voice_start', VOICE_AUDIO: 'voice_audio', VOICE_INTERRUPT: 'voice_interrupt', VOICE_STOP: 'voice_stop', VOICE_MIC_LOST: 'voice_mic_lost',
 });
 const VOICE_EVENTS = new Set([HostEvent.VOICE_START, HostEvent.VOICE_AUDIO, HostEvent.VOICE_INTERRUPT, HostEvent.VOICE_STOP, HostEvent.VOICE_MIC_LOST]);
@@ -70,7 +70,8 @@ export function loadMascotSettings(file = MASCOT_SETTINGS_FILE) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8')) || {};
     const pos = Number.isFinite(data.x) && Number.isFinite(data.y) ? { x: data.x, y: data.y } : {};
-    return { enabled: data.enabled !== false, ...pos };
+    const freq = Number.isInteger(data.notify_freq) && data.notify_freq >= 0 && data.notify_freq <= 2 ? { notify_freq: data.notify_freq } : {};
+    return { enabled: data.enabled !== false, ...freq, ...pos };
   } catch {
     return { enabled: true };
   }
@@ -102,6 +103,7 @@ export function writeHostFiles({ dir, lang, settings }) {
   if (!fs.existsSync(path.join(home, 'logo.png'))) fs.writeFileSync(path.join(home, 'logo.png'), Buffer.from(AIVIN_LOGO_PNG_BASE64, 'base64'));
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
     strings: windowStrings(lang), palette: MASCOT_PALETTE, glyphs: MASCOT_GLYPHS, x: settings.x ?? null, y: settings.y ?? null, max_files: MAX_ATTACH,
+    notify_freq: settings.notify_freq ?? 1,
   }));
   for (const name of fs.readdirSync(dir)) {
     if (name !== hash && /^[0-9a-f]{12}$/.test(name)) fs.rmSync(path.join(dir, name), { recursive: true, force: true });
@@ -111,7 +113,7 @@ export function writeHostFiles({ dir, lang, settings }) {
 
 const NOOP = Object.freeze({
   connected() {}, disconnected() {}, paused() {}, callStarted() {}, callFinished() {}, waitingConfirm() {}, confirmDone() {}, chat() {}, close() {},
-  alert() {}, needsYou() {}, openAsk() {}, pid: () => null, enabled: false,
+  alert() {}, needsYou() {}, openAsk() {}, setNotifyFreq() {}, setLang() {}, get lang() { return 'en'; }, pid: () => null, enabled: false,
 });
 
 const hhmmss = (t) => new Date(t).toTimeString().slice(0, 8);
@@ -131,14 +133,14 @@ export function userWindow(w) {
  * chưa chạy). `spawnImpl`, `timers`, `now`, `dir`, `settingsFile`, các mốc `*Ms`: cho test.
  */
 export function createMascot({
-  enabled = true, platform = process.platform, env = process.env, onPause = () => {}, onResume = () => {}, say = () => {},
-  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onDrop = () => {},
+  enabled = true, platform = process.platform, env = process.env, lang: preferredLang, onPause = () => {}, onResume = () => {}, say = () => {},
+  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onDrop = () => {}, onNotifyFreq = () => {},
   spawnImpl = spawn, dir = MASCOT_DIR, settingsFile = MASCOT_SETTINGS_FILE, showFile = MASCOT_SHOW_FILE, hideFile = MASCOT_HIDE_FILE, now = Date.now, timers = { setTimeout, clearTimeout },
   thinkMs = THINK_MS, resultMs = RESULT_MS, mainThrottleMs = MAIN_THROTTLE_MS, restartDelaysMs = RESTART_DELAYS_MS, awayWaveMs = AWAY_WAVE_MS,
 } = {}) {
   if (!enabled || platform !== 'win32') return NOOP;
-  const lang = mascotLang(env);
-  const t = (key, vars) => mascotText(lang, key, vars);
+  let currentLang = preferredLang ? mascotLang(env, platform, preferredLang) : mascotLang(env, platform);
+  const t = (key, vars) => mascotText(currentLang, key, vars);
 
   let child = null;
   let ready = false;
@@ -208,6 +210,14 @@ export function createMascot({
     if (msg.t === HostEvent.CANCEL) return onCancel();
     // Nút "Chat mới" trên bảng: phiên chat mới cho linh vật.
     if (msg.t === HostEvent.NEW_CHAT) return onNewChat();
+    if (msg.t === HostEvent.NOTIFY_FREQ && Number.isFinite(msg.value)) {
+      const val = Number(msg.value);
+      if (val >= 0 && val <= 2) {
+        try { saveMascotSettings({ notify_freq: val }, settingsFile); } catch {}
+        onNotifyFreq(val);
+      }
+      return;
+    }
     if (msg.t === HostEvent.DROP && Array.isArray(msg.files)) return onDrop(msg.files.filter((f) => typeof f === 'string' && f));
     if (msg.t === HostEvent.AWAY) { away = { since: now(), done: 0, failed: 0, needs: 0 }; return; }
     if (msg.t === HostEvent.BACK) return welcomeBack();
@@ -278,7 +288,7 @@ export function createMascot({
     if (closed || dormant || child) return;
     let home;
     try {
-      home = writeHostFiles({ dir, lang, settings: loadMascotSettings(settingsFile) });
+      home = writeHostFiles({ dir, lang: currentLang, settings: loadMascotSettings(settingsFile) });
     } catch {
       return;
     }
@@ -411,7 +421,7 @@ export function createMascot({
 
   return {
     enabled: true,
-    lang,
+    get lang() { return currentLang; },
     /** Lệnh của ô hỏi (ask.mjs: chat / chat_busy / ask_status) → cửa sổ. */
     chat(cmd) { send(cmd); },
     connected() {
@@ -438,7 +448,7 @@ export function createMascot({
     },
     callStarted(call, tool) {
       if (!call?.call_id || tool?.internal) return;
-      const { title, detail } = describeStep({ call, tool, lang });
+      const { title, detail } = describeStep({ call, tool, lang: currentLang });
       active.set(call.call_id, { title, detail, gui: tool?.group === ToolGroup.GUI, at: now() });
       timers.clearTimeout(thinkTimer);
       timers.clearTimeout(resultTimer);
@@ -464,7 +474,7 @@ export function createMascot({
     },
     waitingConfirm(call, tool) {
       if (!call?.call_id) return;
-      const { title } = describeStep({ call, tool, lang });
+      const { title } = describeStep({ call, tool, lang: currentLang });
       waiting.add(call.call_id);
       syncState();
       main(t(MascotText.WAITING_CONFIRM, { title }));
@@ -505,6 +515,20 @@ export function createMascot({
     },
     /** Hiện linh vật + mở ô hỏi để gõ ngay (như `aivin ui`) — cho phím tắt / khay hệ thống; câu hỏi đang chờ (nếu có) đã nằm sẵn trong ô. */
     openAsk: wake,
+    setNotifyFreq: (val) => send({ t: HostCommand.NOTIFY_FREQ, value: Number(val) }),
+    setLang(nextLang) {
+      if (!nextLang) return;
+      const resolved = mascotLang(env, platform, nextLang);
+      if (resolved === currentLang) return;
+      currentLang = resolved;
+      if (child && !dormant) {
+        try { write({ t: 'quit' }); } catch {}
+        try { child.kill(); } catch {}
+        child = null;
+        ready = false;
+        timers.setTimeout(start, 200);
+      }
+    },
     pid: () => child?.pid ?? null,
     close,
   };
