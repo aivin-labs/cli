@@ -557,11 +557,34 @@ function SetState($s) {
 
 # Pointer: the rig follows the cursor with its eyes on its own (anywhere near the bot). Hovering greets with a happy face and a lean-in.
 function IsBusy { $script:state -eq 'working' -or $script:state -eq 'thinking' }
-(E 'Mascot').Add_MouseEnter({ Wake; $script:rig.Hover = $true; if (-not (IsBusy) -and -not $script:rig.Dizzy) { if ((Get-Random -Minimum 0 -Maximum 10) -lt 3) { PlayFace 'wink' 'wink' 1.4 } else { SetFace 'hello' } } })
+(E 'Mascot').Add_MouseEnter({
+  $startled = Wake $true
+  $script:rig.Hover = $true
+  if ($startled) { return }
+  if (-not (IsBusy) -and -not $script:rig.Dizzy) { if ((Get-Random -Minimum 0 -Maximum 10) -lt 3) { PlayFace 'wink' 'wink' 1.4 } else { SetFace 'hello' } }
+})
 
 # Doze: idle for a short while with nobody around -> the bot nods off (closed eyes, zzz); new work or the pointer wakes it up.
 $script:lastActive = Get-Date
-function Wake { $script:lastActive = Get-Date; $script:yawned = $false; if ($script:rig.Dozing) { $script:rig.Doze($false); SetFace $script:state } }
+function Wake($fromHover = $false) {
+  $wasSleeping = $script:rig.Dozing -or $script:yawned
+  $script:lastActive = Get-Date
+  $script:yawned = $false
+  if ($wasSleeping) {
+    if ($script:rig.Dozing) { $script:rig.Doze($false) }
+    if ($fromHover) {
+      $script:rig.Play('startle')
+      SetFace 'waiting'
+      $script:faceTimer.Stop()
+      $script:faceTimer.Interval = [TimeSpan]::FromSeconds(0.85)
+      $script:faceTimer.Start()
+      return $true
+    } else {
+      SetFace $script:state
+    }
+  }
+  return $false
+}
 $script:dozeTimer = New-Object Windows.Threading.DispatcherTimer; $script:dozeTimer.Interval = [TimeSpan]::FromSeconds(3)
 $script:dozeTimer.Add_Tick({
   if ($script:state -eq 'idle' -and -not $script:rig.Dozing -and -not $script:rig.Hover -and (E 'AskBox').Visibility -ne 'Visible' -and (E 'Panel').Visibility -ne 'Visible' -and ((Get-Date) - $script:lastActive).TotalSeconds -ge ${MASCOT_DOZE_SEC}) {

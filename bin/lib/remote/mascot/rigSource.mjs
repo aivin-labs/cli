@@ -303,7 +303,7 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
         case "wave": hopAt = t; hopKick = landKick = false; perkAt = t + 0.6; flashAt = t; blushAt = t; break;
         case "wink": blinkAt = t; blushAt = t; antA.V -= 60; break;
         // Busy -> needs you: a start (eyes pop wide, antenna jolts, a quick rise) before the waiting look.
-        case "startle": perkAt = t; flashAt = t; antA.V -= 260; eyeSq.V += 6; pop.V += 2.5; break;
+        case "startle": hopAt = t; hopKick = landKick = false; perkAt = t; flashAt = t; antA.V -= 280; eyeSq.V += 6; pop.V += 2.8; break;
         // Done after an error: no hop - sag with a slow breath out, then perk up.
         case "relief": hopAt = -10; sighAt = t; perkAt = t + 0.75; antA.V += 70; break;
         // Done after long work: a second hop + sparkle burst right after the first.
