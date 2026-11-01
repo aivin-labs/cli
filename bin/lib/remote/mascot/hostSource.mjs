@@ -23,8 +23,8 @@ const B = AIVIN_BRAND;
 // The rendered bot is a MASCOT_BOX-sized Viewbox. Keep the hit/layout box equally large so the rounded lower body is not clipped.
 const MASCOT_BOX = { w: 60, h: 60 };
 export const MASCOT_CENTER = Object.freeze({ x: 30, y: 28.5 });
-/** Rảnh (idle) liền chừng này phút mà không ai rê chuột → bot ngủ gật; có việc / rê chuột vào thì thức. */
-const MASCOT_DOZE_MIN = 10;
+/** Rảnh (idle) liền chừng này giây mà không ai rê chuột → bot ngủ gật; có việc / rê chuột vào thì thức. */
+const MASCOT_DOZE_SEC = 60;
 /** Không chạm chuột / bàn phím chừng này phút = chủ máy đi vắng (khoá máy, đi họp…) → daemon gom việc xảy ra để báo khi quay lại. */
 const MASCOT_AWAY_MIN = 10;
 /** Lề trong cửa sổ quanh bot / các hộp (chỗ cho bóng đổ). */
@@ -559,15 +559,15 @@ function SetState($s) {
 function IsBusy { $script:state -eq 'working' -or $script:state -eq 'thinking' }
 (E 'Mascot').Add_MouseEnter({ Wake; $script:rig.Hover = $true; if (-not (IsBusy) -and -not $script:rig.Dizzy) { if ((Get-Random -Minimum 0 -Maximum 10) -lt 3) { PlayFace 'wink' 'wink' 1.4 } else { SetFace 'hello' } } })
 
-# Doze: idle for a long while with nobody around -> the bot nods off (closed eyes, zzz); new work or the pointer wakes it up.
+# Doze: idle for a short while with nobody around -> the bot nods off (closed eyes, zzz); new work or the pointer wakes it up.
 $script:lastActive = Get-Date
 function Wake { $script:lastActive = Get-Date; $script:yawned = $false; if ($script:rig.Dozing) { $script:rig.Doze($false); SetFace $script:state } }
-$script:dozeTimer = New-Object Windows.Threading.DispatcherTimer; $script:dozeTimer.Interval = [TimeSpan]::FromSeconds(15)
+$script:dozeTimer = New-Object Windows.Threading.DispatcherTimer; $script:dozeTimer.Interval = [TimeSpan]::FromSeconds(3)
 $script:dozeTimer.Add_Tick({
-  if ($script:state -eq 'idle' -and -not $script:rig.Dozing -and -not $script:rig.Hover -and ((Get-Date) - $script:lastActive).TotalMinutes -ge ${MASCOT_DOZE_MIN}) {
-    # A yawn first, nodding off on the next tick (PlayFace would count as activity: keep the idle clock and the yawn flag).
-    if (-not $script:yawned) { $script:rig.Play('yawn'); SetFace 'yawn'; $script:faceTimer.Stop(); $script:faceTimer.Interval = [TimeSpan]::FromSeconds(2); $script:faceTimer.Start(); $script:yawned = $true }
-    else { $script:rig.Doze($true); SetFace 'offline' }
+  if ($script:state -eq 'idle' -and -not $script:rig.Dozing -and -not $script:rig.Hover -and (E 'AskBox').Visibility -ne 'Visible' -and (E 'Panel').Visibility -ne 'Visible' -and ((Get-Date) - $script:lastActive).TotalSeconds -ge ${MASCOT_DOZE_SEC}) {
+    # A yawn first, nodding off when yawn finishes (or on next tick).
+    if (-not $script:yawned) { $script:yawned = $true; $script:rig.Play('yawn'); SetFace 'yawn'; $script:faceTimer.Stop(); $script:faceTimer.Interval = [TimeSpan]::FromSeconds(2.2); $script:faceTimer.Start() }
+    elseif (-not $script:faceTimer.IsEnabled) { $script:rig.Doze($true); SetFace 'offline' }
   }
 })
 $script:dozeTimer.Start()
@@ -575,7 +575,14 @@ $script:dozeTimer.Start()
 
 # Play: a one-shot face for a reaction, then back to the normal face (hello while hovered and free, else the state's face).
 $script:faceTimer = New-Object Windows.Threading.DispatcherTimer
-$script:faceTimer.Add_Tick({ $script:faceTimer.Stop(); SetFace $(if ($script:rig.Hover -and -not (IsBusy)) { 'hello' } else { $script:state }) })
+$script:faceTimer.Add_Tick({
+  $script:faceTimer.Stop()
+  if ($script:yawned -and -not $script:rig.Dozing -and -not $script:rig.Hover -and $script:state -eq 'idle') {
+    $script:rig.Doze($true); SetFace 'offline'
+  } else {
+    SetFace $(if ($script:rig.Hover -and -not (IsBusy)) { 'hello' } else { $script:state })
+  }
+})
 function PlayFace($gesture, $face, $sec) {
   Wake; $script:rig.Play($gesture); SetFace $face
   $script:faceTimer.Stop(); $script:faceTimer.Interval = [TimeSpan]::FromSeconds($sec); $script:faceTimer.Start()
