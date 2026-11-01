@@ -130,12 +130,16 @@ namespace AivinDesktop {
     }
 
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
-      if (!e.Item.Enabled) {
-        e.TextColor = ClrMuted;
-      } else {
-        e.TextColor = ClrText;
-      }
-      base.OnRenderItemText(e);
+      Color textColor = !e.Item.Enabled ? ClrMuted : ClrText;
+      int left = Math.Max(16, e.Item.Padding.Left);
+      Rectangle rect = new Rectangle(
+        left,
+        0,
+        Math.Max(0, e.Item.Width - left - 16),
+        e.Item.Height
+      );
+      TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+      TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, rect, textColor, flags);
     }
 
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
