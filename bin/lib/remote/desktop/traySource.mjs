@@ -233,12 +233,11 @@ namespace AivinDesktop {
       menu.BackColor = Color.White;
       menu.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
       menu.Renderer = new ModernMenuRenderer();
-      menu.MinimumSize = new Size(256, 0);
-      menu.Padding = new Padding(4, 8, 4, 8);
+      menu.Padding = new Padding(2, 6, 2, 6);
 
       open = Item("", delegate { OpenAivin(); });
       open.Font = new Font("Segoe UI", 10.0f, FontStyle.Bold);
-      open.Height = 36;
+      open.Padding = new Padding(16, 7, 24, 7);
 
       mascot = Item(cfg.T("mascot"), delegate { ToggleMascot(); });
       pause = Item("", delegate { TogglePause(); });
@@ -247,11 +246,7 @@ namespace AivinDesktop {
 
       status = new ToolStripMenuItem();
       status.Enabled = false;
-      status.AutoSize = false;
-      status.Height = 24;
-      status.TextAlign = ContentAlignment.MiddleLeft;
-      status.Padding = new Padding(16, 0, 16, 0);
-      status.Margin = new Padding(4, 0, 4, 2);
+      status.Padding = new Padding(16, 4, 24, 4);
       status.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
 
       quit = Item(cfg.T("quit"), delegate { Quit(); });
@@ -301,11 +296,7 @@ namespace AivinDesktop {
 
     ToolStripMenuItem Item(string text, EventHandler onClick) {
       ToolStripMenuItem item = new ToolStripMenuItem(text);
-      item.AutoSize = false;
-      item.Height = 34;
-      item.TextAlign = ContentAlignment.MiddleLeft;
-      item.Padding = new Padding(16, 0, 16, 0);
-      item.Margin = new Padding(4, 1, 4, 1);
+      item.Padding = new Padding(16, 6, 24, 6);
       item.Click += onClick;
       return item;
     }
