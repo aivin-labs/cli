@@ -115,21 +115,50 @@ namespace AivinGui {
       object j = JsonValue(v);
       string s = j as string;
       if (formula || string.IsNullOrEmpty(s)) return j;
+      // Số viết dạng chuỗi ("-5", "+3.5", "-1500000") vẫn để Excel đổi thành số như trước — chỉ chặn khi sau dấu là chữ / hàm / ô.
+      if (IsPlainNumber(s)) return j;
       char c = s[0];
       if (c == '=' || c == '+' || c == '-' || c == '@' || c == '\t' || c == '\r') return "'" + s;
       return j;
     }
 
-    /** Sổ / tài liệu người dùng ĐANG MỞ (không do AI mở): mặc định KHÔNG lưu (lưu = lưu luôn thay đổi dở của người dùng), chỉ lưu khi save=true. */
-    static bool ShouldSave(Opened o, Dictionary<string, object> a) {
-      return o.Own ? B(a, "save", true) : B(a, "save", false);
+    /** [+-]chữ số, tối đa một dấu thập phân (. hoặc ,), không khoảng trắng — "+84 912…" (có khoảng trắng) vẫn là chữ. */
+    static bool IsPlainNumber(string s) {
+      int i = (s[0] == '+' || s[0] == '-') ? 1 : 0, digits = 0, seps = 0;
+      if (i >= s.Length) return false;
+      for (; i < s.Length; i++) {
+        char ch = s[i];
+        if (ch >= '0' && ch <= '9') digits++;
+        else if ((ch == '.' || ch == ',') && seps == 0 && digits > 0 && i < s.Length - 1) seps++;
+        else return false;
+      }
+      return digits > 0;
     }
 
-    static void AddSaveState(Dictionary<string, object> res, Opened o, bool save, string app) {
+    /** Sổ / tài liệu người dùng mở sẵn đang có chỉnh sửa chưa lưu (đọc TRƯỚC khi AI ghi). Không đọc được → coi là có (không lưu). */
+    static bool UserHasUnsavedEdits(Opened o) {
+      if (o.Own) return false;
+      try { return !Convert.ToBoolean(Get(o.Doc, "Saved")); } catch { return true; }
+    }
+
+    /**
+     * Sổ / tài liệu người dùng ĐANG MỞ (không do AI mở): mặc định KHÔNG lưu, chỉ lưu khi save=true — và kể cả save=true cũng không lưu nếu người
+     * dùng đang có chỉnh sửa dở (lưu lúc đó = lưu luôn phần dở của họ, 02/11/2026).
+     */
+    static bool ShouldSave(Opened o, Dictionary<string, object> a, bool userDirty) {
+      return o.Own ? B(a, "save", true) : !userDirty && B(a, "save", false);
+    }
+
+    static void AddSaveState(Dictionary<string, object> res, Opened o, bool save, string app, bool userDirty) {
       res["saved"] = save;
       if (!o.Own && !save) {
         res["unsaved"] = true;
-        res["hint"] = "The change is in the file the user has open in " + app + " but NOT saved (saving would also save the user's own unsaved edits) - tell the user to review and save, or call again with save: true only if the user asked to save";
+        if (userDirty) {
+          res["user_had_unsaved_edits"] = true;
+          res["hint"] = "The file the user has open in " + app + " already had the user's own unsaved edits, so it was NOT saved (saving would save their edits too) - ask the user to review and save it themselves";
+        } else {
+          res["hint"] = "The change is in the file the user has open in " + app + " but NOT saved (saving would also save the user's own unsaved edits) - tell the user to review and save, or call again with save: true only if the user asked to save";
+        }
       }
     }
 
@@ -332,7 +361,8 @@ namespace AivinGui {
     static object ExcelWrite(Dictionary<string, object> a) {
       string path = S(a, "path");
       Opened o = OpenWorkbook(path, B(a, "create", false), false);
-      bool save = ShouldSave(o, a);
+      bool userDirty = UserHasUnsavedEdits(o);
+      bool save = ShouldSave(o, a, userDirty);
       bool formula = B(a, "formula", false);
       try {
         object ws = SheetOf(o.Doc, S(a, "sheet"));
@@ -366,7 +396,7 @@ namespace AivinGui {
         if (written.Count == 0) throw new GuiError("INVALID_ARGS", "Give cells {\"B2\": value} or range + values");
         Release(ws);
         var res = new Dictionary<string, object> { { "path", path }, { "written", written }, { "open_in_user_excel", !o.Own } };
-        AddSaveState(res, o, save, "Excel");
+        AddSaveState(res, o, save, "Excel", userDirty);
         return res;
       } finally { CloseWorkbook(o, save); }
     }
@@ -442,10 +472,11 @@ namespace AivinGui {
     static object WordEdit(Dictionary<string, object> a) {
       string path = S(a, "path");
       Opened o = OpenDocument(path, B(a, "create", false), false);
-      bool save = ShouldSave(o, a);
+      bool userDirty = UserHasUnsavedEdits(o);
+      bool save = ShouldSave(o, a, userDirty);
       try {
         var res = new Dictionary<string, object> { { "path", path }, { "open_in_user_word", !o.Own } };
-        AddSaveState(res, o, save, "Word");
+        AddSaveState(res, o, save, "Word", userDirty);
         string find = S(a, "find"), replace = S(a, "replace"), append = S(a, "append");
         if (!string.IsNullOrEmpty(find)) {
           object content = Get(o.Doc, "Content");

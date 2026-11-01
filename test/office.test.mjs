@@ -68,8 +68,12 @@ test('excel.write / word.edit: save chỉ chuyển khi nêu rõ, công thức ch
 
 test('host Office (C#): sổ người dùng đang mở không lưu mặc định, chữ "=..." không thành công thức, bản ẩn ghi PID + Outlook do host bật thì Quit', async () => {
   const { OFFICE_CSHARP: cs } = await import('../bin/lib/remote/gui/officeHostSource.mjs');
-  assert.match(cs, /return o\.Own \? B\(a, "save", true\) : B\(a, "save", false\)/);
+  assert.match(cs, /return o\.Own \? B\(a, "save", true\) : !userDirty && B\(a, "save", false\)/);
   assert.match(cs, /res\["unsaved"\] = true/);
+  // Người dùng đang có chỉnh dở (Saved=false, đọc trước khi ghi) → không lưu kể cả save=true (02/11/2026).
+  assert.match(cs, /return !Convert\.ToBoolean\(Get\(o\.Doc, "Saved"\)\); \} catch \{ return true; \}/);
+  assert.match(cs, /res\["user_had_unsaved_edits"\] = true/);
+  assert.equal((cs.match(/bool userDirty = UserHasUnsavedEdits\(o\);/g) || []).length, 2);
   assert.match(cs, /if \(formula && s != null && s\.StartsWith\("="\)\) Set\(r, "Formula", s\)/);
   assert.match(cs, /data\[r, c\] = SafeCellValue\(arr\[c\], formula\)/);
   assert.match(cs, /TrackOwn\("EXCEL", before, own\)/);
@@ -98,7 +102,7 @@ test('host Office (C#) chạy thật phần thuần: chống chèn công thức 
     "$ErrorActionPreference = 'Stop'",
     'Add-Type -Path $env:AIVIN_TEST_DLL',
     "$m = [AivinGui.Office].GetMethod('SafeCellValue', [Reflection.BindingFlags]'NonPublic,Static')",
-    "$vals = @('=HYPERLINK(1)', '+1', '-x', '@SUM(A1)', 'hello', '')",
+    "$vals = @('=HYPERLINK(1)', '+1', '-x', '@SUM(A1)', 'hello', '', '-5', '-1500000', '+3.5', '-1,25', '+84 912 345', '-', '-5-1', '+A1', '-.5')",
     '$safe = @($vals | ForEach-Object { $m.Invoke($null, [object[]]@([string]$_, $false)) })',
     "$formula = $m.Invoke($null, @('=1+1', $true))",
     '$killed = [AivinGui.Office]::CleanupOrphans()',
@@ -108,7 +112,8 @@ test('host Office (C#) chạy thật phần thuần: chống chèn công thức 
     encoding: 'utf8', env: { ...process.env, AIVIN_TEST_DLL: dll, AIVIN_GUI_ORPHANS: orphans }, windowsHide: true,
   });
   const res = JSON.parse(out.trim().split(/\r?\n/).at(-1));
-  assert.deepEqual(res.safe, ["'=HYPERLINK(1)", "'+1", "'-x", "'@SUM(A1)", 'hello', '']);
+  // Số viết dạng chuỗi giữ nguyên (Excel tự đổi thành số); SĐT có khoảng trắng / "-5-1" / ô tham chiếu vẫn thành chữ.
+  assert.deepEqual(res.safe, ["'=HYPERLINK(1)", '+1', "'-x", "'@SUM(A1)", 'hello', '', '-5', '-1500000', '+3.5', '-1,25', "'+84 912 345", "'-", "'-5-1", "'+A1", "'-.5"]);
   assert.equal(res.formula, '=1+1');
   assert.equal(res.killed, 0);
   assert.equal(res.left, false);
