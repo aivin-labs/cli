@@ -784,6 +784,7 @@ export async function startRemoteClient(options = {}) {
       socket: () => socket, send: (cmd) => mascot.chat(cmd), lang: mascot.lang,
       onAlert: (alert) => mascot.alert(alert), onPending: (on) => mascot.needsYou(on),
       micBusy: () => !!meetings?.status()?.recording,
+      serverUrl: credentials?.server_url,
     });
     socket.on(DeviceEvent.CHAT_EVENT, guarded(DeviceEvent.CHAT_EVENT, (payload) => mascotChat.onChatEvent(payload)));
     // Báo chủ động: việc của chủ máy (web, chạy nền, automation…) xong / lỗi / cần trả lời.

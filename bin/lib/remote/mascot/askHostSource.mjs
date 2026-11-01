@@ -286,9 +286,21 @@ function ChatRow($m) {
     $fade = New-Object Windows.Media.Animation.DoubleAnimation 0, 1, ([TimeSpan]::FromMilliseconds(200)); $fade.EasingFunction = $ease
     $rise = New-Object Windows.Media.Animation.DoubleAnimation 6, 0, ([TimeSpan]::FromMilliseconds(240)); $rise.EasingFunction = $ease
     $b.BeginAnimation([Windows.UIElement]::OpacityProperty, $fade); $slide.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $rise)
-    $row = @{ box = $b; text = $tb }
+    $row = @{ box = $b; text = $tb; url = $null }
+    $b.Add_MouseLeftButtonUp({
+      if ($row.url) { try { [System.Diagnostics.Process]::Start([string]$row.url) } catch {} }
+    })
     if ($id) { $script:chatRows[$id] = $row }
     while ($list.Children.Count -gt 40) { $list.Children.RemoveAt(0) }
+  }
+  if ($m.url) {
+    $row.url = [string]$m.url
+    $row.box.Cursor = [Windows.Input.Cursors]::Hand
+    $row.box.ToolTip = [string]$m.url
+  } else {
+    $row.url = $null
+    $row.box.Cursor = [Windows.Input.Cursors]::Arrow
+    $row.box.ToolTip = $null
   }
   $role = [string]$m.role
   $row.box.HorizontalAlignment = if ($role -eq 'user') { 'Right' } else { 'Left' }

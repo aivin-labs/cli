@@ -87,6 +87,21 @@ const NOTIFY_LABEL = { [NotifyKind.DONE]: MascotText.NOTIFY_DONE, [NotifyKind.FA
 export const QuestionKind = Object.freeze({ CHOICE: 'choice', FORM: 'form', TEXT: 'text' });
 /** id nút "Bỏ qua" của trường không bắt buộc trong biểu mẫu. */
 export const FORM_SKIP_ID = '__skip__';
+
+/** Link mo tren trinh duyet khi chu may bam vao thong bao phien lam viec. */
+export function webUrlForSession(sessionId, serverUrl = '') {
+  if (!sessionId) return null;
+  let base = 'https://beta.aivin.vn';
+  if (serverUrl) {
+    try {
+      const u = new URL(serverUrl);
+      let host = u.hostname.replace(/(^|-)api\./, '$1').replace(/^api\./, '');
+      if (host.startsWith('-')) host = host.slice(1);
+      base = `${u.protocol}//${host}${u.port ? `:${u.port}` : ''}`;
+    } catch {}
+  }
+  return `${base}/?session_id=${encodeURIComponent(sessionId)}`;
+}
 const SEEN_NOTIFY_MAX = 50;
 /** Tệp thả vào bot chờ đi kèm một câu, tối đa (cửa sổ cũng đọc qua config.json: thùng đầy thì từ chối ngay lúc kéo tới). */
 export const MAX_ATTACH = 10;
@@ -107,6 +122,7 @@ const MAX_PENDING = 20;
  */
 export function createMascotChat({
   socket, send, lang, timers = { setTimeout, clearTimeout }, now = Date.now, onAlert = () => {}, onPending = () => {}, micBusy = () => false,
+  serverUrl = '',
 }) {
   const t = (key, vars) => mascotText(lang, key, vars);
   let current = null;
@@ -129,7 +145,7 @@ export function createMascotChat({
    * Câu hỏi đang chờ: dòng câu hỏi (id `q-<reply_id>`, cửa sổ dựng lại thì daemon gửi lại) + nút lựa chọn, rồi ghim ô hỏi — ô tự bật ra
    * (không lấy bàn phím) và ở đó tới khi trả lời. Không phải câu hỏi (thiếu reply_id) → chỉ là một dòng chữ.
    */
-  const questionRow = (q, more = 0) => row(ChatRole.ASSISTANT, more ? `${q.text}\n${t(MascotText.ASK_QUEUED, { n: more })}` : q.text, `${QUESTION_ROW}${q.reply_id}`);
+  const questionRow = (q, more = 0) => row(ChatRole.ASSISTANT, more ? `${q.text}\n${t(MascotText.ASK_QUEUED, { n: more })}` : q.text, `${QUESTION_ROW}${q.reply_id}`, q.url ? { url: q.url } : {});
   /** Dòng + nút của câu đầu hàng, rồi ghim ô hỏi (gửi lại được — cửa sổ cập nhật dòng theo id). */
   const showHead = () => {
     const q = head();
@@ -143,9 +159,9 @@ export function createMascotChat({
     t: AskCommand.CHOICES, multiple,
     options: options.map((o) => ({ id: String(o.id), text: String(o.text), ...(typeof o.icon === 'string' && o.icon ? { icon: o.icon } : {}) })),
   });
-  const setPending = (sessionId, question, text) => {
-    if (!question?.reply_id) return row(ChatRole.ASSISTANT, text);
-    const entry = { session_id: sessionId, reply_id: question.reply_id, kind: question.kind, options: Array.isArray(question.options) ? question.options : [], multiple: question.multiple === true, text };
+  const setPending = (sessionId, question, text, url = null) => {
+    if (!question?.reply_id) return row(ChatRole.ASSISTANT, text, undefined, url ? { url } : {});
+    const entry = { session_id: sessionId, reply_id: question.reply_id, kind: question.kind, options: Array.isArray(question.options) ? question.options : [], multiple: question.multiple === true, text, ...(url ? { url } : {}) };
     const fields = question.kind === QuestionKind.FORM && Array.isArray(question.fields) ? question.fields.filter((f) => f?.name) : [];
     if (fields.length) Object.assign(entry, { fields, values: {}, step: 0 });
     const at = queue.findIndex((q) => q.reply_id === entry.reply_id);
@@ -536,9 +552,10 @@ export function createMascotChat({
     const title = typeof payload.title === 'string' ? payload.title.trim() : '';
     const text = typeof payload.text === 'string' ? payload.text.trim() : '';
     const line = [`${label}${title ? `: ${title}` : ''}`, text].filter(Boolean).join('\n');
-    if (payload.kind === NotifyKind.NEEDS_YOU && payload.question) setPending(payload.session_id, payload.question, line);
-    else row(payload.kind === NotifyKind.FAILED ? ChatRole.ERROR : ChatRole.ASSISTANT, line);
-    onAlert({ kind: payload.kind, text: `${label}: ${text || title}` });
+    const url = payload.url || (payload.session_id ? webUrlForSession(payload.session_id, serverUrl) : null);
+    if (payload.kind === NotifyKind.NEEDS_YOU && payload.question) setPending(payload.session_id, payload.question, line, url);
+    else row(payload.kind === NotifyKind.FAILED ? ChatRole.ERROR : ChatRole.ASSISTANT, line, undefined, url ? { url } : {});
+    onAlert({ kind: payload.kind, text: `${label}: ${text || title}`, ...(url ? { url } : {}) });
   }
 
   // ---- Nói chuyện realtime ----

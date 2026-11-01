@@ -372,15 +372,15 @@ export function createMascot({
   let mainTimer = null;
   let mainNext = null;
   let mainAt = 0;
-  const main = (text) => {
-    mainNext = text;
+  const main = (text, url = null) => {
+    mainNext = { text, url };
     const wait = mainThrottleMs - (now() - mainAt);
     if (wait > 0) {
-      if (!mainTimer) mainTimer = timers.setTimeout(() => { mainTimer = null; main(mainNext); }, wait);
+      if (!mainTimer) mainTimer = timers.setTimeout(() => { mainTimer = null; main(mainNext.text, mainNext.url); }, wait);
       return;
     }
     mainAt = now();
-    send({ t: HostCommand.MAIN, text });
+    send({ t: HostCommand.MAIN, text, ...(url ? { url } : {}) });
   };
   const log = (entry) => send({ t: HostCommand.LOG, time: hhmmss(now()), ...entry });
 
@@ -479,13 +479,13 @@ export function createMascot({
      * Báo chủ động / câu trả lời của ô hỏi (ask.mjs `onAlert`): bong bóng ngắn + nét mặt — xong (nhảy, lấp lánh) / lỗi (lắc đầu) rồi về
      * chờ việc; cần bạn thì trạng thái do `needsYou` giữ. Đang có bước chạy trên máy thì chỉ hiện bong bóng, không đổi trạng thái.
      */
-    alert({ kind, text } = {}) {
+    alert({ kind, text, url } = {}) {
       if (!text) return;
       if (hiddenUntilWork) { hiddenUntilWork = false; send({ t: HostCommand.SHOW }); }
       const failed = kind === NotifyKind.FAILED;
       if (away) away[failed ? 'failed' : kind === NotifyKind.NEEDS_YOU ? 'needs' : 'done']++;
-      log({ status: failed ? LogStatus.FAIL : kind === NotifyKind.NEEDS_YOU ? LogStatus.WARN : LogStatus.OK, title: text });
-      main(text);
+      log({ status: failed ? LogStatus.FAIL : kind === NotifyKind.NEEDS_YOU ? LogStatus.WARN : LogStatus.OK, title: text, ...(url ? { url } : {}) });
+      main(text, url);
       if (kind === NotifyKind.NEEDS_YOU || active.size || waiting.size) return;
       timers.clearTimeout(thinkTimer);
       timers.clearTimeout(resultTimer);

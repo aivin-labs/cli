@@ -629,15 +629,23 @@ function HideBubble {
   $b = E 'Bubble'; if ($b.Visibility -ne 'Visible') { return }
   $sb = $w.FindResource('BubbleOut').Clone(); $sb.Add_Completed({ (E 'Bubble').Visibility = 'Collapsed' }); $sb.Begin($b)
 }
-function ShowBubble($text) {
+$script:bubbleUrl = $null
+function ShowBubble($text, $url = $null) {
+  $script:bubbleUrl = $url
   (E 'NowText').Text = $text
   if ((E 'Panel').Visibility -eq 'Visible') { return }
   (E 'BubbleText').Text = $text
+  (E 'BubbleBox').Cursor = if ($url) { [Windows.Input.Cursors]::Hand } else { [Windows.Input.Cursors]::Arrow }
   $b = E 'Bubble'
   if ($b.Visibility -ne 'Visible') { $b.Visibility = 'Visible'; $w.FindResource('BubbleIn').Begin($b) }
   $script:bubbleTimer.Stop()
   if ($script:state -ne 'working' -and $script:state -ne 'thinking' -and $script:state -ne 'waiting') { $script:bubbleTimer.Start() }
 }
+(E 'BubbleBox').Add_MouseLeftButtonUp({
+  if ($script:bubbleUrl) {
+    try { [System.Diagnostics.Process]::Start([string]$script:bubbleUrl) } catch {}
+  }
+})
 
 $script:rows = @{}; $script:order = New-Object System.Collections.Generic.Queue[string]
 function LogEntry($m) {
@@ -652,7 +660,14 @@ function LogEntry($m) {
     [void]$sp.Children.Add($ti); [void]$sp.Children.Add($sub)
     [void]$dp.Children.Add($g); [void]$dp.Children.Add($tm); [void]$dp.Children.Add($sp)
     $list = E 'LogList'; $list.Children.Insert(0, $dp); (E 'Empty').Visibility = 'Collapsed'
-    $row = @{ glyph = $g; time = $tm; title = $ti; sub = $sub }
+    $row = @{ glyph = $g; time = $tm; title = $ti; sub = $sub; url = [string]$m.url }
+    if ($m.url) {
+      $dp.Cursor = [Windows.Input.Cursors]::Hand
+      $dp.ToolTip = [string]$m.url
+      $dp.Add_MouseLeftButtonUp({
+        if ($row.url) { try { [System.Diagnostics.Process]::Start([string]$row.url) } catch {} }
+      })
+    }
     if ($m.id) { $script:rows[[string]$m.id] = $row; $script:order.Enqueue([string]$m.id) }
     while ($list.Children.Count -gt 150) { $list.Children.RemoveAt($list.Children.Count - 1) }
     while ($script:order.Count -gt 150) { $script:rows.Remove($script:order.Dequeue()) }
@@ -740,7 +755,7 @@ function Handle($m) {
   if ($env:AIVIN_MASCOT_DEBUG) { Dbg "recv $($m.t) $($m.state)$($m.text)$($m.title)" }
   switch ($m.t) {
     'state' { SetState $m.state }
-    'main' { if ($m.quiet) { (E 'NowText').Text = $m.text } else { ShowBubble $m.text } }
+    'main' { if ($m.quiet) { (E 'NowText').Text = $m.text } else { ShowBubble $m.text $m.url } }
     'log' { LogEntry $m }
     'gui' { $script:guiHidden = [bool]$m.active; ApplyVisibility }
     'show' { $script:userHidden = $false; ApplyVisibility }

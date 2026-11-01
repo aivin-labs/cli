@@ -103,6 +103,13 @@ test('báo chủ động: một dòng ngắn "Xong: …" / "Lỗi: …" + bong b
   assert.equal(choices(sent).length, 0);
 });
 
+test('thông báo realtime kèm session_id hoặc url: kèm đường dẫn mở trình duyệt', () => {
+  const { chat, sent, alerts } = setup();
+  chat.onNotify({ id: 'n1', kind: 'done', title: 'Tác vụ xong', text: 'Đã xuất file', session_id: 'sess-123' });
+  assert.deepEqual(alerts, [{ kind: 'done', text: 'Xong: Đã xuất file', url: 'https://beta.aivin.vn/?session_id=sess-123' }]);
+  assert.ok(rows(sent).some((r) => r.role === ChatRole.ASSISTANT && r.url === 'https://beta.aivin.vn/?session_id=sess-123'));
+});
+
 test('câu trả lời đã rút gọn ghi "(chi tiết trên Aivin)"; hết giờ chờ (việc còn chạy) không báo "xong"', async () => {
   const { chat, sent, socket, alerts } = setup();
   await chat.ask('Phân tích log tháng 10');
