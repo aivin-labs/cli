@@ -196,22 +196,21 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
     </DockPanel>
     <TextBlock x:Name="NowLabel" DockPanel.Dock="Top" Margin="0,14,0,4" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
     <TextBlock x:Name="NowText" DockPanel.Dock="Top" Margin="0,0,6,0" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap" LineHeight="20"/>
-    <!-- Tần suất thông báo: Min (chỉ phiên này/HIL) -> Max (tất cả hệ thống) -->
-    <DockPanel DockPanel.Dock="Top" Margin="0,14,0,2">
-     <TextBlock x:Name="NotifyFreqLabel" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}" VerticalAlignment="Center"/>
-     <TextBlock x:Name="NotifyFreqValue" DockPanel.Dock="Right" FontSize="11" Foreground="${B.brand}" FontWeight="SemiBold" VerticalAlignment="Center"/>
-    </DockPanel>
-    <Grid DockPanel.Dock="Top" Margin="0,4,6,6">
-     <Grid.ColumnDefinitions>
-      <ColumnDefinition Width="Auto"/>
-      <ColumnDefinition Width="*"/>
-      <ColumnDefinition Width="Auto"/>
-     </Grid.ColumnDefinitions>
-     <TextBlock Text="Min" Grid.Column="0" FontSize="10.5" FontWeight="SemiBold" Foreground="${B.muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
-     <Slider x:Name="NotifySlider" Grid.Column="1" Minimum="0" Maximum="2" TickFrequency="1" IsSnapToTickEnabled="True"
-             VerticalAlignment="Center" Cursor="Hand" Height="22"/>
-     <TextBlock Text="Max" Grid.Column="2" FontSize="10.5" FontWeight="SemiBold" Foreground="${B.muted}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+    <!-- Tần suất thông báo: 3 nấc (Ít = phiên này + cần xử lý, Vừa = thêm việc trên máy, Tất cả), khối trắng trượt tới nấc đang chọn -->
+    <TextBlock x:Name="NotifyFreqLabel" DockPanel.Dock="Top" Margin="0,14,0,6" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
+    <Grid x:Name="NotifySteps" DockPanel.Dock="Top" Margin="0,0,6,0" Height="30">
+     <Border CornerRadius="9" Background="#F2F3F5"/>
+     <Border x:Name="NotifyThumb" HorizontalAlignment="Left" Margin="2" CornerRadius="7" Background="#FFFFFF" BorderBrush="#E5E6EB" BorderThickness="1">
+      <Border.Effect><DropShadowEffect BlurRadius="6" ShadowDepth="1" Direction="270" Opacity="0.10" Color="#0B1B3F"/></Border.Effect>
+      <Border.RenderTransform><TranslateTransform/></Border.RenderTransform>
+     </Border>
+     <UniformGrid Rows="1" Columns="3">
+${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Background="Transparent" Cursor="Hand">
+       <TextBlock x:Name="NotifyStepText${i}" FontSize="11.5" FontWeight="SemiBold" Foreground="${B.muted}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>`).join('\n')}
+     </UniformGrid>
     </Grid>
+    <TextBlock x:Name="NotifyFreqValue" DockPanel.Dock="Top" Margin="2,6,6,6" FontSize="11" Foreground="${B.muted}" TextWrapping="Wrap"/>
     <!-- Phím tắt nhanh: Quick chat & Quick voice -->
     <TextBlock x:Name="ShortcutsLabel" DockPanel.Dock="Top" Margin="0,10,0,4" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
     <Grid DockPanel.Dock="Top" Margin="0,2,6,6">
@@ -512,24 +511,48 @@ $w.Title = $T.window_title; (E 'Mascot').ToolTip = $T.tooltip; (E 'PanelTitle').
 (E 'NowLabel').Text = $T.now_label; (E 'LogLabel').Text = $T.log_label; (E 'Empty').Text = $T.nothing_yet; (E 'NowText').Text = $T.ready
 (E 'OffText').Text = $T.turn_off; (E 'PanelClose').ToolTip = $T.close
 (E 'NotifyFreqLabel').Text = $T.notify_freq_label; (E 'ShortcutsLabel').Text = $T.shortcuts_label; (E 'QuickChatText').Text = $T.quick_chat; (E 'QuickVoiceText').Text = $T.quick_voice
-function SyncNotifyDesc($val) {
+(E 'NotifyStepText0').Text = $T.notify_step_min; (E 'NotifyStepText1').Text = $T.notify_step_mid; (E 'NotifyStepText2').Text = $T.notify_step_max
+# Notification level: 3 steps; the white thumb slides to the chosen step (width = a third of the track, set on resize).
+function PlaceNotifyThumb([bool]$animate) {
+  $track = E 'NotifySteps'; $thumb = E 'NotifyThumb'
+  $w3 = [Math]::Max(0, ($track.ActualWidth - 4) / 3)
+  if ($w3 -le 0) { return }
+  $thumb.Width = $w3
+  $x = $w3 * $script:notifyFreq
+  $tt = $thumb.RenderTransform
+  if ($animate) {
+    $a = New-Object Windows.Media.Animation.DoubleAnimation $x, ([TimeSpan]::FromMilliseconds(180))
+    $ce = New-Object Windows.Media.Animation.CubicEase; $ce.EasingMode = 'EaseOut'; $a.EasingFunction = $ce
+    $tt.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $a)
+  } else {
+    $tt.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $null); $tt.X = $x
+  }
+}
+function SyncNotifyDesc($val, [bool]$animate = $true) {
   (E 'NotifyFreqValue').Text = switch ([int]$val) {
     0 { $T.notify_freq_min }
     1 { $T.notify_freq_mid }
     default { $T.notify_freq_max }
   }
+  for ($i = 0; $i -lt 3; $i++) { (E "NotifyStepText$i").Foreground = if ($i -eq [int]$val) { Brush $P.working.fg } else { Brush $P.muted } }
+  PlaceNotifyThumb $animate
 }
 $script:notifyFreq = if ($cfg.notify_freq -ne $null) { [int]$cfg.notify_freq } else { 1 }
-(E 'NotifySlider').Value = $script:notifyFreq
-SyncNotifyDesc $script:notifyFreq
-(E 'NotifySlider').Add_ValueChanged({ param($s, $e)
-  $v = [int]$s.Value
-  if ($v -ne $script:notifyFreq) {
-    $script:notifyFreq = $v
-    SyncNotifyDesc $v
-    Send @{ t = 'notify_freq'; value = $v }
-  }
-})
+SyncNotifyDesc $script:notifyFreq $false
+(E 'NotifySteps').Add_SizeChanged({ PlaceNotifyThumb $false })
+for ($i = 0; $i -lt 3; $i++) {
+  $step = E "NotifyStep$i"
+  $step.Add_MouseEnter({ param($s, $e) if ([int]$s.Tag -ne $script:notifyFreq) { $s.Child.Foreground = Brush $P.ink } })
+  $step.Add_MouseLeave({ param($s, $e) if ([int]$s.Tag -ne $script:notifyFreq) { $s.Child.Foreground = Brush $P.muted } })
+  $step.Add_MouseLeftButtonUp({ param($s, $e)
+    $v = [int]$s.Tag
+    if ($v -ne $script:notifyFreq) {
+      $script:notifyFreq = $v
+      SyncNotifyDesc $v
+      Send @{ t = 'notify_freq'; value = $v }
+    }
+  })
+}
 
 # No focus stealing + no Alt+Tab entry. NOT hidden from screen capture: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE = 0x11) on this
 # transparent layered window made the bot invisible on the real desktop on some machines (commit efa202c, 01/11/2026), so it stays off.
@@ -946,7 +969,6 @@ function Handle($m) {
     'state' { SetState $m.state }
     'notify_freq' {
       $script:notifyFreq = [int]$m.value
-      (E 'NotifySlider').Value = $script:notifyFreq
       SyncNotifyDesc $script:notifyFreq
     }
     'main' { if ($m.quiet) { (E 'NowText').Text = $m.text } else { ShowBubble $m.text $m.url } }

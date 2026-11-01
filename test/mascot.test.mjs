@@ -363,3 +363,14 @@ test('mã C# nhúng của cửa sổ linh vật biên dịch được (Windows c
     assert.doesNotMatch(out, /error CS\d+/, out);
   });
 });
+
+test('mức báo là 3 nấc bấm (không còn thanh trượt): đủ nhãn từng nấc ở mọi ngôn ngữ', async () => {
+  const { MASCOT_XAML: xaml } = await import('../bin/lib/remote/mascot/hostSource.mjs');
+  const { SUPPORTED_LANGS, windowStrings } = await import('../bin/lib/remote/mascot/strings.mjs');
+  assert.ok(!xaml.includes('NotifySlider'));
+  for (const i of [0, 1, 2]) assert.ok(xaml.includes(`x:Name="NotifyStep${i}" Tag="${i}"`));
+  for (const lang of SUPPORTED_LANGS) {
+    const s = windowStrings(lang);
+    for (const k of ['notify_step_min', 'notify_step_mid', 'notify_step_max']) assert.ok(s[k] && s[k] !== k, `${lang}.${k}`);
+  }
+});
