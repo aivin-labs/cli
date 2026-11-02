@@ -311,7 +311,8 @@ test('windowsHost: huỷ wait_for gửi { cancel: id } qua stdin mà không gi�
   });
   const ac = new AbortController();
   const pending = host.call('wait_for', { name: 'Save' }, { signal: ac.signal });
-  await new Promise((r) => setTimeout(r, 20));
+  // Chờ request tới host rồi mới huỷ: huỷ lúc host chưa sẵn sàng thì request chưa gửi, đúng là không có gì để `cancel` (máy CI chậm hơn 20 ms).
+  for (let i = 0; i < 400 && !written.some((m) => m.op === 'wait_for'); i++) await new Promise((r) => setTimeout(r, 5));
   ac.abort(new Error('aborted_wait'));
   await assert.rejects(pending, /aborted_wait/);
   assert.equal(killed, false, 'không taskkill host khi chỉ huỷ wait_for');
