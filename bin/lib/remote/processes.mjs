@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import { DeviceErrorCode, ToolGroup } from './constants.mjs';
-import { DeviceToolError, assertCommandAllowed, displayPath, resolveInRoots, scrubEnv } from './sandbox.mjs';
+import { DeviceToolError, agentEnv, assertCommandAllowed, displayPath, resolveInRoots } from './sandbox.mjs';
 import { accountEnv, withProcessCap } from './multiUser.mjs';
 import { hasPwsh } from './deviceProfile.mjs';
 
@@ -94,7 +94,7 @@ export function createProcessManager() {
     let [cmd, argv] = interactive ? ['cmd.exe', ['/d', '/s', '/c', `"${command}"`]] : shellCommand(command);
     const runAs = env.runAs;
     if (runAs) [cmd, argv] = withProcessCap(cmd, argv);
-    const baseEnv = scrubEnv();
+    const baseEnv = agentEnv();
     const child = spawn(cmd, argv, {
       cwd, env: runAs ? accountEnv(runAs, baseEnv) : baseEnv, windowsHide: true, detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'], windowsVerbatimArguments: interactive, ...(runAs ? { uid: runAs.uid, gid: runAs.gid } : {}),
@@ -107,6 +107,8 @@ export function createProcessManager() {
     procs.set(id, p);
     child.stdout.on('data', (c) => pushOutput(p, 'stdout', c));
     child.stderr.on('data', (c) => pushOutput(p, 'stderr', c));
+    // Ghi vào stdin đã đóng (EPIPE, sau `close`): không có listener là sập cả daemon.
+    child.stdin.on('error', (e) => addLine(p, 'stderr', `Cannot write to input: ${e.message}`));
     const finish = (code) => {
       if (p.status !== 'running') return;
       for (const s of ['stdout', 'stderr']) if (p.partial[s]) { addLine(p, s, p.partial[s]); p.partial[s] = ''; }
@@ -168,6 +170,7 @@ export function createProcessManager() {
     if (p.status !== 'running') throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Process ${p.id} has exited`);
     const text = String(args.text ?? '');
     assertCommandAllowed(text);
+    if (p.child.stdin.destroyed || p.child.stdin.writableEnded) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Input of process ${p.id} is already closed`);
     if (text) p.child.stdin.write(args.newline === false ? text : `${text}
 `);
     if (args.close) p.child.stdin.end();

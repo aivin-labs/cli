@@ -67,5 +67,8 @@
   "bugs": {
     "url": "https://github.com/aivin-labs/cli/issues"
   },
-  "homepage": "https://github.com/aivin-labs/cli#readme"
+  "homepage": "https://github.com/aivin-labs/cli#readme",
+  "optionalDependencies": {
+    "@roamhq/wrtc": "^0.10.0"
+  }
 }

@@ -102,6 +102,11 @@ export const DeviceEvent = Object.freeze({
   DESKTOP_CAST_STATUS: 'device:desktop_cast_status',
 });
 
+/** Trạng thái phiên xem màn hình gửi BE (`device:desktop_cast_status`) — khớp BE `DesktopCastState`. */
+export const CastState = Object.freeze({
+  READY: 'ready', CONNECTED: 'connected', DEGRADED: 'degraded', STOPPED: 'stopped', REFUSED: 'refused', INPUT_BLOCKED: 'input_blocked',
+});
+
 /** Loại báo chủ động (`device:notify`). */
 export const NotifyKind = Object.freeze({ DONE: 'done', FAILED: 'failed', NEEDS_YOU: 'needs_you' });
 

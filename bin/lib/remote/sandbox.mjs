@@ -172,6 +172,26 @@ export function scrubEnv(env = process.env) {
 }
 
 /**
+ * Đánh dấu tiến trình do agent chạy (`shell.exec`, `proc.start`, `agent.run`…): CLI Aivin chạy trong đó không đổi việc ghép máy / luật tại máy /
+ * công tắc ngắt (`assertHumanCommand`). Rà 02/11/2026: lệnh `aivin remote pair --code X --server URL` của agent chuyển máy sang tài khoản khác.
+ */
+export const AGENT_CALL_ENV = 'AIVIN_AGENT_CALL';
+
+export function agentEnv(env = process.env) {
+  return { ...scrubEnv(env), [AGENT_CALL_ENV]: '1' };
+}
+
+const HUMAN_ONLY_REMOTE_COMMANDS = new Set(['start', 'pair', 'unpair', 'pause', 'resume', 'enable', 'disable', 'reset-id', 'do']);
+const HUMAN_ONLY_COMMANDS = new Set(['do', 'login', 'logout']);
+
+/** Lệnh chỉ người ngồi trước máy được chạy. `parent` / `name`: lệnh cha + lệnh con của CLI. */
+export function assertHumanCommand(parent, name, env = process.env) {
+  if (env[AGENT_CALL_ENV] !== '1') return;
+  const blocked = parent === 'remote' ? HUMAN_ONLY_REMOTE_COMMANDS.has(name) : HUMAN_ONLY_COMMANDS.has(name) || HUMAN_ONLY_COMMANDS.has(parent);
+  if (blocked) throw new Error(`\`aivin ${parent === 'remote' ? 'remote ' : ''}${name}\` chỉ người ngồi trước máy mới chạy được — agent không được đổi việc ghép máy, luật tại máy hay giao việc mới.`);
+}
+
+/**
  * Lưới an toàn CUỐI cho lệnh shell: chỉ chặn các lệnh phá huỷ cả hệ thống (format ổ, xoá gốc, ghi đè thiết bị, fork bomb). Đây KHÔNG
  * phải cơ chế phân quyền — quyền nằm ở luật của agent phía BE; lưới này chỉ để một lệnh thảm hoạ không bao giờ chạy.
  */
@@ -190,6 +210,9 @@ const CATASTROPHIC_COMMANDS = [
 /** Lệnh nhắc tới thư mục cấu hình Aivin / khoá ký (`.aivin`, `.aivin-release` như một đoạn đường dẫn, hoặc đường tuyệt đối của `AIVIN_REMOTE_HOME`). */
 const AIVIN_DIR_SEGMENT = /(?:^|[\\/\s'"`~=:(;,|&])\.aivin(?:-release)?(?=[\\/\s'"`);,|&]|$)/i;
 
+/** Agent gọi chính CLI Aivin để đổi việc ghép máy / luật / giao việc mới. Khớp chuỗi — `assertHumanCommand` là chốt thứ hai trong tiến trình CLI. */
+const AIVIN_SELF_COMMAND = /\baivin(\.exe)?["']?\s+(remote\s+(pair|start|unpair|pause|resume|enable|disable|reset-id|do)\b|do\b|login\b|logout\b)/i;
+
 function mentionsProtectedDir(command) {
   if (AIVIN_DIR_SEGMENT.test(command)) return true;
   const lower = command.toLowerCase().replace(/\\/g, '/');
@@ -203,6 +226,9 @@ function mentionsProtectedDir(command) {
 export function assertCommandAllowed(command) {
   if (CATASTROPHIC_COMMANDS.some((re) => re.test(command))) {
     throw new DeviceToolError(DeviceErrorCode.BLOCKED_COMMAND, 'Command blocked by the device safety floor (destroys the whole system)');
+  }
+  if (AIVIN_SELF_COMMAND.test(command)) {
+    throw new DeviceToolError(DeviceErrorCode.BLOCKED_COMMAND, 'Command changes this computer\'s Aivin pairing or starts new Aivin work — only the person at the computer can do that');
   }
   if (mentionsProtectedDir(command)) {
     throw new DeviceToolError(DeviceErrorCode.PROTECTED_PATH, 'Command touches the Aivin credentials folder (.aivin), which is never accessible remotely');

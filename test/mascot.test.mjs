@@ -107,6 +107,46 @@ test('tệp mascot-show cũ còn sót lại không bật lại linh vật đã t
   assert.equal(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).enabled, true);
 });
 
+test('Quick voice từ khay: yêu cầu mới bật linh vật rồi bấm mic một lần, xoá tệp; yêu cầu cũ chỉ bị dọn, không tự mở mic (02/11/2026)', async () => {
+  const host = fakeHost();
+  const dir = tmp();
+  const voiceFile = path.join(dir, 'voice');
+  fs.writeFileSync(voiceFile, '1');
+  const old = new Date(Date.now() - 3600_000);
+  fs.utimesSync(voiceFile, old, old);
+  const settingsFile = path.join(dir, 'm.json');
+  fs.writeFileSync(settingsFile, JSON.stringify({ enabled: false }));
+  const m = createMascot({ platform: 'win32', spawnImpl: host.spawnImpl, settingsFile, dir, showFile: path.join(dir, 'show'), hideFile: path.join(dir, 'hide'), voiceFile, hotkeysFile: path.join(dir, 'keys') });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(host.spawned.length, 0);
+  assert.equal(fs.existsSync(voiceFile), false);
+  fs.writeFileSync(voiceFile, String(Date.now()));
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(host.spawned.length, 1);
+  assert.equal(fs.existsSync(voiceFile), false);
+  const child = host.spawned[0];
+  child.stdout.write(`${JSON.stringify({ t: HostEvent.READY })}\n`);
+  await tick();
+  assert.equal(child.sent.filter((c) => c.t === HostCommand.VOICE_TOGGLE).length, 1);
+  assert.equal(child.sent.filter((c) => c.t === HostCommand.OPEN_ASK).length, 0);
+  m.close();
+});
+
+test('phím tắt đang giữ: cửa sổ báo → ghi tệp cho khay, cửa sổ đóng → xoá (02/11/2026)', async () => {
+  const host = fakeHost();
+  const dir = tmp();
+  const hotkeysFile = path.join(dir, 'keys');
+  const m = createMascot({ platform: 'win32', spawnImpl: host.spawnImpl, settingsFile: path.join(dir, 'm.json'), dir, showFile: path.join(dir, 'show'), hideFile: path.join(dir, 'hide'), voiceFile: path.join(dir, 'voice'), hotkeysFile });
+  m.connected();
+  const child = host.spawned[0];
+  child.stdout.write(`${JSON.stringify({ t: HostEvent.HOTKEYS, chat: 'Win+Alt+C', voice: null })}\n`);
+  await tick();
+  assert.deepEqual(JSON.parse(fs.readFileSync(hotkeysFile, 'utf8')), { chat: 'Win+Alt+C' });
+  child.emit('close');
+  assert.equal(fs.existsSync(hotkeysFile), false);
+  m.close();
+});
+
 test('ui --demo: không cần ghép máy, chạy đủ 8 trạng thái theo vòng và dọn timer khi đóng', async () => {
   const child = new EventEmitter();
   child.stdout = new PassThrough(); child.stderr = new PassThrough();
@@ -326,8 +366,8 @@ test('config.json của cửa sổ mang danh sách phím tắt theo mascot.json;
   const dir = tmp();
   const cfg = (settings) => JSON.parse(fs.readFileSync(path.join(writeHostFiles({ dir, lang: 'vi', settings }), 'config.json'), 'utf8'));
   const def = cfg({}).hotkeys;
-  assert.deepEqual(def.voice[0], { n: 'Win+Alt+Space', m: 0x4009, v: 0x20 });
-  assert.equal(def.chat[0].n, 'Win+Alt+C');
+  assert.deepEqual(def.voice[0], { n: 'Alt+Shift+Space', m: 0x4005, v: 0x20 });
+  assert.equal(def.chat[0].n, 'Alt+Space');
   assert.equal(cfg({ hotkey: 'ctrl+shift+f9' }).hotkeys.voice[0].n, 'Ctrl+Shift+F9');
   assert.deepEqual(cfg({ hotkey: 'off' }).hotkeys, { voice: [], chat: [] });
 });

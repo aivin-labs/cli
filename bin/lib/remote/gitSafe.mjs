@@ -16,7 +16,8 @@ const DIFF_LIKE = new Set(['diff', 'show', 'log']);
 export function safeGitArgv(cwd, sub, { nullDevice = NULL_DEVICE } = {}) {
   const [cmd, ...rest] = sub;
   const hardened = DIFF_LIKE.has(cmd) ? [cmd, '--no-ext-diff', '--no-textconv', ...rest] : [cmd, ...rest];
-  return ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${nullDevice}`, '-C', cwd, ...hardened];
+  // `log.showSignature` + `gpg.program` trong `.git/config`: `git log` chạy chương trình của kho để kiểm chữ ký commit (rà 02/11/2026).
+  return ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${nullDevice}`, '-c', 'log.showSignature=false', '-c', `gpg.program=${nullDevice}`, '-C', cwd, ...hardened];
 }
 
 /** Môi trường cho git: bỏ mọi `GIT_*` (Windows: tên biến không phân biệt hoa thường), thêm cờ không hỏi mật khẩu / không đọc pager. */

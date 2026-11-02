@@ -211,31 +211,6 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
      </UniformGrid>
     </Grid>
     <TextBlock x:Name="NotifyFreqValue" DockPanel.Dock="Top" Margin="2,6,6,6" FontSize="11" Foreground="${B.muted}" TextWrapping="Wrap"/>
-    <!-- Phím tắt nhanh: Quick chat & Quick voice -->
-    <TextBlock x:Name="ShortcutsLabel" DockPanel.Dock="Top" Margin="0,10,0,4" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
-    <Grid DockPanel.Dock="Top" Margin="0,2,6,6">
-     <Grid.ColumnDefinitions>
-      <ColumnDefinition Width="*"/>
-      <ColumnDefinition Width="8"/>
-      <ColumnDefinition Width="*"/>
-     </Grid.ColumnDefinitions>
-     <Button x:Name="QuickChatBtn" Grid.Column="0" Style="{StaticResource Btn}" Height="30" Padding="8,0" Background="#F7F8FA" BorderBrush="#E5E6EB" BorderThickness="1" Tag="#EBF5FF" Cursor="Hand">
-      <DockPanel LastChildFill="False">
-       <TextBlock x:Name="QuickChatText" DockPanel.Dock="Left" FontSize="11" Foreground="${B.ink}" FontWeight="Medium" VerticalAlignment="Center"/>
-       <Border DockPanel.Dock="Right" Background="#FFFFFF" BorderBrush="#DCDFE6" BorderThickness="1" CornerRadius="4" Padding="4,1,4,1" VerticalAlignment="Center" Margin="4,0,0,0">
-        <TextBlock x:Name="QuickChatKey" Text="" FontSize="9.5" FontWeight="SemiBold" Foreground="${B.brand}"/>
-       </Border>
-      </DockPanel>
-     </Button>
-     <Button x:Name="QuickVoiceBtn" Grid.Column="2" Style="{StaticResource Btn}" Height="30" Padding="8,0" Background="#F7F8FA" BorderBrush="#E5E6EB" BorderThickness="1" Tag="#EBF5FF" Cursor="Hand">
-      <DockPanel LastChildFill="False">
-       <TextBlock x:Name="QuickVoiceText" DockPanel.Dock="Left" FontSize="11" Foreground="${B.ink}" FontWeight="Medium" VerticalAlignment="Center"/>
-       <Border DockPanel.Dock="Right" Background="#FFFFFF" BorderBrush="#DCDFE6" BorderThickness="1" CornerRadius="4" Padding="4,1,4,1" VerticalAlignment="Center" Margin="4,0,0,0">
-        <TextBlock x:Name="QuickVoiceKey" Text="" FontSize="9.5" FontWeight="SemiBold" Foreground="${B.brand}"/>
-       </Border>
-      </DockPanel>
-     </Button>
-    </Grid>
     <!-- Hàng nút: phiên chat mới (nút chính); "Cho AI làm tiếp" chỉ hiện khi AI đang tạm dừng (dừng bằng aivin remote pause); tắt linh vật (đỏ). -->
     <DockPanel DockPanel.Dock="Bottom" Margin="0,12,6,0" LastChildFill="False">
      <Button x:Name="NewChatBtn" Style="{StaticResource Btn}" Height="28" FontSize="12" Padding="9,0,11,0" Background="${B.brand}" Foreground="White"
@@ -298,12 +273,12 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
       </Grid>
      </Button>
      <Grid MinHeight="40">
-      <TextBox x:Name="AskBox" BorderThickness="0" Background="Transparent" FontSize="13" Foreground="${B.ink}" TextWrapping="Wrap"
+      <TextBox x:Name="AskBox" BorderThickness="0" Background="Transparent" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap"
                MaxHeight="60" VerticalScrollBarVisibility="Hidden" CaretBrush="#8B7CF6" MaxLength="2000" Padding="0,1,0,1"/>
-      <TextBlock x:Name="AskHint" IsHitTestVisible="False" FontSize="13" Foreground="#A9AEB8" Margin="2,1,0,0" TextTrimming="CharacterEllipsis"/>
+      <TextBlock x:Name="AskHint" IsHitTestVisible="False" FontSize="14" Foreground="#A9AEB8" Margin="2,1,0,0" TextTrimming="CharacterEllipsis"/>
      </Grid>
     </DockPanel>
-    <TextBlock x:Name="AskStatus" Visibility="Collapsed" FontSize="11" Foreground="${B.muted}" Margin="0,2,4,1" TextTrimming="CharacterEllipsis"/>
+    <TextBlock x:Name="AskStatus" Visibility="Collapsed" FontSize="13" Foreground="${B.muted}" Margin="0,2,4,1" TextTrimming="CharacterEllipsis"/>
    </StackPanel>
   </Border>
   <Grid x:Name="Bubble" Visibility="Collapsed" Opacity="0" RenderTransformOrigin="0.5,1">
@@ -313,7 +288,7 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
     <DockPanel>
      <!-- Chấm trạng thái đã có ở quả cầu ăng-ten trên đầu bot — bong bóng không lặp lại (giữ phần tử ẩn vì SetState còn tô màu nó). -->
      <Ellipse x:Name="BubbleDot" Width="6" Height="6" Margin="0,5,7,0" VerticalAlignment="Top" Visibility="Collapsed"/>
-     <TextBlock x:Name="BubbleText" FontSize="12" Foreground="${B.ink}" TextWrapping="Wrap" MaxHeight="34" TextTrimming="CharacterEllipsis" LineHeight="17"/>
+     <TextBlock x:Name="BubbleText" FontSize="13" Foreground="${B.ink}" TextWrapping="Wrap" MaxHeight="36" TextTrimming="CharacterEllipsis" LineHeight="18"/>
     </DockPanel>
    </Border>
    <Path x:Name="Tail" Data="M0,0 L14,0 L7,7 Z" Fill="#D9DCE1" VerticalAlignment="Bottom" HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5"/>
@@ -515,7 +490,7 @@ $script:rig = [AivinMascot.Rig]::new($w)
 $w.Title = $T.window_title; (E 'Mascot').ToolTip = $T.tooltip; (E 'PanelTitle').Text = $T.panel_title
 (E 'NowLabel').Text = $T.now_label; (E 'LogLabel').Text = $T.log_label; (E 'Empty').Text = $T.nothing_yet; (E 'NowText').Text = $T.ready
 (E 'OffText').Text = $T.turn_off; (E 'PanelClose').ToolTip = $T.close
-(E 'NotifyFreqLabel').Text = $T.notify_freq_label; (E 'ShortcutsLabel').Text = $T.shortcuts_label; (E 'QuickChatText').Text = $T.quick_chat; (E 'QuickVoiceText').Text = $T.quick_voice
+(E 'NotifyFreqLabel').Text = $T.notify_freq_label
 (E 'NotifyStepText0').Text = $T.notify_step_min; (E 'NotifyStepText1').Text = $T.notify_step_mid; (E 'NotifyStepText2').Text = $T.notify_step_max
 # Notification level: 3 steps; the white thumb slides to the chosen step (width = a third of the track, set on resize).
 function PlaceNotifyThumb([bool]$animate) {
@@ -836,12 +811,12 @@ $script:rows = @{}; $script:order = New-Object System.Collections.Generic.Queue[
 function LogEntry($m) {
   $row = $null; if ($m.id) { $row = $script:rows[[string]$m.id] }
   if (-not $row) {
-    $dp = New-Object Windows.Controls.DockPanel; $dp.Margin = '10,6,10,6'
+    $dp = New-Object Windows.Controls.DockPanel; $dp.Margin = '10,3,10,3'
     $g = New-Object Windows.Controls.TextBlock; $g.Width = 16; $g.FontSize = 12; $g.FontWeight = 'Bold'; $g.Margin = '0,1,6,0'; [Windows.Controls.DockPanel]::SetDock($g, 'Left')
     $tm = New-Object Windows.Controls.TextBlock; $tm.FontSize = 11; $tm.Foreground = Brush $P.muted; $tm.Margin = '8,2,0,0'; [Windows.Controls.DockPanel]::SetDock($tm, 'Right')
     $sp = New-Object Windows.Controls.StackPanel
     $ti = New-Object Windows.Controls.TextBlock; $ti.FontSize = 13; $ti.Foreground = Brush $P.ink; $ti.TextWrapping = 'Wrap'
-    $sub = New-Object Windows.Controls.TextBlock; $sub.FontSize = 11.5; $sub.Foreground = Brush $P.muted; $sub.TextWrapping = 'Wrap'; $sub.MaxHeight = 32; $sub.TextTrimming = 'CharacterEllipsis'; $sub.Margin = '0,1,0,0'
+    $sub = New-Object Windows.Controls.TextBlock; $sub.FontSize = 11.5; $sub.Foreground = Brush $P.muted; $sub.TextWrapping = 'Wrap'; $sub.MaxHeight = 32; $sub.TextTrimming = 'CharacterEllipsis'; $sub.Margin = '0,1,0,0'; $sub.Visibility = 'Collapsed'
     [void]$sp.Children.Add($ti); [void]$sp.Children.Add($sub)
     [void]$dp.Children.Add($g); [void]$dp.Children.Add($tm); [void]$dp.Children.Add($sp)
     $list = E 'LogList'; $list.Children.Insert(0, $dp); (E 'Empty').Visibility = 'Collapsed'
@@ -980,8 +955,11 @@ function Handle($m) {
     'log' { LogEntry $m }
     'gui' { $script:guiHidden = [bool]$m.active; ApplyVisibility }
     'show' { $script:userHidden = $false; ApplyVisibility }
-    # Daemon-driven reaction, e.g. 'wave' when the user comes back.
-    'gesture' { if (-not (IsBusy)) { PlayFace ([string]$m.g) 'hello' 1.6 } else { $script:rig.Play([string]$m.g) } }
+    # Daemon-driven reaction, e.g. 'wave' when the user comes back, or the mood of an answer's emoji (mood.mjs: its own face + time).
+    'gesture' {
+      $face = if ($m.face) { [string]$m.face } else { 'hello' }; $sec = if ($m.sec) { [double]$m.sec } else { 1.6 }
+      if (-not (IsBusy)) { PlayFace ([string]$m.g) $face $sec } else { $script:rig.Play([string]$m.g) }
+    }
     # Files dropped on the bot still waiting for the next question (0 = sent / cleared): the tray in the bot's arms + its badge.
     'ask_files' { $script:files = [int]$m.n; if (-not $script:dragFiles) { TrayRest } }
     'quit' { CloseAnimated }

@@ -194,7 +194,7 @@ function cleanupOldLaunchers(exe) {
 
 /**
  * Biên dịch Aivin.exe khi chưa có / mã đổi. Bản cũ đang chạy (khoá tệp) thì đổi tên sang `.old-*` (Windows cho đổi tên tệp đang chạy) —
- * khay đang mở vẫn chạy bản cũ tới lần mở sau.
+ * khay đang mở chạy bản cũ tới khi không còn giữ daemon rồi tự mở lại từ tệp mới (TrayApp.SwapIfExeReplaced, traySource.mjs).
  */
 export function ensureLauncher({ exe = launcherExePath(), home = REMOTE_CONFIG_DIR, dir = DESKTOP_DIR, force = false } = {}) {
   const source = launcherSource(home);

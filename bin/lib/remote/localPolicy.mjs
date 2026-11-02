@@ -106,7 +106,9 @@ const RISKY_COMMAND_PATTERNS = [
   /\b(set|add)-mppreference\b/i, /\bdisable-?(windows)?defender/i, /\btakeown\b/i, /\bicacls\b[^|;]*\/grant/i,
   /\bchmod\s+(-[a-z]*r[a-z]*\s+)?[0-7]*7{2,}/i, /\bchown\s+-[a-z]*r/i, /\bsudo\b/i, /\brunas\b/i, /-verb\s+runas/i,
   // Kho mật khẩu / khoá đăng nhập
-  /\bcmdkey\b/i, /\bsecurity\s+(find|dump|export)-/i, /\bvaultcmd\b/i, /login data|cookies\.sqlite|keychain-db|\.ssh[\\/]id_/i,
+  /\bcmdkey\b/i, /\bsecurity\s+(find|dump|export)-/i, /\bvaultcmd\b/i, /login data|cookies\.sqlite|keychain-db|\.ssh[\\/]id_|\bid_(rsa|dsa|ecdsa|ed25519)\b/i,
+  // Gửi dữ liệu ra ngoài bằng lớp .NET / chép ra thư mục mạng (UNC) — không có cờ nào của curl để nhận ra
+  /\.upload(file|string|data|values)(async)?\s*\(/i, /(^|[\s"'=(])\\\\(?!localhost\\|127\.0\.0\.1\\|\?\\|\.\\)[\w.-]+\\/, /\bnet\s+use\b/i,
   // Tải về rồi chạy / chạy chuỗi mã hoá
   /\b(curl|wget)\b[^|;]*\|\s*(sudo\s+)?(ba|z)?sh\b/i, /\b(iwr|irm|invoke-webrequest|invoke-restmethod)\b[^|;]*\|\s*(iex|invoke-expression)\b/i,
   /\b(iex|invoke-expression)\b/i, /-e(nc(odedcommand)?)?\s+[a-z0-9+/=]{20,}/i, /\bbase64\s+(-d|--decode)\b[^|;]*\|\s*(ba|z)?sh\b/i,

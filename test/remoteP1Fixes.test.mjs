@@ -167,7 +167,9 @@ test('mục 5: git chỉ đọc tắt fsmonitor / hook / diff ngoài / textconv,
   const argv = safeGitArgv('/repo', ['diff', '--stat']);
   assert.deepEqual(argv.slice(0, 5), ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', argv[4]]);
   assert.match(argv[4], /^core\.hooksPath=(NUL|\/dev\/null)$/);
-  assert.deepEqual(argv.slice(5), ['-C', '/repo', 'diff', '--no-ext-diff', '--no-textconv', '--stat']);
+  assert.deepEqual(argv.slice(5, 7), ['-c', 'log.showSignature=false']);
+  assert.match(argv.slice(7, 9).join(' '), /^-c gpg\.program=(NUL|\/dev\/null)$/);
+  assert.deepEqual(argv.slice(9), ['-C', '/repo', 'diff', '--no-ext-diff', '--no-textconv', '--stat']);
   assert.deepEqual(safeGitArgv('/r', ['status', '--porcelain=v1']).slice(-2), ['status', '--porcelain=v1']);
   assert.ok(safeGitArgv('/r', ['log', '-5']).includes('--no-textconv'));
   const env = safeGitEnv({ PATH: '/bin', GIT_EXTERNAL_DIFF: 'evil', GIT_SSH_COMMAND: 'evil', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.fsmonitor', git_dir: '/x', HOME: '/h' });

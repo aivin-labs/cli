@@ -8,6 +8,9 @@
  * - So sánh ảnh thu nhỏ (64x36) để chỉ gửi khung hình khi có chuyển động hoặc giữ nhịp định kỳ (1 FPS).
  * - Nhận lệnh chuột, bàn phím và phím tắt hệ thống (hotkeys) qua stdin và thực thi qua Win32 API.
  * - Hỗ trợ thay đổi độ phân giải, chất lượng nén JPEG, giới hạn FPS và chọn màn hình theo thời gian thực.
+ * - Luồng video (02/11/2026): có `pipe` → mở named pipe gửi khung thô I420 ([rộng, cao, độ dài] int32 LE + dữ liệu) cho Node đưa vào
+ *   RTCVideoSource (WebRTC tự mã hoá VP8, chỉ gửi phần đổi). JPEG chỉ nén khi còn người xem cần (`jpeg` qua config); không thì gửi dòng
+ *   `meta` (kích thước, màn hình) để FE quy đổi toạ độ.
  */
 
 export const DESKTOP_CAST_CSHARP = String.raw`
@@ -16,6 +19,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -81,7 +85,95 @@ namespace AivinDesktopCast {
     }
   }
 
+  /** Named pipe một chiều gửi khung thô cho tiến trình Node (một khách). Khách rớt → chờ khách mới. */
+  static class RawPipe {
+    static readonly object gate = new object();
+    static NamedPipeServerStream pipe;
+    public static volatile bool Connected;
+
+    public static void Start(string name) {
+      var t = new Thread(() => {
+        while (CastHost.Running) {
+          try {
+            var p = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.None, 0, 4 * 1024 * 1024);
+            p.WaitForConnection();
+            lock (gate) { pipe = p; Connected = true; }
+            while (CastHost.Running && p.IsConnected) Thread.Sleep(200);
+          } catch {
+            Thread.Sleep(300);
+          } finally {
+            lock (gate) { Connected = false; if (pipe != null) { try { pipe.Dispose(); } catch { } pipe = null; } }
+          }
+        }
+      });
+      t.IsBackground = true;
+      t.Start();
+    }
+
+    public static void Write(int width, int height, byte[] data) {
+      lock (gate) {
+        if (pipe == null || !Connected) return;
+        try {
+          var header = new byte[12];
+          BitConverter.GetBytes(width).CopyTo(header, 0);
+          BitConverter.GetBytes(height).CopyTo(header, 4);
+          BitConverter.GetBytes(data.Length).CopyTo(header, 8);
+          pipe.Write(header, 0, 12);
+          pipe.Write(data, 0, data.Length);
+          pipe.Flush();
+        } catch {
+          Connected = false;
+          try { pipe.Dispose(); } catch { }
+          pipe = null;
+        }
+      }
+    }
+  }
+
   public static class CastScreen {
+    /** BGR 24 bit → I420 (Y đủ, U/V lấy trung bình khối 2x2); kích thước cắt về số chẵn. */
+    public static byte[] ToI420(Bitmap bmp, out int w, out int h) {
+      w = bmp.Width & ~1;
+      h = bmp.Height & ~1;
+      var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+      try {
+        int stride = Math.Abs(data.Stride);
+        var raw = new byte[stride * h];
+        Marshal.Copy(data.Scan0, raw, 0, raw.Length);
+        int ySize = w * h;
+        int cw = w / 2;
+        var outBuf = new byte[ySize + ySize / 2];
+        int uBase = ySize;
+        int vBase = ySize + ySize / 4;
+        for (int y = 0; y < h; y++) {
+          int row = y * stride;
+          int yRow = y * w;
+          for (int x = 0; x < w; x++) {
+            int i = row + x * 3;
+            int b = raw[i], g = raw[i + 1], r = raw[i + 2];
+            outBuf[yRow + x] = (byte)(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+          }
+        }
+        for (int y = 0; y < h; y += 2) {
+          int row0 = y * stride;
+          int row1 = row0 + stride;
+          int cRow = (y / 2) * cw;
+          for (int x = 0; x < w; x += 2) {
+            int i0 = row0 + x * 3, i1 = i0 + 3, i2 = row1 + x * 3, i3 = i2 + 3;
+            int b = (raw[i0] + raw[i1] + raw[i2] + raw[i3]) >> 2;
+            int g = (raw[i0 + 1] + raw[i1 + 1] + raw[i2 + 1] + raw[i3 + 1]) >> 2;
+            int r = (raw[i0 + 2] + raw[i1 + 2] + raw[i2 + 2] + raw[i3 + 2]) >> 2;
+            int ci = cRow + x / 2;
+            outBuf[uBase + ci] = (byte)(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+            outBuf[vBase + ci] = (byte)(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+          }
+        }
+        return outBuf;
+      } finally {
+        bmp.UnlockBits(data);
+      }
+    }
+
     public static Rectangle GetBounds(int monitor) {
       if (monitor < 0 || monitor >= Screen.AllScreens.Length) {
         return SystemInformation.VirtualScreen;
@@ -200,6 +292,10 @@ namespace AivinDesktopCast {
 
   public static class CastHost {
     static volatile bool running = true;
+    public static bool Running { get { return running; } }
+    static volatile bool jpegEnabled = true;
+    static volatile bool refreshRequested = false;
+    static bool rawEnabled = false;
     static volatile int currentMonitor = -1;
     static Rectangle currentBounds;
     static int currentImageWidth = 0;
@@ -217,6 +313,8 @@ namespace AivinDesktopCast {
       if (targetMaxFps > 30) targetMaxFps = 30;
       targetMaxWidth = a.ContainsKey("max_width") ? Convert.ToInt32(a["max_width"]) : 1366;
       targetQuality = a.ContainsKey("quality") ? Convert.ToInt32(a["quality"]) : 65;
+      string pipeName = a.ContainsKey("pipe") ? Convert.ToString(a["pipe"]) : "";
+      if (!string.IsNullOrEmpty(pipeName)) { rawEnabled = true; RawPipe.Start(pipeName); }
 
       currentBounds = CastScreen.GetBounds(currentMonitor);
 
@@ -248,8 +346,10 @@ namespace AivinDesktopCast {
             double diff = CastScreen.Diff(thumb, lastThumb);
             long nowMs = clock.ElapsedMilliseconds;
             bool forceKeepAlive = (nowMs - lastSendMs) >= 1000;
+            bool refresh = refreshRequested;
+            if (refresh) refreshRequested = false;
 
-            if (diff > 4.5 || forceKeepAlive || lastThumb == null) {
+            if (diff > 4.5 || forceKeepAlive || lastThumb == null || refresh) {
               lastThumb = thumb;
               lastSendMs = nowMs;
 
@@ -262,11 +362,14 @@ namespace AivinDesktopCast {
                 }
                 currentImageWidth = encodeBmp.Width;
                 currentImageHeight = encodeBmp.Height;
-                byte[] jpegBytes = CastScreen.Jpeg(encodeBmp, targetQuality);
-                string base64 = Convert.ToBase64String(jpegBytes);
-
-                var frameMsg = Out.Msg("frame");
-                frameMsg["image"] = base64;
+                if (rawEnabled && RawPipe.Connected) {
+                  int rw, rh;
+                  byte[] i420 = CastScreen.ToI420(encodeBmp, out rw, out rh);
+                  RawPipe.Write(rw, rh, i420);
+                }
+                bool sendJpeg = jpegEnabled || !rawEnabled;
+                var frameMsg = Out.Msg(sendJpeg ? "frame" : "meta");
+                if (sendJpeg) frameMsg["image"] = Convert.ToBase64String(CastScreen.Jpeg(encodeBmp, targetQuality));
                 frameMsg["width"] = currentImageWidth;
                 frameMsg["height"] = currentImageHeight;
                 frameMsg["screenWidth"] = currentBounds.Width;
@@ -322,6 +425,8 @@ namespace AivinDesktopCast {
             HandleInput(cmd);
           } else if (op == "config") {
             HandleConfig(cmd);
+          } else if (op == "refresh") {
+            refreshRequested = true;
           }
         }
       } catch {
@@ -342,6 +447,10 @@ namespace AivinDesktopCast {
         if (cmd.ContainsKey("max_width")) {
           int w = Convert.ToInt32(cmd["max_width"]);
           if (w >= 640 && w <= 2560) targetMaxWidth = w;
+        }
+        if (cmd.ContainsKey("jpeg") && cmd["jpeg"] is bool) {
+          jpegEnabled = (bool)cmd["jpeg"];
+          refreshRequested = true;
         }
         if (cmd.ContainsKey("monitor")) {
           int m = Convert.ToInt32(cmd["monitor"]);
@@ -581,7 +690,7 @@ export const DESKTOP_CAST_PS1 = String.raw`
 $ErrorActionPreference = 'Stop'
 $dll = $env:AIVIN_CAST_DLL
 $src = $env:AIVIN_CAST_SRC
-$refs = @('System.Drawing', 'System.Windows.Forms', 'System.Web.Extensions')
+$refs = @('System.Drawing', 'System.Windows.Forms', 'System.Web.Extensions', 'System.Core')
 foreach ($r in $refs) { Add-Type -AssemblyName $r }
 if ($dll -and (Test-Path -LiteralPath $dll)) {
   Add-Type -Path $dll

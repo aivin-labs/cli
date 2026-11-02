@@ -42,6 +42,21 @@ test('chữ menu khay: vi và en đủ cùng bộ khoá', () => {
   assert.deepEqual(Object.keys(TRAY_STRINGS.vi).sort(), Object.keys(TRAY_STRINGS.en).sort());
 });
 
+test('khay: Quick chat / Quick voice có chữ trong launch.cfg, gửi yêu cầu qua tệp và đọc phím đang giữ từ tệp daemon ghi', () => {
+  const text = launchConfigText({ argv: ['aivin.exe', 'remote', 'start'], lang: 'en' });
+  assert.ok(text.includes('s.quickChat=Quick chat') && text.includes('s.quickVoice=Quick voice'));
+  const src = launcherSource('C:\\h');
+  assert.ok(src.includes('"mascot-voice"') && src.includes('"mascot-hotkeys.json"'));
+  assert.ok(src.includes('RequestMascot(VoiceFile)'));
+});
+
+test('khay tự mở lại khi Aivin.exe bị thay: chờ hết daemon, mở sau khi nhả mutex', () => {
+  const src = launcherSource('C:\\h');
+  assert.ok(src.includes('if (child != null || pairing || pairForm != null'), 'đang giữ daemon thì không chuyển');
+  assert.ok(src.indexOf('GC.KeepAlive(mutex);') < src.indexOf('if (Relaunch)'), 'mở lại sau khi nhả mutex');
+  assert.ok(src.indexOf('OnChildExit();\n      if (SwapIfExeReplaced())') > 0, 'kiểm tra ngay sau khi daemon thoát');
+});
+
 test('StartupApproved: 02 = bật, 03 + FILETIME = tắt (như Task Manager)', () => {
   assert.equal(startupApprovedHex(true), '020000000000000000000000');
   const off = startupApprovedHex(false, Date.UTC(2026, 9, 29));

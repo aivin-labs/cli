@@ -71,10 +71,15 @@ export const BOT_FACES = Object.freeze({
   wink: { eyes: 'wink', mouth: 'grin' },
   curious: { eyes: 'curious', mouth: 'hmm' },
   star: { eyes: 'star', mouth: 'grin' },
+  // Theo emoji của câu trả lời (mood.mjs): xin lỗi / tiếc → mắt cụp, lông mày xếch trong, miệng mếu; ngượng (😅) → cười híp, miệng méo.
+  sad: { eyes: 'droop', mouth: 'frown' },
+  // Khóc (😭 / 😢): mắt cụp như buồn, miệng mếu há; nước mắt do rig vẽ (BOT_TEARS).
+  cry: { eyes: 'droop', mouth: 'wail' },
+  sheepish: { eyes: 'happy', mouth: 'hmm' },
 });
 
-export const BOT_EYES = Object.freeze(['open', 'focus', 'up', 'wide', 'happy', 'closed', 'sad', 'dizzy', 'wink', 'curious', 'star']);
-export const BOT_MOUTHS = Object.freeze(['smile', 'flat', 'hmm', 'open', 'grin', 'wobble', 'talk']);
+export const BOT_EYES = Object.freeze(['open', 'focus', 'up', 'wide', 'happy', 'closed', 'sad', 'dizzy', 'wink', 'curious', 'star', 'droop']);
+export const BOT_MOUTHS = Object.freeze(['smile', 'flat', 'hmm', 'open', 'grin', 'wobble', 'talk', 'frown', 'wail']);
 
 /**
  * Thông số chuyển động theo trạng thái (đơn vị bot / độ / Hz). Giá trị hiện tại luôn trượt dần về đích nên đổi trạng thái không giật.
@@ -126,6 +131,11 @@ const EYE_SHAPES = {
   wink: [`<Path Data="M-8,3 Q0,-8 8,3" ${glowStroke()} Fill="{x:Null}"/>`, pill(10, 14, 'BlinkWnkR')],
   curious: [pill(10, 8, 'BlinkCurL'), pill(12.5, 16, 'BlinkCurR')],
   star: [starEye],
+  // Buồn / xin lỗi: mắt thấp hơn, lông mày xếch lên ở phía trong (hai đầu gần nhau cao hơn).
+  droop: [
+    `<Canvas Canvas.Top="1.5">${pill(10, 11, 'BlinkDrL')}</Canvas><Path Data="M-6.5,-8 L4.5,-11.5" ${glowStroke(2.6)}/>`,
+    `<Canvas Canvas.Top="1.5">${pill(10, 11, 'BlinkDrR')}</Canvas><Path Data="M-4.5,-11.5 L6.5,-8" ${glowStroke(2.6)}/>`,
+  ],
 };
 /** Tên các ScaleTransform chớp mắt (rigSource.mjs đặt ScaleY). */
 export const BOT_BLINKS = Object.freeze([
@@ -135,6 +145,7 @@ export const BOT_BLINKS = Object.freeze([
   'BlinkWL', 'BlinkWR',
   'BlinkWnkR',
   'BlinkCurL', 'BlinkCurR',
+  'BlinkDrL', 'BlinkDrR',
 ]);
 
 const eyeSide = (side) => BOT_EYES.map((n) => {
@@ -150,7 +161,19 @@ const MOUTH_SHAPES = {
   grin: `<Path Data="M-8,-2.5 C-4,-3.6 4,-3.6 8,-2.5 C7.4,4.6 3.8,7.6 0,7.6 C-3.8,7.6 -7.4,4.6 -8,-2.5 Z" Fill="${GLOW}" Stroke="${GLOW}" StrokeThickness="2.2" StrokeLineJoin="Round"/>`,
   wobble: `<Path Data="M-6.5,2 C-4.5,-0.8 -2,-0.8 0,1.4 C2,3.6 4.5,3.6 6.5,0.8" ${glowStroke(3.6)} Fill="{x:Null}"/>`,
   talk: `<Ellipse Canvas.Left="-5" Canvas.Top="-4" Width="10" Height="8" Fill="${GLOW}" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform x:Name="MouthTalkScale"/></Ellipse.RenderTransform></Ellipse>`,
+  frown: `<Path Data="M-5.5,2.4 C-3.5,-1.6 3.5,-1.6 5.5,2.4" ${glowStroke(4)} Fill="{x:Null}"/>`,
+  // Khóc: miệng mếu há (đáy phẳng, đỉnh cong lên).
+  wail: `<Path Data="M-5.5,3 C-4.5,-3 4.5,-3 5.5,3 Z" Fill="${GLOW}" Stroke="${GLOW}" StrokeThickness="2" StrokeLineJoin="Round"/>`,
 };
+
+/**
+ * Nước mắt (khóc): mỗi mắt 2 giọt so le, rơi từ dưới mắt xuống ngang miệng rồi tan; rig dời `TearMove*` + chỉnh độ mờ từng giọt, cả cụm
+ * `Tears` ẩn khi không khóc. Nằm trong `EyeLook` nên đi theo hướng nhìn của mắt.
+ */
+export const BOT_TEARS = Object.freeze(['L0', 'L1', 'R0', 'R1']);
+const TEAR = { x: 17, y: 5, color: '#E6FBFF' };
+const tearDrop = (id) => `<Path x:Name="Tear${id}" Canvas.Left="${id[0] === 'L' ? -TEAR.x : TEAR.x}" Canvas.Top="${TEAR.y}" Data="M0,-4.6 Q3.7,1.1 0,4 Q-3.7,1.1 0,-4.6 Z" Fill="${TEAR.color}" Opacity="0"><Path.RenderTransform><TranslateTransform x:Name="TearMove${id}"/></Path.RenderTransform></Path>`;
+const TEARS_XAML = `<Canvas x:Name="Tears" Visibility="Collapsed">${BOT_TEARS.map(tearDrop).join('')}</Canvas>`;
 
 const R = BOT_RIG;
 const V = R.visor;
@@ -367,6 +390,7 @@ export const BOT_XAML = `<Canvas x:Name="Stage" Width="${S}" Height="${S}">
       <Canvas x:Name="EyeR" Canvas.Left="${F.eyeDx}" Canvas.Top="${F.eyeY}"><Canvas.RenderTransform><ScaleTransform x:Name="EyeMorphR"/></Canvas.RenderTransform>
       ${eyeSide('R')}
       </Canvas>
+      ${TEARS_XAML}
      </Canvas>
      <Canvas x:Name="Mouth" Canvas.Top="${F.mouthY}"><Canvas.RenderTransform><ScaleTransform x:Name="MouthMorph"/></Canvas.RenderTransform>
       ${BOT_MOUTHS.map((n) => `<Canvas x:Name="Mouth_${n}" Visibility="Collapsed">${MOUTH_SHAPES[n]}</Canvas>`).join('\n      ')}

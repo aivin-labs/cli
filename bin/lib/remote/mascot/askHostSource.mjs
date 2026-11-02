@@ -2,16 +2,19 @@
  * Ô hỏi của linh vật, phía cửa sổ (29/10/2026) — mã PowerShell chèn vào host.ps1 tại dấu `# @ASK_HOOK` (index.mjs ghép), dùng khung
  * XAML `Ask` / `ChatList` / `AskBox` / `MicBtn` (`MicIcon` / `SendIcon`) / `AskStatus` của hostSource.mjs.
  *
- * - Rê chuột vào bot → ô hỏi hiện ra (chưa nhận bàn phím); rời chuột ~0,6 s → ẩn, trừ khi đang dùng (đang gõ trong ô, đang ghi âm, đang
- *   chờ trả lời — trả lời xong mà chuột không ở đó thì ẩn sau 8 s). Bấm bot / bấm vào ô → cửa sổ nhận bàn phím (bỏ WS_EX_NOACTIVATE + đưa lên
- *   trước) để gõ; bấm ra ngoài / Esc / bấm bot lần nữa thì đóng, về không cướp focus. Chữ gõ dở vẫn giữ cho lần hiện sau. Chuột phải → nhật ký.
+ * - Rê chuột vào bot → ô hỏi hiện ra (chưa nhận bàn phím); rời chuột ~0,6 s → ẩn. Bấm bot / bấm vào ô / phím tắt → cửa sổ nhận bàn phím (bỏ
+ *   WS_EX_NOACTIVATE + đưa lên trước) để gõ; bấm ra ngoài / Esc / bấm bot lần nữa thì đóng, về không cướp focus. Chữ gõ dở vẫn giữ cho lần
+ *   hiện sau. Chuột phải → nhật ký.
+ * - Ô đang mở mà rảnh `ASK_IDLE_MS` thì tự thu lại (kể cả mở bằng cú bấm / phím tắt; đang nhận bàn phím thì trả bàn phím về cửa sổ trước đó).
+ *   Còn đang dùng thì đếm lại: chuột trên ô / bot, đang nói chuyện, đang kéo, Aivin đang chờ trả lời (HIL), hoặc đang nhận bàn phím mà có chữ
+ *   gõ dở / tệp chờ gửi / lượt đang chạy.
  * - Mỗi lúc một khung: ô hỏi đang mở thì việc bot làm trên máy không bật bong bóng (chỉ cập nhật chữ); ô đóng mà bot còn bận thì
  *   bong bóng hiện lại bước mới nhất.
  * - Một nút ở góc dưới: ô trống = mic, có chữ = gửi. Enter / nút gửi → `{ t: 'ask', text, window }`. Mic = nói chuyện trực tiếp (realtime) với Aivin:
  *   bấm → `{ t: 'voice_start', window }`, daemon mở phiên thoại trên BE rồi gửi `voice_begin { in_rate, out_rate }` → mở mic + loa (voiceSource.mjs,
  *   âm thanh đi thẳng giữa C# và stdin/stdout). Đang nghe mà bấm → `voice_stop`; bot đang nói mà bấm → `voice_interrupt` (ngắt lời; có
  *   khử tiếng vọng thì nói chen bằng giọng cũng được). BE cũ chưa có nói chuyện: `voice_begin { state: 'recording' }` — nói xong bấm mic để gửi.
- *   Phím tắt nói (`hotkeys.voice` trong config.json do daemon ghi theo hotkey.mjs — mặc định Win+Alt+Space, chủ máy đặt riêng / tắt bằng
+ *   Phím tắt nói (`hotkeys.voice` trong config.json do daemon ghi theo hotkey.mjs — mặc định Alt+Shift+Space, chủ máy đặt riêng / tắt bằng
  *   `aivin remote mascot hotkey`; hiện trong chú thích nút mic) ở đâu cũng = bấm mic; phím tắt chat (`hotkeys.chat`) = mở ô hỏi. Trạng thái "đang nói" giữ tới khi loa im thật (BE báo xong sớm hơn loa phát hết); mặt bot theo
  *   trạng thái nói chuyện (nghe / nghĩ / nói).
  * - `window` = `{ window: '0x..', title, process }` của cửa sổ chủ máy đang dùng ngay trước khi rê / bấm vào bot hay nhấn phím tắt (không tính
@@ -21,6 +24,9 @@
  * Giữ toàn ASCII (xem hostSource.mjs).
  */
 import { ASK_BTN, MASCOT_CENTER } from './hostSource.mjs';
+
+/** Ô hỏi rảnh chừng này thì tự thu lại. */
+export const ASK_IDLE_MS = 10000;
 
 /**
  * Lựa chọn khi Aivin hỏi lại: mỗi thẻ tô một màu pastel nhạt (xoay vòng hồng → tím nhạt → xanh trời → xanh bạc hà, theo viền ô hỏi), không
@@ -78,6 +84,13 @@ namespace AivinMascotAsk {
       try { BringWindowToTop(h); return SetForegroundWindow(h); }
       finally { if (attached) AttachThreadInput(fg, me, false); }
     }
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    /** The box closed by itself while holding the keyboard: back to the window the person came from (only if we still hold it). */
+    public static bool GiveFocusBack(IntPtr me, string target) {
+      if (GetForegroundWindow() != me) return false;
+      IntPtr h = new IntPtr(Convert.ToInt64(target, 16));
+      return IsWindow(h) && SetForegroundWindow(h);
+    }
   }
 }
 '@
@@ -119,22 +132,20 @@ function PeekAsk {
   $script:askOpen = $true; AskShow 'Ask'; $w.FindResource('AskGlow').Begin($w, $true)
 }
 function OpenAsk {
-  $script:askHideTimer.Stop()
-  $script:askManual = $true
   NoteTarget; AskHide 'Panel'
   $script:askOpen = $true; AskShow 'Ask'; $w.FindResource('AskGlow').Begin($w, $true)
   $script:askFocused = $true; SetActivatable $true; $ok = [AivinMascotAsk.Native]::TakeFocus($script:hwnd); [void]$w.Activate(); Dbg "ask focus=$ok"
   [void](E 'AskBox').Focus(); [void][Windows.Input.Keyboard]::Focus((E 'AskBox'))
+  HideAskLater ${ASK_IDLE_MS}
 }
 function CloseAsk {
   $script:askHideTimer.Stop()
   if (-not $script:askOpen) { return }
-  $script:askManual = $false
   if ($script:voiceLive) { StopVoice }
   $script:askOpen = $false; $script:askFocused = $false
   AskHide 'Ask'; SetActivatable $false; $w.FindResource('AskGlow').Stop($w)
 }
-function MascotClick { if ($script:askFocused) { $script:askManual = $false; CloseAsk } else { OpenAsk } }
+function MascotClick { if ($script:askFocused) { CloseAsk } else { OpenAsk } }
 # One box at a time: while the ask box is open, what the bot does on the machine only updates the text; the bubble
 # (notification) comes back with the latest step once the box closes, if the bot is still busy.
 $script:baseShowBubble = (Get-Item function:ShowBubble).ScriptBlock
@@ -160,25 +171,29 @@ function ChatBubble($text) {
   & $script:baseShowBubble $text
   $script:bubbleTimer.Stop(); $script:bubbleTimer.Start()
 }
-# Hover: the box peeks while the mouse is over the bot / the box and slips away shortly after it leaves, unless it is in use.
-$script:askManual = $false
+# The box only stays out for a while: it peeks while the mouse is over the bot / the box and slips away shortly after it leaves; opened with
+# a click / hotkey, or left open after an answer, it folds away once idle for ASK_IDLE_MS. Still in use when the timer fires = count again.
 $script:askHideTimer = New-Object Windows.Threading.DispatcherTimer
-$script:askHideTimer.Add_Tick({ $script:askHideTimer.Stop(); if (-not (AskInUse)) { CloseAsk } })
-# In use = keep the box out: manual open, mouse over it, talking, dragging, a pinned question, or focused with unsent text.
+$script:askHideTimer.Add_Tick({
+  if ($script:askOpen -and (AskInUse)) { HideAskLater ${ASK_IDLE_MS}; return }
+  $held = $script:askFocused; CloseAsk
+  if ($held -and $script:askTarget) { try { [void][AivinMascotAsk.Native]::GiveFocusBack($script:hwnd, [string]$script:askTarget.window) } catch { } }
+})
+# In use = keep the box out: mouse over it, talking, dragging, a pinned question, or holding the keyboard with unsent text / files or a running turn.
 function AskInUse {
-  $script:askManual -or $w.IsMouseOver -or $script:voiceLive -or $script:drag -or $script:askPinned -or ($script:askFocused -and (E 'AskBox').Text.Trim())
+  $w.IsMouseOver -or $script:voiceLive -or $script:drag -or $script:askPinned -or ($script:askFocused -and ($script:chatBusy -or $script:files -or (E 'AskBox').Text.Trim()))
 }
 # Aivin is waiting for an answer (HIL): the box stays out with the question + option buttons until it is answered (no focus taken).
 $script:askPinned = $false
-function HideAskLater($ms) { if (-not $script:askManual) { $script:askHideTimer.Stop(); $script:askHideTimer.Interval = [TimeSpan]::FromMilliseconds($ms); $script:askHideTimer.Start() } }
+function HideAskLater($ms) { $script:askHideTimer.Stop(); $script:askHideTimer.Interval = [TimeSpan]::FromMilliseconds($ms); $script:askHideTimer.Start() }
 (E 'Mascot').ToolTip = $null
 (E 'Mascot').Add_MouseEnter({ $script:askHideTimer.Stop(); if ((E 'Panel').Visibility -ne 'Visible' -and -not $script:drag) { PeekAsk } })
 (E 'Ask').Add_MouseEnter({ $script:askHideTimer.Stop() })
-# Focused but empty: only auto-hide if peeked, never if manually opened.
-$w.Add_MouseLeave({ if ($script:askOpen -and -not $script:askManual) { HideAskLater $(if ($script:askFocused) { 2500 } else { 600 }) } })
-# Clicked somewhere else: release keyboard focus, keep box open if manually opened.
+# Only peeking: gone right after the mouse leaves. Holding the keyboard: the person may be about to type, so the full wait.
+$w.Add_MouseLeave({ if ($script:askOpen) { HideAskLater $(if ($script:askFocused) { ${ASK_IDLE_MS} } else { 600 }) } })
+# Clicked somewhere else: release keyboard focus and close the box.
 $w.Add_Deactivated({
-  $script:askFocused = $false; SetActivatable $false; $script:askManual = $false
+  $script:askFocused = $false; SetActivatable $false
   if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag -and -not $script:askPinned) { CloseAsk }
   if ((E 'Panel').Visibility -eq 'Visible') { ClosePanel }
 })
@@ -191,7 +206,7 @@ $w.Add_PreviewMouseLeftButtonDown({ param($s, $e)
   $inMascot = (New-Object Windows.Rect ($mascot.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $mascot.RenderSize).Contains($pt)
   $inPanel = $panel.Visibility -eq 'Visible' -and (New-Object Windows.Rect ($panel.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $panel.RenderSize).Contains($pt)
   if (-not $inAsk -and -not $inMascot -and -not $inPanel -and -not $script:askPinned) {
-    $script:askManual = $false; CloseAsk
+    CloseAsk
   }
   if (-not $inPanel -and (E 'Panel').Visibility -eq 'Visible' -and -not $inMascot) {
     ClosePanel
@@ -202,7 +217,7 @@ $script:clickCheckTimer.Interval = [TimeSpan]::FromMilliseconds(50)
 $script:clickCheckTimer.Add_Tick({
   if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag -and -not $script:askPinned) {
     if (-not $w.IsMouseOver -and [AivinMascotAsk.Native]::ClickOutside()) {
-      $script:askManual = $false; CloseAsk
+      CloseAsk
     }
   }
   if ((E 'Panel').Visibility -eq 'Visible' -and -not $script:drag) {
@@ -240,7 +255,7 @@ function InputLayout {
   $box.VerticalAlignment = $mid; (E 'AskHint').VerticalAlignment = $mid
   (E 'MicBtn').VerticalAlignment = if ($compact -and -not $wrapped) { 'Center' } else { 'Bottom' }
 }
-(E 'AskBox').Add_TextChanged({ SyncAction; AttendAsk })
+(E 'AskBox').Add_TextChanged({ SyncAction; AttendAsk; if ($script:askOpen) { HideAskLater ${ASK_IDLE_MS} } })
 # Typing: the bot looks at the box (above or below it) while keys come in; a little nod when a question / answer goes out.
 function AttendAsk {
   if (-not (E 'AskBox').Text) { return }
@@ -288,8 +303,8 @@ function ChatRow($m) {
   if (-not $row) {
     # Segoe UI adds its own space above / below the letters: block line height + slim vertical padding so the space you see is about
     # the same on all four sides.
-    $b = New-Object Windows.Controls.Border; $b.Padding = '9,4,9,4'; $b.Margin = '0,0,0,4'; $b.MaxWidth = 188
-    $tb = New-Object Windows.Controls.TextBlock; $tb.TextWrapping = 'Wrap'; $tb.FontSize = 12; $tb.LineHeight = 16; $tb.LineStackingStrategy = 'BlockLineHeight'
+    $b = New-Object Windows.Controls.Border; $b.Padding = '10,5,10,5'; $b.Margin = '0,0,0,4'; $b.MaxWidth = 200
+    $tb = New-Object Windows.Controls.TextBlock; $tb.TextWrapping = 'Wrap'; $tb.FontSize = 14; $tb.LineHeight = 20; $tb.LineStackingStrategy = 'BlockLineHeight'
     $b.Child = $tb; [void]$list.Children.Add($b)
     $slide = New-Object Windows.Media.TranslateTransform 0, 6; $b.RenderTransform = $slide
     $ease = New-Object Windows.Media.Animation.CubicEase; $ease.EasingMode = 'EaseOut'
@@ -337,7 +352,7 @@ function ChatRow($m) {
 $script:iconGlyphs = ConvertFrom-Json '${JSON.stringify(CHOICE_ICON_GLYPHS)}'
 function ChoiceIcon($name) {
   $n = [string]$name; if (-not $n) { return $null }
-  $tb = New-Object Windows.Controls.TextBlock; $tb.FontSize = 12; $tb.Margin = '8,1,0,0'; $tb.VerticalAlignment = 'Top'; $tb.Foreground = Brush '${CHOICE_INK}'
+  $tb = New-Object Windows.Controls.TextBlock; $tb.FontSize = 13; $tb.Margin = '8,1,0,0'; $tb.VerticalAlignment = 'Top'; $tb.Foreground = Brush '${CHOICE_INK}'
   # An emoji / short symbol is drawn as is; a Lucide name (as Aivin's cards use) maps to the matching Segoe MDL2 glyph, unknown = none.
   if ($n.Length -le 2) { $tb.Text = $n; $tb.FontFamily = 'Segoe UI Emoji'; return $tb }
   $code = $script:iconGlyphs.(($n -replace '[^A-Za-z0-9]', '').ToLowerInvariant()); if (-not $code) { return $null }
@@ -373,7 +388,7 @@ function ChoiceButtons($options, $multiple) {
     $icon = ChoiceIcon $o.icon; if ($icon) { [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$row.Children.Add($icon) }
     $tb = New-Object Windows.Controls.TextBlock; $tb.Text = [string]$o.text; $tb.TextWrapping = 'Wrap'; $tb.Foreground = Brush '${CHOICE_INK}'; [void]$row.Children.Add($tb)
     $btn = New-Object Windows.Controls.Button; $btn.Style = $w.FindResource('Btn'); $btn.Content = $row; $btn.CommandParameter = $id
-    $btn.FontSize = 12; $btn.FontWeight = 'Normal'; $btn.Padding = '10,6,10,6'; $btn.Margin = '0,0,0,4'; $btn.HorizontalAlignment = 'Stretch'
+    $btn.FontSize = 13; $btn.FontWeight = 'Normal'; $btn.Padding = '10,6,10,6'; $btn.Margin = '0,0,0,4'; $btn.HorizontalAlignment = 'Stretch'
     $btn.Background = Brush $c; $btn.BorderThickness = '0'; $btn.Tag = Brush '${CHOICE_HOVER}'
     $script:choiceMarks[$id] = $mark
     if ($multi) {
@@ -388,7 +403,7 @@ function ChoiceButtons($options, $multiple) {
     [void]$panel.Children.Add($btn)
   }
   if ($multi -and $panel.Children.Count) {
-    $ok = New-Object Windows.Controls.Button; $ok.Style = $w.FindResource('Btn'); $ok.FontSize = 12; $ok.Padding = '12,5,12,5'; $ok.Margin = '0,1,0,4'
+    $ok = New-Object Windows.Controls.Button; $ok.Style = $w.FindResource('Btn'); $ok.FontSize = 13; $ok.Padding = '12,5,12,5'; $ok.Margin = '0,1,0,4'
     $ok.HorizontalAlignment = 'Right'; $ok.Background = Brush '${ASK_BTN.icon}'; $ok.Foreground = Brush '#FFFFFF'; $ok.BorderThickness = '0'; $ok.Tag = Brush '#1F000000'
     $ok.Add_Click({ if (-not $script:chatBusy -and $script:picked.Count) { $script:rig.Play('ack'); Send @{ t = 'choose'; ids = @($script:picked.ToArray()) } } })
     $script:choiceConfirm = $ok; [void]$panel.Children.Add($ok); SyncConfirm
@@ -410,7 +425,7 @@ foreach ($i in 0..4) {
   $r = New-Object Windows.Shapes.Rectangle; $r.Width = 3; $r.Height = 4; $r.RadiusX = 1.5; $r.RadiusY = 1.5; $r.Margin = '0,0,3,0'
   $r.VerticalAlignment = 'Center'; $r.Fill = Brush '#8B7CF6'; [void]$voiceBar.Children.Add($r); $script:levelBars += $r
 }
-$voiceLabel = New-Object Windows.Controls.TextBlock; $voiceLabel.FontSize = 13; $voiceLabel.Foreground = Brush $P.ink; $voiceLabel.Margin = '7,0,0,1'
+$voiceLabel = New-Object Windows.Controls.TextBlock; $voiceLabel.FontSize = 14; $voiceLabel.Foreground = Brush $P.ink; $voiceLabel.Margin = '7,0,0,1'
 $voiceLabel.VerticalAlignment = 'Center'; $voiceLabel.TextTrimming = 'CharacterEllipsis'; [void]$voiceBar.Children.Add($voiceLabel)
 [void]$inputCell.Children.Add($voiceBar)
 $script:levelShape = @(0.55, 0.85, 1, 0.85, 0.55); $script:levelNow = @(0, 0, 0, 0, 0)
@@ -460,6 +475,7 @@ function StartVoice { VoiceLook $true; VoiceState 'connecting'; $script:speakTim
 function EndVoice($text) {
   [AivinMascot.Voice]::End(); $script:speakTimer.Stop(); $script:afterSpeak = ''; $script:voiceLive = ''; VoiceLook $false; AskStatus $text
   SetFace $script:state
+  if ($script:askOpen) { HideAskLater ${ASK_IDLE_MS} }
 }
 function StopVoice { Send @{ t = 'voice_stop' }; EndVoice $T.voice_ended }
 function InterruptVoice { [AivinMascot.Voice]::Flush(); $script:afterSpeak = ''; Send @{ t = 'voice_interrupt' }; VoiceState 'listening' }
@@ -476,7 +492,7 @@ function VoiceToggle {
 })
 # Hotkeys anywhere (no need to reach for the bot): voice = the mic button, chat = open the ask box. Each is the first free combination of
 # the list the daemon wrote into config.json (hotkey.mjs: the owner's own choice first, then the defaults; "hotkey off" = empty lists ->
-# none). Shown in the mic button's tooltip / the panel; none free -> no hotkey. WM_HOTKEY is filtered in C# (AivinMascot.HotKeys).
+# none). Shown in the mic button's tooltip / the tray menu; none free -> no hotkey. WM_HOTKEY is filtered in C# (AivinMascot.HotKeys).
 function RegisterKeyList($id, $list) {
   $keys = @(@($list) | Where-Object { $_ -and $_.n })
   if (-not $keys.Count) { return $null }
@@ -487,17 +503,11 @@ function RegisterKeyList($id, $list) {
 }
 $w.Add_ContentRendered({
   if (-not $script:hwnd) { return }
-  # Quick buttons in Panel
-  (E 'QuickChatBtn').Add_Click({ OpenAsk; (E 'AskBox').Focus() })
-  (E 'QuickVoiceBtn').Add_Click({ VoiceToggle })
-
   $voiceKey = RegisterKeyList 0xA171 $cfg.hotkeys.voice
-  if ($voiceKey) {
-    (E 'QuickVoiceKey').Text = $voiceKey
-    $T.ask_mic = "$($T.ask_mic) ($voiceKey)"; SyncAction
-  } else { (E 'QuickVoiceKey').Parent.Visibility = 'Collapsed' }
+  if ($voiceKey) { $T.ask_mic = "$($T.ask_mic) ($voiceKey)"; SyncAction }
   $chatKey = RegisterKeyList 0xA172 $cfg.hotkeys.chat
-  if ($chatKey) { (E 'QuickChatKey').Text = $chatKey } else { (E 'QuickChatKey').Parent.Visibility = 'Collapsed' }
+  # The tray menu shows the same combinations next to its Quick chat / Quick voice items.
+  Send @{ t = 'hotkeys'; chat = $chatKey; voice = $voiceKey }
   if ($voiceKey -or $chatKey) {
     [AivinMascot.HotKeys]::Start($script:hwnd, [Action[int]]{ param($id)
       if ($id -eq 0xA171) { VoiceToggle }
@@ -514,7 +524,7 @@ function Handle($m) {
       ChatRow $m
       if (-not $m.remove -and [string]$m.role -ne 'user' -and $m.text) {
         $script:chatLast = ChatShort $m
-        if (-not $script:askOpen) { ChatBubble $script:chatLast }
+        if ($script:askOpen) { HideAskLater ${ASK_IDLE_MS} } else { ChatBubble $script:chatLast }
       }
       return
     }
@@ -523,8 +533,8 @@ function Handle($m) {
       $script:chatBusy = [bool]$m.busy; $script:canCancel = [bool]$m.cancel
       (E 'MicBtn').Opacity = if ($script:chatBusy -and -not $script:canCancel) { 0.5 } else { 1 }
       SyncAction
-      # Answer arrived while the user looked elsewhere: leave it readable a while, then tuck the box away.
-      if (-not $script:chatBusy -and $script:askOpen -and -not $script:askFocused -and -not $w.IsMouseOver) { HideAskLater 8000 }
+      # Answer arrived: leave it readable a while, then tuck the box away.
+      if (-not $script:chatBusy -and $script:askOpen) { HideAskLater ${ASK_IDLE_MS} }
       # Turn over with the box closed: the answer / error stays in the bubble a while, then the bubble times out.
       if (-not $script:chatBusy -and -not $script:askOpen -and (E 'Bubble').Visibility -eq 'Visible') { $script:bubbleTimer.Stop(); $script:bubbleTimer.Start() }
       if ($script:chatBusy) { $script:chatLast = '' }
@@ -535,7 +545,7 @@ function Handle($m) {
     'ask_pin' {
       $script:askPinned = [bool]$m.on
       if ($script:askPinned) { $script:userHidden = $false; ApplyVisibility; AskHide 'Panel'; PeekAsk; (E 'ChatScroll').ScrollToEnd() }
-      elseif ($script:askOpen -and -not $script:askFocused) { HideAskLater 4000 }
+      elseif ($script:askOpen) { HideAskLater $(if ($script:askFocused) { ${ASK_IDLE_MS} } else { 4000 }) }
       return
     }
     'voice_begin' {
@@ -555,6 +565,7 @@ function Handle($m) {
     'voice_end' { if ($script:voiceLive) { EndVoice $m.text }; return }
     # aivin ui: the user just asked for the mascot from a terminal -> show it and open the ask box ready to type.
     'open_ask' { $script:userHidden = $false; ApplyVisibility; if (-not $script:askFocused) { OpenAsk }; return }
+    'voice_toggle' { $script:userHidden = $false; ApplyVisibility; VoiceToggle; return }
     # Debug only (AIVIN_MASCOT_DEBUG): show the ask box WITHOUT taking keyboard focus, to look at it / screenshot it.
     'ask_preview' { if ($env:AIVIN_MASCOT_DEBUG) { PeekAsk }; return }
     # Debug/docs preview of the real file-drag UI, using the same tray, face and hint code as DragEnter without requiring Explorer.

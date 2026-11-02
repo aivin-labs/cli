@@ -61,10 +61,11 @@ import { DAEMON_RUNNING } from './lib/remote/daemonLock.mjs';
 import { runPolicyCommand } from './lib/remote/policyCommand.mjs';
 import { loadMascotSettings, saveMascotSettings } from './lib/remote/mascot/index.mjs';
 import { MascotText, mascotLang, mascotText } from './lib/remote/mascot/strings.mjs';
-import { UiResult, showMascotDemo, showMascotUi } from './lib/remote/mascot/ui.mjs';
+import { DESKTOP_WEBRTC_WORKER_ARG, runDesktopWebRtcWorker } from './lib/remote/desktop/webrtcWorker.mjs';
+import { DemoScope, UiResult, showMascotDemo, showMascotUi } from './lib/remote/mascot/ui.mjs';
 import { desktopAppStatus, installDesktopApp, uninstallDesktopApp } from './lib/remote/autoStart.mjs';
 import { createMeetingManager, requestMeeting } from './lib/remote/meeting/index.mjs';
-import { DEFAULT_HOTKEYS, hotkeyCandidates, parseHotkey, probeHotkey } from './lib/remote/mascot/hotkey.mjs';
+import { DEFAULT_CHAT_HOTKEYS, DEFAULT_HOTKEYS, hotkeyCandidates, parseHotkey, probeHotkey } from './lib/remote/mascot/hotkey.mjs';
 import { RESTART_EXIT_CODE, UPDATE_ROLLED_BACK, UpdateStatus, cleanupRetired, downloadRoot, installUpdate, isStandaloneBinary, saveUpdateSettings } from './lib/selfUpdate.mjs';
 import {
   createAutomationJob,
@@ -97,6 +98,7 @@ import {
   pairWithCodeOnly,
   listDevices,
   unpairDevice,
+  assertHumanCommand,
   isRemotePaused,
   setRemotePaused,
   getRecentLogs,
@@ -1031,14 +1033,23 @@ program
   .command('ui')
   .description('Show the Aivin mascot on this computer with its ask box (Windows) - starts the background listener if it is not running')
   .option('--demo', 'Preview every mascot animation state without pairing or starting the listener')
+  .option('--moods', 'With --demo: only the faces the mascot makes from the emoji of an answer (sad, cry, sheepish, happy...)')
   .action(async (options) => {
     const lang = mascotLang();
     const say = (key, color = chalk.green) => console.log(color(mascotText(lang, key)));
     if (options.demo) {
-      const result = showMascotDemo();
+      const result = showMascotDemo({
+        scope: options.moods ? DemoScope.MOODS : DemoScope.ALL,
+        onEarlyExit: () => {
+          console.error(chalk.yellow('Cửa sổ demo đóng ngay: linh vật thật đang chạy (mỗi lúc chỉ một linh vật). Tắt nó bằng `aivin remote mascot off`, chạy lại demo, xong thì `aivin remote mascot on`.'));
+          process.exitCode = 1;
+        },
+      });
       if (result === UiResult.UNSUPPORTED) return say(MascotText.CMD_UNSUPPORTED, chalk.yellow);
       if (result === UiResult.START_FAILED) { console.error(chalk.red('Không thể mở bản demo linh vật.')); process.exitCode = 1; return; }
-      console.log(chalk.green('✓ Demo linh vật đang chạy qua 8 trạng thái — đóng cửa sổ hoặc nhấn Ctrl+C để dừng.'));
+      console.log(chalk.green(options.moods
+        ? '✓ Demo linh vật đang chạy qua 7 nét mặt theo emoji — đóng cửa sổ hoặc nhấn Ctrl+C để dừng.'
+        : '✓ Demo linh vật đang chạy qua 8 trạng thái + 7 nét mặt theo emoji — đóng cửa sổ hoặc nhấn Ctrl+C để dừng.'));
       return;
     }
     const result = await showMascotUi({ onStarting: () => say(MascotText.UI_STARTING, chalk.gray) });
@@ -1127,6 +1138,16 @@ program
     }
   });
 
+// Agent chạy CLI này trong lệnh shell của nó: không đổi việc ghép máy / luật tại máy, không giao việc mới (sandbox.mjs).
+program.hook('preAction', (_cmd, action) => {
+  try {
+    assertHumanCommand(action.parent?.name(), action.name());
+  } catch (error) {
+    console.error(chalk.red('❌'), error.message);
+    process.exit(1);
+  }
+});
+
 const remoteCommand = program
   .command('remote')
   .description('Let your Aivin agents work on this computer (Device Agent) - pair, run the listener, manage memory and safety')
@@ -1188,7 +1209,7 @@ remoteCommand
       if (options.code) {
         // Bộ cài (đã có khay): chỉ ghép — khay mở listener ngay khi thấy máy đã ghép.
         const { creds, stopped } = await pairWithCodeOnly(options);
-        console.log(chalk.green(`✅ Đã kết nối máy "${creds.name}" với tài khoản Aivin của bạn — quay lại Aivin để chọn máy này.`));
+        console.log(chalk.green(`✅ Đã kết nối máy "${creds.name}" với tài khoản ${creds.account || 'Aivin của bạn'} — quay lại Aivin để chọn máy này.`));
         if (stopped) console.log(chalk.gray('   Đã dừng phiên nhận việc cũ — Aivin mở lại bằng kết nối mới.'));
         return;
       }
@@ -1243,26 +1264,39 @@ remoteCommand
 
 remoteCommand
   .command('mascot [action] [combo]')
-  .description('The Aivin mascot floating on screen while the listener runs (Windows): on | off — no argument shows the current setting; hotkey [combo|off|default] — the key combination that calls the mascot (default Win+Alt+Space)')
-  .action((action, combo) => {
+  .description('The Aivin mascot floating on screen while the listener runs (Windows): on | off — no argument shows the current setting; hotkey [combo|off|default] — the key combination for voice (default Alt+Shift+Space; off turns off both keys), with --chat the one that opens the ask box to type (default Alt+Space)')
+  .option('--chat', 'hotkey: show or set the key that opens the ask box instead of the voice key')
+  .action((action, combo, options) => {
     const lang = mascotLang();
     if (action === 'hotkey') {
       try {
-        const setting = loadMascotSettings().hotkey;
+        const settings = loadMascotSettings();
+        const key = options.chat ? 'chat_hotkey' : 'hotkey';
+        const otherKey = options.chat ? 'hotkey' : 'chat_hotkey';
+        const defaults = options.chat ? DEFAULT_CHAT_HOTKEYS : DEFAULT_HOTKEYS;
+        const name = options.chat ? 'Phím tắt mở ô hỏi' : 'Phím tắt nói chuyện';
+        const setting = settings[key];
         if (!combo) {
-          const active = hotkeyCandidates(setting);
-          if (!active.length) return console.log('Phím tắt gọi linh vật: tắt (bật lại: aivin remote mascot hotkey default)');
-          return console.log(`Phím tắt gọi linh vật: ${active[0].label}${setting ? '' : ' (mặc định)'} — không đăng ký được thì thử lần lượt: ${active.slice(1).map((h) => h.label).join(', ')}`);
+          const active = hotkeyCandidates(setting, defaults);
+          if (settings.hotkey === 'off') return console.log(`${name}: tắt (bật lại: aivin remote mascot hotkey default)`);
+          if (!active.length) return console.log(`${name}: tắt (bật lại: aivin remote mascot hotkey --chat default)`);
+          return console.log(`${name}: ${active[0].label}${setting ? '' : ' (mặc định)'} — không đăng ký được thì thử lần lượt: ${active.slice(1).map((h) => h.label).join(', ')}`);
         }
-        if (combo === 'off') { saveMascotSettings({ hotkey: 'off' }); return console.log(chalk.green('✅ Đã tắt phím tắt gọi linh vật.')); }
-        if (combo === 'default') { saveMascotSettings({ hotkey: null }); return console.log(chalk.green(`✅ Dùng phím tắt mặc định ${DEFAULT_HOTKEYS[0]}.`)); }
+        if (combo === 'off') {
+          saveMascotSettings({ [key]: 'off' });
+          return console.log(chalk.green(options.chat ? '✅ Đã tắt phím tắt mở ô hỏi.' : '✅ Đã tắt phím tắt gọi linh vật (cả nói chuyện và mở ô hỏi).'));
+        }
+        if (combo === 'default') { saveMascotSettings({ [key]: null }); return console.log(chalk.green(`✅ ${name}: dùng mặc định ${defaults[0]}.`)); }
         const hotkey = parseHotkey(combo);
+        if (settings[otherKey] && settings[otherKey] !== 'off' && parseHotkey(settings[otherKey]).label === hotkey.label) {
+          throw new Error(`${hotkey.label} đang dùng cho ${options.chat ? 'nói chuyện' : 'mở ô hỏi'} — chọn tổ hợp khác.`);
+        }
         const free = probeHotkey(hotkey);
         if (free === false) {
           console.log(chalk.yellow(`⚠️  ${hotkey.label} đang bị một ứng dụng khác (hoặc chính linh vật đang chạy) giữ — nếu không phải linh vật thì chọn tổ hợp khác.`));
         }
-        saveMascotSettings({ hotkey: hotkey.label });
-        return console.log(chalk.green(`✅ Phím tắt gọi linh vật: ${hotkey.label} — có hiệu lực khi linh vật khởi động lại (aivin remote start).`));
+        saveMascotSettings({ [key]: hotkey.label });
+        return console.log(chalk.green(`✅ ${name}: ${hotkey.label} — có hiệu lực khi linh vật khởi động lại (aivin remote start).`));
       } catch (error) {
         return remoteFail(error);
       }
@@ -1975,5 +2009,7 @@ function resolveIsMain() {
 }
 
 if (resolveIsMain()) {
-  program.parse(process.argv);
+  // Tiến trình con WebRTC của xem màn hình từ web (daemon tự gọi, không phải lệnh cho người dùng) — xem lib/remote/desktop/webrtcWorker.mjs.
+  if (process.argv.includes(DESKTOP_WEBRTC_WORKER_ARG)) await runDesktopWebRtcWorker();
+  else program.parse(process.argv);
 }

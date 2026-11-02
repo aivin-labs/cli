@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { IGNORED_DIRS } from './constants.mjs';
 import { isDocFile } from './docText.mjs';
+import { isSecretPath } from './secretPaths.mjs';
 
 /**
  * Quy tắc lập chỉ mục: bỏ gì, gộp gì (31/10/2026). Đo trên máy thật: 88% tệp trong thư mục ẩn, rồi 87% phần còn lại là ảnh chụp màn hình
@@ -60,6 +61,8 @@ export function skipFile(name, extraExcludes) {
   if (SKIP_FILE_NAMES.has(lower) || lower.startsWith('ntuser.dat')) return true;
   if (SKIP_FILE_EXT.has(path.extname(lower))) return true;
   if (lower.endsWith('.min.js') || lower.endsWith('.min.css') || lower.endsWith('.d.ts.map')) return true;
+  // Khoá riêng, kho mật khẩu…: chỉ mục giữ đoạn xem trước nội dung tệp.
+  if (isSecretPath(lower)) return true;
   if (extraExcludes && (extraExcludes.has(name) || extraExcludes.has(lower))) return true;
   return false;
 }

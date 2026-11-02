@@ -59,8 +59,13 @@ namespace AivinDesktop {
         Application.Run(new TrayApp(id, !autostart && !installed, installed));
         GC.KeepAlive(mutex);
       }
+      // Sau khi nhả mutex: mở trước đó thì bản mới gặp mutex, thoát im lặng.
+      if (Relaunch) try { Process.Start(Application.ExecutablePath, "--autostart"); } catch { }
       return 0;
     }
+
+    /** Aivin.exe đã được thay (TrayApp.SwapIfExeReplaced): thoát xong mở lại từ tệp mới. */
+    internal static bool Relaunch;
 
     static void Signal(string name) {
       try { using (EventWaitHandle e = EventWaitHandle.OpenExisting(name)) e.Set(); } catch { }
@@ -124,7 +129,8 @@ namespace AivinDesktop {
 
     protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
       if (e.Item.Selected && e.Item.Enabled) {
-        Rectangle rc = new Rectangle(4, 1, e.Item.Width - 8, e.Item.Height - 2);
+        int width = Math.Min(e.Item.Width, e.ToolStrip.ClientSize.Width - e.Item.Bounds.Left);
+        Rectangle rc = new Rectangle(4, 1, width - 8, e.Item.Height - 2);
         using (SolidBrush b = new SolidBrush(ClrHover)) {
           FillRoundedRectangle(e.Graphics, b, rc, 6);
         }
@@ -134,6 +140,15 @@ namespace AivinDesktop {
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
       Color textColor = !e.Item.Enabled ? ClrMuted : ClrText;
       int left = Math.Max(16, e.Item.Padding.Left);
+
+      // Phím tắt bên cạnh mục menu: WinForms vẽ riêng bằng chính hàm này, căn phải + màu nhạt.
+      ToolStripMenuItem menuItem = e.Item as ToolStripMenuItem;
+      if (menuItem != null && !string.IsNullOrEmpty(menuItem.ShortcutKeyDisplayString) && e.Text == menuItem.ShortcutKeyDisplayString) {
+        int visible = Math.Min(e.Item.Width, e.ToolStrip.ClientSize.Width - e.Item.Bounds.Left);
+        Rectangle keyRect = new Rectangle(0, 0, Math.Max(0, visible - 16), e.Item.Height);
+        TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, keyRect, ClrMuted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+        return;
+      }
 
       if (e.Text != null && e.Text.Length > 0 && (e.Text[0] == '●' || e.Text[0] == '•' || e.Text[0] == '\u25CF' || e.Text[0] == '\u2022')) {
         string remainingText = e.Text.Substring(1).TrimStart(' ');
@@ -216,6 +231,8 @@ namespace AivinDesktop {
     static readonly string PausedFile = Path.Combine(Program.Home, "remote-paused");
     static readonly string ShowFile = Path.Combine(Program.Home, "mascot-show");
     static readonly string HideFile = Path.Combine(Program.Home, "mascot-hide");
+    static readonly string VoiceFile = Path.Combine(Program.Home, "mascot-voice");
+    static readonly string HotkeysFile = Path.Combine(Program.Home, "mascot-hotkeys.json");
     static readonly string MascotFile = Path.Combine(Program.Home, "mascot.json");
     static readonly string CfgFile = Path.Combine(Program.Home, "desktop", "launch.cfg");
     static readonly string LogoFile = Path.Combine(Program.Home, "desktop", "logo.png");
@@ -242,13 +259,15 @@ namespace AivinDesktop {
     Config cfg;
     NotifyIcon tray;
     Icon colorIcon, greyIcon, shownIcon;
-    ToolStripMenuItem status, updateItem, open, pause, startup, mascot, terminal, quit;
+    ToolStripMenuItem status, updateItem, open, quickChat, quickVoice, pause, startup, mascot, terminal, quit;
+    ToolStripSeparator quickSeparator;
     System.Windows.Forms.Timer timer;
     Control invoker;
     EventWaitHandle openEvent, quitEvent;
     Process child;
     DateTime childStarted;
     DateTime nextStart = DateTime.MinValue;
+    readonly DateTime exeStamp = File.GetLastWriteTimeUtc(Application.ExecutablePath);
     bool isUpdating = false;
     // Listener sập: mở lại sau 2 s, rồi gấp đôi (tối đa 5 phút) nếu sập liên tục.
     const int FirstDelay = 2;
@@ -277,6 +296,9 @@ namespace AivinDesktop {
       open.Font = new Font("Segoe UI", 10.0f, FontStyle.Bold);
       open.Padding = new Padding(16, 7, 24, 7);
 
+      quickChat = Item(cfg.T("quickChat"), delegate { OpenAivin(); });
+      quickVoice = Item(cfg.T("quickVoice"), delegate { RequestMascot(VoiceFile); });
+      quickSeparator = new ToolStripSeparator();
       mascot = Item(cfg.T("mascot"), delegate { ToggleMascot(); });
       pause = Item("", delegate { TogglePause(); });
       terminal = Item(cfg.T("terminal"), delegate { OpenTerminal(); });
@@ -292,6 +314,9 @@ namespace AivinDesktop {
 
       menu.Items.AddRange(new ToolStripItem[] {
         open,
+        quickSeparator,
+        quickChat,
+        quickVoice,
         new ToolStripSeparator(),
         mascot,
         pause,
@@ -358,11 +383,29 @@ namespace AivinDesktop {
     void Tick() {
       if (quitting) return;
       if (child != null && child.HasExited) OnChildExit();
+      if (SwapIfExeReplaced()) return;
       bool paired = File.Exists(CredsFile);
       if (paired && !wasPaired) Balloon(cfg.T("connected"), ToolTipIcon.Info);
       wasPaired = paired;
       if (child == null && paired && DateTime.Now >= nextStart && LockHolder() == 0) StartChild(null);
       Refresh();
+    }
+
+    /**
+     * ensureLauncher thay Aivin.exe lúc khay đang chạy thì khay này chạy từ tệp .old-*. Windows nhớ icon khay theo đường dẫn exe, nên icon có thể
+     * rơi vào mục mới chưa ghim (ẩn trong mũi tên ^). Chuyển sang tệp mới khi không giữ daemon: đang giữ thì chờ daemon tự thoát (nâng bản, sập)
+     * để không ngắt việc đang chạy.
+     */
+    bool SwapIfExeReplaced() {
+      if (child != null || pairing || pairForm != null || isUpdating || tray.ContextMenuStrip.Visible) return false;
+      try {
+        string exe = Application.ExecutablePath;
+        if (!File.Exists(exe) || File.GetLastWriteTimeUtc(exe) == exeStamp) return false;
+      } catch { return false; }
+      Log(DateTime.Now.ToString("s") + " [tray] Aivin.exe replaced, reopening from the new file");
+      Program.Relaunch = true;
+      Quit();
+      return true;
     }
 
     void StartChild(string code) {
@@ -566,6 +609,27 @@ namespace AivinDesktop {
       startup.Text = (startupOn ? "✓  " : "    ") + cfg.T("startup");
       bool mascotOn = IsMascotEnabled();
       mascot.Text = (mascotOn ? "✓  " : "    ") + cfg.T("mascot");
+      quickChat.Visible = quickVoice.Visible = quickSeparator.Visible = paired;
+      // Chỉ hiện phím đang có tác dụng: phím do cửa sổ linh vật giữ, linh vật tắt / daemon dừng thì không còn (tệp có thể sót sau khi daemon chết).
+      string hotkeys = running && mascotOn ? ReadHotkeys() : "";
+      quickChat.ShortcutKeyDisplayString = HotkeyLabel(hotkeys, "chat");
+      quickVoice.ShortcutKeyDisplayString = HotkeyLabel(hotkeys, "voice");
+      // WinForms không tính đủ chỗ cho cột phím tắt khi menu tự vẽ chữ: tự giữ bề rộng tối thiểu để phím không bị cắt / đè lên tên mục.
+      quickChat.Owner.MinimumSize = new Size(Math.Max(ShortcutRowWidth(quickChat), ShortcutRowWidth(quickVoice)), 0);
+    }
+
+    static int ShortcutRowWidth(ToolStripMenuItem item) {
+      if (string.IsNullOrEmpty(item.ShortcutKeyDisplayString)) return 0;
+      return item.Padding.Left + TextRenderer.MeasureText(item.Text, item.Font).Width + 32 + TextRenderer.MeasureText(item.ShortcutKeyDisplayString, item.Font).Width + 24;
+    }
+
+    static string ReadHotkeys() {
+      try { return File.ReadAllText(HotkeysFile); } catch { return ""; }
+    }
+
+    static string HotkeyLabel(string json, string key) {
+      Match m = Regex.Match(json, "\"" + key + "\"\\s*:\\s*\"([^\"]+)\"");
+      return m.Success ? m.Groups[1].Value : null;
     }
 
     bool IsMascotEnabled() {
@@ -622,12 +686,17 @@ namespace AivinDesktop {
 
     /** Mở Aivin: chưa ghép máy → hỏi mã; có rồi → hiện linh vật và ô hỏi đáp ngay trên màn hình. */
     void OpenAivin() {
+      RequestMascot(ShowFile);
+    }
+
+    /** Gửi yêu cầu cho daemon qua tệp đánh dấu (mascot-show = mở ô hỏi, mascot-voice = nói chuyện); daemon đang dừng thì chạy lại để nó nhận. */
+    void RequestMascot(string requestFile) {
       if (quitting) return;
       if (!File.Exists(CredsFile)) { ShowPair(); return; }
       try {
         try { SetMascotEnabled(true); } catch { }
         long ms = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
-        File.WriteAllText(ShowFile, ms.ToString(CultureInfo.InvariantCulture));
+        File.WriteAllText(requestFile, ms.ToString(CultureInfo.InvariantCulture));
       } catch { }
 
       if (child == null && LockHolder() == 0) {

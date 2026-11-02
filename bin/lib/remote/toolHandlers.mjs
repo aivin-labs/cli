@@ -1,11 +1,11 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import readline from 'readline';
 import { spawn } from 'child_process';
 import { DeviceErrorCode, IGNORED_DIRS, MemoryKind, ToolGroup } from './constants.mjs';
+import { isSecretPath } from './secretPaths.mjs';
 import {
-  DeviceToolError, assertCommandAllowed, containsProtectedPath, displayPath, isProtectedPath, isRootPath, protectedDirNamesUnder,
+  DeviceToolError, agentEnv, assertCommandAllowed, containsProtectedPath, displayPath, isProtectedPath, isRootPath, protectedDirNamesUnder,
   resolveEntryInRoots, resolveInRoots, scrubEnv,
 } from './sandbox.mjs';
 import { deleteMemoryItems, getMemoryItem, listMemoryItems, putMemoryItems, searchMemory } from './deviceMemory.mjs';
@@ -52,6 +52,10 @@ const MAX_LIST_ENTRIES = 2000;
 const MAX_BATCH_ITEMS = 1000;
 const BATCH_CONCURRENCY = 8;
 const GREP_CONCURRENCY = 16;
+/** Lệnh thoát rồi mà ống ra còn mở (tiến trình nền giữ): chờ nốt đầu ra bấy nhiêu ms. */
+const EXIT_DRAIN_MS = 2000;
+/** Đã huỷ mà tiến trình chưa đóng hẳn: trả chỗ chạy lệnh sau bấy nhiêu ms. */
+const ABORT_SETTLE_MS = 3000;
 
 const str = (description) => ({ type: 'string', description });
 const num = (description) => ({ type: 'number', description });
@@ -80,16 +84,39 @@ async function looksBinary(abs) {
   }
 }
 
+/**
+ * Từng dòng của luồng, dòng dài quá `maxChars` bị cắt. Không dùng `readline`: dòng rất dài (log / JSON một dòng > 512 MB) ném `RangeError` ở
+ * nơi không bắt được, sập cả daemon (rà 02/11/2026).
+ */
+async function* boundedLines(stream, maxChars) {
+  let pending = '';
+  let overflowed = false;
+  for await (const chunk of stream) {
+    const parts = chunk.split('\n');
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!overflowed) yield `${pending}${parts[i]}`.replace(/\r$/, '').slice(0, maxChars);
+      pending = '';
+      overflowed = false;
+    }
+    if (!overflowed) pending += parts[parts.length - 1];
+    if (pending.length > maxChars) {
+      if (!overflowed) yield pending.slice(0, maxChars);
+      pending = '';
+      overflowed = true;
+    }
+  }
+  if (pending && !overflowed) yield pending.replace(/\r$/, '');
+}
+
 /** Đọc theo khoảng dòng bằng luồng — tệp lớn không phải nạp cả vào RAM. */
 async function readLines(abs, startLine, endLine, signal) {
   const stream = fs.createReadStream(abs, { encoding: 'utf8' });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   const lines = [];
   let n = 0;
   let bytes = 0;
   let truncatedByBytes = false;
   try {
-    for await (const line of rl) {
+    for await (const line of boundedLines(stream, MAX_READ_BYTES + 1)) {
       n++;
       if (n < startLine) continue;
       if (n > endLine) break;
@@ -99,7 +126,6 @@ async function readLines(abs, startLine, endLine, signal) {
       if (signal?.aborted) break;
     }
   } finally {
-    rl.close();
     stream.destroy();
   }
   throwIfAborted(signal);
@@ -303,7 +329,7 @@ async function fsPreview(args, ctx, env) {
 function runProcess(cmd, argv, { cwd, signal, onOutput, env, maxOutput = MAX_EXEC_OUTPUT, shell = false, runAs }) {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const baseEnv = env || scrubEnv();
+    const baseEnv = env || agentEnv();
     const account = runAs ? { uid: runAs.uid, gid: runAs.gid } : {};
     // Thành viên máy tính tổ chức: trần số tiến trình theo uid (prlimit) — một người không fork bomb được cả container.
     if (runAs) [cmd, argv] = withProcessCap(cmd, argv);
@@ -311,22 +337,43 @@ function runProcess(cmd, argv, { cwd, signal, onOutput, env, maxOutput = MAX_EXE
     let stdout = '';
     let stderr = '';
     let killed = false;
-    const killTree = () => {
-      if (killed || child.exitCode !== null) return;
-      killed = true;
-      if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
-      else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
+    let settled = false;
+    const timers = [];
+    // Vào `run…` một lần duy nhất: `close` bình thường, hoặc hết giờ chờ khi tiến trình cháu còn giữ ống ra (`nohup server &`, `Start-Process`).
+    const settle = (code, extra = {}) => {
+      if (settled) return;
+      settled = true;
+      timers.forEach(clearTimeout);
+      signal?.removeEventListener('abort', onAbort);
+      child.stdout.destroy();
+      child.stderr.destroy();
+      if (signal?.aborted) return reject(signal.reason || new DeviceToolError(DeviceErrorCode.CANCELLED, 'Cancelled'));
+      resolve({ exitCode: code ?? -1, stdout, stderr, durationMs: Date.now() - startedAt, ...extra, ...(stdout.length >= maxOutput || stderr.length >= maxOutput ? { outputTruncated: true } : {}) });
     };
-    const onAbort = () => killTree();
+    const killTree = () => {
+      if (killed) return;
+      killed = true;
+      // Shell đã thoát mà cháu còn chạy: trên Linux / macOS vẫn giết được cả nhóm tiến trình; Windows mất dấu cây, taskkill báo lỗi vô hại.
+      if (process.platform === 'win32') { if (child.exitCode === null) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }).on('error', () => undefined); }
+      else { try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* đã thoát */ } } }
+    };
+    const onAbort = () => {
+      killTree();
+      // Huỷ phải trả chỗ chạy lệnh dù cháu không chết được (trước đây giữ chỗ EXEC tới khi cháu tự thoát — 3 lệnh như vậy là kẹt mọi lệnh sau).
+      timers.push(setTimeout(() => settle(-1), ABORT_SETTLE_MS));
+    };
     signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (chunk) => { const t = chunk.toString(); if (stdout.length < maxOutput) stdout += t; onOutput?.('stdout', t); });
     child.stderr.on('data', (chunk) => { const t = chunk.toString(); if (stderr.length < maxOutput) stderr += t; onOutput?.('stderr', t); });
-    child.on('error', (e) => { signal?.removeEventListener('abort', onAbort); reject(new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, `Cannot start process: ${e.message}`)); });
-    child.on('close', (code) => {
+    child.on('error', (e) => {
+      settled = true;
+      timers.forEach(clearTimeout);
       signal?.removeEventListener('abort', onAbort);
-      if (signal?.aborted) return reject(signal.reason || new DeviceToolError(DeviceErrorCode.CANCELLED, 'Cancelled'));
-      resolve({ exitCode: code ?? -1, stdout, stderr, durationMs: Date.now() - startedAt, ...(stdout.length >= maxOutput || stderr.length >= maxOutput ? { outputTruncated: true } : {}) });
+      reject(new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, `Cannot start process: ${e.message}`));
     });
+    // Lệnh đã xong mà tiến trình nền nó để lại còn giữ ống ra: trả kết quả, tiến trình nền chạy tiếp (đúng ý `nohup … &`).
+    child.on('exit', (code) => { timers.push(setTimeout(() => settle(code, { backgroundKept: true }), EXIT_DRAIN_MS)); });
+    child.on('close', (code) => settle(code));
   });
 }
 
@@ -334,6 +381,8 @@ async function fsGrep(args, ctx, env) {
   const query = String(requireArg(args.query, 'query'));
   const abs = resolveInRoots(env.roots, args.path || '');
   const maxResults = Math.min(Number(args.maxResults) || 50, 500);
+  // Tìm từ thư mục cha không quét tệp bí mật (cổng duyệt phía BE chỉ thấy thư mục cha). Người gọi nêu đúng chỗ bí mật thì đã qua cổng duyệt.
+  const secretsAllowed = isSecretPath(abs);
   if (env.binaries?.includes('rg')) {
     // Loại thư mục cấu hình Aivin kể cả khi bật tìm tệp ẩn; lọc lại kết quả phía dưới phòng khi glob của người gọi lách được.
     const exclude = protectedDirNamesUnder(abs).flatMap((name) => ['-g', `!${name}`]);
@@ -344,6 +393,7 @@ async function fsGrep(args, ctx, env) {
     const matches = res.stdout.split(/\r?\n/).filter(Boolean).map((line) => {
       const m = line.match(/^(.*?):(\d+):(.*)$/);
       if (m && isProtectedPath(path.resolve(abs, m[1]))) return null;
+      if (m && !secretsAllowed && isSecretPath(path.resolve(abs, m[1]))) return null;
       return m ? { path: displayPath(env.roots, m[1]), line: Number(m[2]), text: m[3].slice(0, 300) } : { text: line.slice(0, 300) };
     }).filter(Boolean).slice(0, maxResults);
     return { engine: 'ripgrep', total: matches.length, matches };
@@ -373,6 +423,8 @@ async function fsGrep(args, ctx, env) {
     for (const e of entries) {
       const full = path.join(dir, e.name);
       if (isProtectedPath(full)) continue;
+      // Như ripgrep: bỏ tệp / thư mục ẩn (`.ssh`, `.aws`, `.env`…) — máy không có rg từng quét cả chúng.
+      if (!secretsAllowed && (e.name.startsWith('.') || isSecretPath(full))) continue;
       if (e.isDirectory()) { if (!IGNORED_DIRS.has(e.name) && !e.isSymbolicLink()) queue.push(full); continue; }
       if (e.isFile() && (!glob || glob.test(e.name))) files.push(full);
     }
@@ -496,8 +548,16 @@ async function fsCopy(args, _ctx, env) {
   if (path.resolve(src) === path.resolve(dest)) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Source and destination are the same');
   // Chép một thư mục BAO TRỌN `.aivin` (vd cả thư mục nhà) là đưa token / khoá ký / cookie ra chỗ đọc được — như fs.move / fs.delete.
   if (containsProtectedPath(src)) throw new DeviceToolError(DeviceErrorCode.PROTECTED_PATH, 'Folder holds Aivin credentials and cannot be copied remotely');
+  // Đích bị XOÁ trước khi chép khi `overwrite`: đích là gốc được phép / thư mục chứa `.aivin` / thư mục chứa nguồn thì mất cả cây (rà 02/11/2026:
+  // chép `a.txt` vào `.` xoá sạch thư mục được phép).
+  if (isRootPath(env.roots, dest)) throw new DeviceToolError(DeviceErrorCode.ROOT_DENIED, 'Refusing to replace an allowed root folder');
+  if (containsProtectedPath(dest)) throw new DeviceToolError(DeviceErrorCode.PROTECTED_PATH, 'Folder holds Aivin credentials and cannot be replaced remotely');
+  const relToDest = path.relative(dest, src);
+  if (relToDest && !relToDest.startsWith('..') && !path.isAbsolute(relToDest)) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Destination contains the source — copy into a new path inside it instead');
   const exists = fs.existsSync(dest);
   if (exists && args.overwrite !== true) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Destination exists (set overwrite to replace it): ${args.destinationPath}`);
+  // Không hiểu kiểu `cp`: chép TỆP vào thư mục có sẵn không được thay cả thư mục đó.
+  if (exists && !stat.isDirectory() && fs.statSync(dest).isDirectory()) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Destination is a folder — give the full file path inside it: ${args.destinationPath}`);
   const undo = undoOf(args, env, 'copy');
   try {
     if (undo) await undo.ensureDir(path.dirname(dest));

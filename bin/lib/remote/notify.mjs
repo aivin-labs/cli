@@ -49,7 +49,10 @@ export function showOSNotification({ title, body, url } = {}) {
         stdio: 'ignore', detached: true,
       }).unref();
     } else {
-      spawn('notify-send', ['--urgency=critical', t, m], { stdio: 'ignore', detached: true }).unref();
+      // Lỗi spawn (máy không cài libnotify) là sự kiện bất đồng bộ, `try` không bắt được — không có listener là sập cả daemon.
+      const child = spawn('notify-send', ['--urgency=critical', t, m], { stdio: 'ignore', detached: true });
+      child.on('error', () => undefined);
+      child.unref();
     }
   } catch {
     // best-effort

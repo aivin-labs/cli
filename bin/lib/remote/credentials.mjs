@@ -258,6 +258,7 @@ function savePairResult(res, { serverUrl, deviceId, roots, name }) {
     name: data.device?.name || name || os.hostname(),
     roots: roots.map((r) => path.resolve(r)),
     paired_at: new Date().toISOString(),
+    account: data.account || undefined,
     lang: data.user_lang || data.lang || undefined,
   };
   saveDeviceCredentials(creds);

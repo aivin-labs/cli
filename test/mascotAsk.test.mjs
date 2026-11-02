@@ -7,6 +7,7 @@ import path from 'path';
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
 const { createMascotChat, ChatRole, AskCommand, VoiceCommand, VoiceState } = await import('../bin/lib/remote/mascot/ask.mjs');
 const { hostScript } = await import('../bin/lib/remote/mascot/index.mjs');
+const { ASK_IDLE_MS } = await import('../bin/lib/remote/mascot/askHostSource.mjs');
 const { MASCOT_XAML } = await import('../bin/lib/remote/mascot/hostSource.mjs');
 
 /** Socket giả: ghi lại các lần gửi, trả ack theo `reply(event, payload)`. */
@@ -298,6 +299,27 @@ test('host.ps1 có ô hỏi chèn đúng dấu, vẫn toàn ASCII; XAML có đ�
   for (const name of ['x:Name="Ask"', 'x:Name="AskBox"', 'x:Name="MicBtn"', 'x:Name="MicIcon"', 'x:Name="SendIcon"', 'x:Name="AskGlowSpin"', 'x:Key="AskGlow"']) {
     assert.ok(MASCOT_XAML.includes(name), name);
   }
+});
+
+test('ô hỏi tự thu sau khi rảnh, kể cả mở bằng cú bấm; đếm lại khi còn dùng và trả bàn phím về cửa sổ trước', () => {
+  const script = hostScript();
+  const open = script.slice(script.indexOf('function OpenAsk {'), script.indexOf('function CloseAsk {'));
+  assert.ok(open.includes(`HideAskLater ${ASK_IDLE_MS}`));
+  assert.ok(!script.includes('askManual'), 'không còn cờ "mở tay thì không bao giờ ẩn"');
+  assert.ok(script.includes(`if ($script:askOpen -and (AskInUse)) { HideAskLater ${ASK_IDLE_MS}; return }`));
+  assert.ok(script.includes('[AivinMascotAsk.Native]::GiveFocusBack($script:hwnd'));
+  // Hết nói chuyện / trả lời xong thì bắt đầu đếm.
+  const endVoice = script.slice(script.indexOf('function EndVoice($text) {'), script.indexOf('function StopVoice {'));
+  assert.ok(endVoice.includes(`HideAskLater ${ASK_IDLE_MS}`));
+  assert.ok(script.includes(`if (-not $script:chatBusy -and $script:askOpen) { HideAskLater ${ASK_IDLE_MS} }`));
+});
+
+test('bảng nhật ký không còn khối phím tắt nhanh; phím vẫn đăng ký và báo cho khay', () => {
+  const script = hostScript();
+  for (const name of ['ShortcutsLabel', 'QuickChatBtn', 'QuickVoiceBtn', 'QuickChatKey', 'QuickVoiceKey']) {
+    assert.ok(!MASCOT_XAML.includes(name) && !script.includes(name), name);
+  }
+  assert.ok(script.includes("Send @{ t = 'hotkeys'; chat = $chatKey; voice = $voiceKey }"));
 });
 
 const { showMascotUi, UiResult } = await import('../bin/lib/remote/mascot/ui.mjs');
