@@ -68,12 +68,15 @@ test('excel.write / word.edit: save chỉ chuyển khi nêu rõ, công thức ch
 
 test('host Office (C#): sổ người dùng đang mở không lưu mặc định, chữ "=..." không thành công thức, bản ẩn ghi PID + Outlook do host bật thì Quit', async () => {
   const { OFFICE_CSHARP: cs } = await import('../bin/lib/remote/gui/officeHostSource.mjs');
-  assert.match(cs, /return o\.Own \? B\(a, "save", true\) : !userDirty && B\(a, "save", false\)/);
+  assert.match(cs, /return o\.Own \? B\(a, "save", true\) : B\(a, "force_save", false\) \|\| \(!userDirty && B\(a, "save", false\)\)/);
   assert.match(cs, /res\["unsaved"\] = true/);
   // Người dùng đang có chỉnh dở (Saved=false, đọc trước khi ghi) → không lưu kể cả save=true (02/11/2026).
-  assert.match(cs, /return !Convert\.ToBoolean\(Get\(o\.Doc, "Saved"\)\); \} catch \{ return true; \}/);
+  assert.match(cs, /saved = Convert\.ToBoolean\(Get\(o\.Doc, "Saved"\)\); \} catch \{ return true; \}/);
+  // Saved=false do chính AI ghi trước đó (chưa lưu) không phải chỉnh dở của người dùng — lần sau save=true vẫn lưu được.
+  assert.match(cs, /return !AiDirty\.Contains\(path\)/);
+  assert.match(cs, /if \(save\) AiDirty\.Remove\(path\); else AiDirty\.Add\(path\);/);
   assert.match(cs, /res\["user_had_unsaved_edits"\] = true/);
-  assert.equal((cs.match(/bool userDirty = UserHasUnsavedEdits\(o\);/g) || []).length, 2);
+  assert.equal((cs.match(/bool userDirty = UserHasUnsavedEdits\(o, path\);/g) || []).length, 2);
   assert.match(cs, /if \(formula && s != null && s\.StartsWith\("="\)\) Set\(r, "Formula", s\)/);
   assert.match(cs, /data\[r, c\] = SafeCellValue\(arr\[c\], formula\)/);
   assert.match(cs, /TrackOwn\("EXCEL", before, own\)/);

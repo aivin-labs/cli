@@ -75,6 +75,10 @@ test('gui.do: chữ trong ô không lái việc chọn nút; nút chốt / xoá 
   assert.equal(needsServerCheck('nút Gửi', { name: 'Gửi' }), false);
   assert.equal(needsServerCheck('Lưu', { name: 'Lưu' }), false);
   assert.equal(needsServerCheck('Sign in', { name: 'Sign out' }), true);
+  // Chữ Đ: "Đăng" từng thành "ang" nên lọt qua danh sách nút chốt.
+  assert.equal(needsServerCheck('bài', { name: 'Đăng bài' }), true);
+  assert.equal(needsServerCheck('giỏ', { name: 'Đặt hàng' }), true);
+  assert.equal(needsServerCheck('nút Đăng', { name: 'Đăng' }), false);
 });
 
 test('act theo node_id: snapshot lạ → GUI_STALE_NODE; ứng dụng bị chặn → không gửi xuống host', async () => {

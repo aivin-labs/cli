@@ -179,7 +179,7 @@ $w.Add_MouseLeave({ if ($script:askOpen -and -not $script:askManual) { HideAskLa
 # Clicked somewhere else: release keyboard focus, keep box open if manually opened.
 $w.Add_Deactivated({
   $script:askFocused = $false; SetActivatable $false; $script:askManual = $false
-  if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag) { CloseAsk }
+  if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag -and -not $script:askPinned) { CloseAsk }
   if ((E 'Panel').Visibility -eq 'Visible') { ClosePanel }
 })
 # Click outside detection: transparent window region or anywhere on other windows
@@ -190,7 +190,7 @@ $w.Add_PreviewMouseLeftButtonDown({ param($s, $e)
   $inAsk = $askBox.Visibility -eq 'Visible' -and (New-Object Windows.Rect ($askBox.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $askBox.RenderSize).Contains($pt)
   $inMascot = (New-Object Windows.Rect ($mascot.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $mascot.RenderSize).Contains($pt)
   $inPanel = $panel.Visibility -eq 'Visible' -and (New-Object Windows.Rect ($panel.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $panel.RenderSize).Contains($pt)
-  if (-not $inAsk -and -not $inMascot -and -not $inPanel) {
+  if (-not $inAsk -and -not $inMascot -and -not $inPanel -and -not $script:askPinned) {
     $script:askManual = $false; CloseAsk
   }
   if (-not $inPanel -and (E 'Panel').Visibility -eq 'Visible' -and -not $inMascot) {
@@ -200,7 +200,7 @@ $w.Add_PreviewMouseLeftButtonDown({ param($s, $e)
 $script:clickCheckTimer = New-Object Windows.Threading.DispatcherTimer
 $script:clickCheckTimer.Interval = [TimeSpan]::FromMilliseconds(50)
 $script:clickCheckTimer.Add_Tick({
-  if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag) {
+  if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag -and -not $script:askPinned) {
     if (-not $w.IsMouseOver -and [AivinMascotAsk.Native]::ClickOutside()) {
       $script:askManual = $false; CloseAsk
     }

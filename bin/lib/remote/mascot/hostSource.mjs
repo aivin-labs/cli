@@ -332,10 +332,13 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
 export const MASCOT_PS1 = String.raw`$ErrorActionPreference = 'Stop'
 # Single mascot instance check
 try {
-  $myPid = $PID
-  Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
-    if ($_.ProcessId -ne $myPid -and $_.CommandLine -and $_.CommandLine.Contains('host.ps1')) {
-      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+  # Only this very script (full path, same Windows session): a bare 'host.ps1' match also killed the user's localhost.ps1, ghost.ps1...
+  $myPid = $PID; $mySession = (Get-Process -Id $PID).SessionId; $myScript = $PSCommandPath
+  if ($myScript) {
+    Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+      if ($_.ProcessId -ne $myPid -and $_.SessionId -eq $mySession -and $_.CommandLine -and $_.CommandLine.IndexOf($myScript, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      }
     }
   }
 } catch {}

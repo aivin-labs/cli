@@ -88,7 +88,7 @@ export function assertAppAllowed(name, { fullAccess }) {
   }
 }
 
-const normalizeName = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const normalizeName = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/gi, 'd').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 /**
  * Rank UI nodes with richer evidence while keeping the model-facing schema small. Hard exclusions happen

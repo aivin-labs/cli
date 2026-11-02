@@ -136,26 +136,33 @@ namespace AivinGui {
     }
 
     /** Sổ / tài liệu người dùng mở sẵn đang có chỉnh sửa chưa lưu (đọc TRƯỚC khi AI ghi). Không đọc được → coi là có (không lưu). */
-    static bool UserHasUnsavedEdits(Opened o) {
+    static bool UserHasUnsavedEdits(Opened o, string path) {
       if (o.Own) return false;
-      try { return !Convert.ToBoolean(Get(o.Doc, "Saved")); } catch { return true; }
+      bool saved;
+      try { saved = Convert.ToBoolean(Get(o.Doc, "Saved")); } catch { return true; }
+      if (saved) { AiDirty.Remove(path); return false; }
+      return !AiDirty.Contains(path);
     }
+
+    /** Tệp người dùng mở sẵn mà AI đã ghi nhưng chưa lưu: Saved=false lần sau là do chính AI, không phải chỉnh dở của người dùng. */
+    static readonly HashSet<string> AiDirty = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
     /**
      * Sổ / tài liệu người dùng ĐANG MỞ (không do AI mở): mặc định KHÔNG lưu, chỉ lưu khi save=true — và kể cả save=true cũng không lưu nếu người
      * dùng đang có chỉnh sửa dở (lưu lúc đó = lưu luôn phần dở của họ, 02/11/2026).
      */
     static bool ShouldSave(Opened o, Dictionary<string, object> a, bool userDirty) {
-      return o.Own ? B(a, "save", true) : !userDirty && B(a, "save", false);
+      return o.Own ? B(a, "save", true) : B(a, "force_save", false) || (!userDirty && B(a, "save", false));
     }
 
-    static void AddSaveState(Dictionary<string, object> res, Opened o, bool save, string app, bool userDirty) {
+    static void AddSaveState(Dictionary<string, object> res, Opened o, bool save, string app, bool userDirty, string path) {
       res["saved"] = save;
+      if (!o.Own) { if (save) AiDirty.Remove(path); else AiDirty.Add(path); }
       if (!o.Own && !save) {
         res["unsaved"] = true;
         if (userDirty) {
           res["user_had_unsaved_edits"] = true;
-          res["hint"] = "The file the user has open in " + app + " already had the user's own unsaved edits, so it was NOT saved (saving would save their edits too) - ask the user to review and save it themselves";
+          res["hint"] = "The file the user has open in " + app + " already had unsaved changes (the user's own edits, or recalculated formulas), so it was NOT saved (saving would save those too) - ask the user to review and save it themselves, or call again with force_save: true only after the user confirms";
         } else {
           res["hint"] = "The change is in the file the user has open in " + app + " but NOT saved (saving would also save the user's own unsaved edits) - tell the user to review and save, or call again with save: true only if the user asked to save";
         }
@@ -361,7 +368,7 @@ namespace AivinGui {
     static object ExcelWrite(Dictionary<string, object> a) {
       string path = S(a, "path");
       Opened o = OpenWorkbook(path, B(a, "create", false), false);
-      bool userDirty = UserHasUnsavedEdits(o);
+      bool userDirty = UserHasUnsavedEdits(o, path);
       bool save = ShouldSave(o, a, userDirty);
       bool formula = B(a, "formula", false);
       try {
@@ -396,7 +403,7 @@ namespace AivinGui {
         if (written.Count == 0) throw new GuiError("INVALID_ARGS", "Give cells {\"B2\": value} or range + values");
         Release(ws);
         var res = new Dictionary<string, object> { { "path", path }, { "written", written }, { "open_in_user_excel", !o.Own } };
-        AddSaveState(res, o, save, "Excel", userDirty);
+        AddSaveState(res, o, save, "Excel", userDirty, path);
         return res;
       } finally { CloseWorkbook(o, save); }
     }
@@ -472,11 +479,11 @@ namespace AivinGui {
     static object WordEdit(Dictionary<string, object> a) {
       string path = S(a, "path");
       Opened o = OpenDocument(path, B(a, "create", false), false);
-      bool userDirty = UserHasUnsavedEdits(o);
+      bool userDirty = UserHasUnsavedEdits(o, path);
       bool save = ShouldSave(o, a, userDirty);
       try {
         var res = new Dictionary<string, object> { { "path", path }, { "open_in_user_word", !o.Own } };
-        AddSaveState(res, o, save, "Word", userDirty);
+        AddSaveState(res, o, save, "Word", userDirty, path);
         string find = S(a, "find"), replace = S(a, "replace"), append = S(a, "append");
         if (!string.IsNullOrEmpty(find)) {
           object content = Get(o.Doc, "Content");

@@ -581,9 +581,9 @@ export function createMascotChat({
    */
   function onNotify(payload) {
     if (!payload || typeof payload.kind !== 'string' || !NOTIFY_LABEL[payload.kind]) return;
-    if (payload.id && !received(payload.id)) return;
 
-    const isHil = payload.kind === NotifyKind.NEEDS_YOU && !!payload.question;
+    // "Cần bạn" luôn qua mọi mức, kể cả báo không kèm câu hỏi có cấu trúc.
+    const isHil = payload.kind === NotifyKind.NEEDS_YOU;
     const isCurrentSession = !!(currentSessionId && payload.session_id === currentSessionId);
 
     // Lọc theo tần suất thông báo:
@@ -599,6 +599,8 @@ export function createMascotChat({
       const onDevice = deviceSessions.has(payload.session_id) || (typeof payload.id === 'string' && payload.id.startsWith('chat:'));
       if (!isCurrentSession && !isHil && !onDevice && payload.kind !== NotifyKind.FAILED) return;
     }
+    // Sau bộ lọc: `received` xác nhận với BE (BE xoá khỏi hộp báo) — báo bị lọc còn trong hộp, nâng mức thì lần nối sau vẫn nhận được.
+    if (payload.id && !received(payload.id)) return;
 
     const label = t(NOTIFY_LABEL[payload.kind]);
     const title = typeof payload.title === 'string' ? payload.title.trim() : '';
