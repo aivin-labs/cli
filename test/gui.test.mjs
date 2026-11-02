@@ -316,6 +316,8 @@ test('windowsHost: huỷ wait_for gửi { cancel: id } qua stdin mà không gi�
   await assert.rejects(pending, /aborted_wait/);
   assert.equal(killed, false, 'không taskkill host khi chỉ huỷ wait_for');
   assert.equal(host.running(), true);
+  // PassThrough giao dữ liệu bất đồng bộ: chờ tới khi `{ cancel }` tới, không giả định kịp ngay (từng flaky trên CI Ubuntu).
+  for (let i = 0; i < 200 && !written.some((m) => m.cancel); i++) await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual(written.at(-1), { cancel: '1' });
 });
 
