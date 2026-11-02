@@ -332,11 +332,13 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
 export const MASCOT_PS1 = String.raw`$ErrorActionPreference = 'Stop'
 # Single mascot instance check
 try {
-  # Only this very script (full path, same Windows session): a bare 'host.ps1' match also killed the user's localhost.ps1, ghost.ps1...
-  $myPid = $PID; $mySession = (Get-Process -Id $PID).SessionId; $myScript = $PSCommandPath
-  if ($myScript) {
+  # Only mascot hosts (any version: each lives in <mascot dir>\<hash>\host.ps1, an orphan of an old version would hold the mutex), same Windows
+  # session: a bare 'host.ps1' match also killed the user's localhost.ps1, ghost.ps1...
+  $myPid = $PID; $mySession = (Get-Process -Id $PID).SessionId
+  $mascotBase = if ($PSCommandPath) { Split-Path (Split-Path $PSCommandPath -Parent) -Parent } else { $null }
+  if ($mascotBase) {
     Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
-      if ($_.ProcessId -ne $myPid -and $_.SessionId -eq $mySession -and $_.CommandLine -and $_.CommandLine.IndexOf($myScript, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+      if ($_.ProcessId -ne $myPid -and $_.SessionId -eq $mySession -and $_.CommandLine -and $_.CommandLine.IndexOf($mascotBase, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $_.CommandLine.IndexOf('host.ps1', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
       }
     }
