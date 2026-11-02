@@ -122,15 +122,24 @@ namespace AivinGui {
       return j;
     }
 
-    /** [+-]chữ số, tối đa một dấu thập phân (. hoặc ,), không khoảng trắng — "+84 912…" (có khoảng trắng) vẫn là chữ. */
+    /** [+-]chữ số, dấu phân cách (. hoặc ,) nằm giữa hai chữ số, có thể thêm số mũ e±n hoặc % — "-1,500,000", "-1.234,5", "-5%", "-1e5". Có khoảng trắng ("+84 912…") vẫn là chữ. */
     static bool IsPlainNumber(string s) {
-      int i = (s[0] == '+' || s[0] == '-') ? 1 : 0, digits = 0, seps = 0;
-      if (i >= s.Length) return false;
-      for (; i < s.Length; i++) {
+      int i = (s[0] == '+' || s[0] == '-') ? 1 : 0, end = s.Length, digits = 0;
+      if (end > i && s[end - 1] == '%') end--;
+      if (i >= end) return false;
+      for (; i < end; i++) {
         char ch = s[i];
-        if (ch >= '0' && ch <= '9') digits++;
-        else if ((ch == '.' || ch == ',') && seps == 0 && digits > 0 && i < s.Length - 1) seps++;
-        else return false;
+        if (ch >= '0' && ch <= '9') { digits++; continue; }
+        bool digitAround = digits > 0 && i + 1 < end && s[i - 1] >= '0' && s[i - 1] <= '9' && s[i + 1] >= '0' && s[i + 1] <= '9';
+        if ((ch == '.' || ch == ',') && digitAround) continue;
+        if ((ch == 'e' || ch == 'E') && digits > 0) {
+          int k = i + 1;
+          if (k < end && (s[k] == '+' || s[k] == '-')) k++;
+          if (k >= end) return false;
+          for (; k < end; k++) if (s[k] < '0' || s[k] > '9') return false;
+          return true;
+        }
+        return false;
       }
       return digits > 0;
     }

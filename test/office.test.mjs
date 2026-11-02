@@ -105,7 +105,7 @@ test('host Office (C#) chạy thật phần thuần: chống chèn công thức 
     "$ErrorActionPreference = 'Stop'",
     'Add-Type -Path $env:AIVIN_TEST_DLL',
     "$m = [AivinGui.Office].GetMethod('SafeCellValue', [Reflection.BindingFlags]'NonPublic,Static')",
-    "$vals = @('=HYPERLINK(1)', '+1', '-x', '@SUM(A1)', 'hello', '', '-5', '-1500000', '+3.5', '-1,25', '+84 912 345', '-', '-5-1', '+A1', '-.5')",
+    "$vals = @('=HYPERLINK(1)', '+1', '-x', '@SUM(A1)', 'hello', '', '-5', '-1500000', '+3.5', '-1,25', '+84 912 345', '-', '-5-1', '+A1', '-.5', '-1,500,000', '-1.234,5', '-5%', '-1e5', '+2E-3', '-e5', '-5,', '-1e')",
     '$safe = @($vals | ForEach-Object { $m.Invoke($null, [object[]]@([string]$_, $false)) })',
     "$formula = $m.Invoke($null, @('=1+1', $true))",
     '$killed = [AivinGui.Office]::CleanupOrphans()',
@@ -116,7 +116,7 @@ test('host Office (C#) chạy thật phần thuần: chống chèn công thức 
   });
   const res = JSON.parse(out.trim().split(/\r?\n/).at(-1));
   // Số viết dạng chuỗi giữ nguyên (Excel tự đổi thành số); SĐT có khoảng trắng / "-5-1" / ô tham chiếu vẫn thành chữ.
-  assert.deepEqual(res.safe, ["'=HYPERLINK(1)", '+1', "'-x", "'@SUM(A1)", 'hello', '', '-5', '-1500000', '+3.5', '-1,25', "'+84 912 345", "'-", "'-5-1", "'+A1", "'-.5"]);
+  assert.deepEqual(res.safe, ["'=HYPERLINK(1)", '+1', "'-x", "'@SUM(A1)", 'hello', '', '-5', '-1500000', '+3.5', '-1,25', "'+84 912 345", "'-", "'-5-1", "'+A1", "'-.5", '-1,500,000', '-1.234,5', '-5%', '-1e5', '+2E-3', "'-e5", "'-5,", "'-1e"]);
   assert.equal(res.formula, '=1+1');
   assert.equal(res.killed, 0);
   assert.equal(res.left, false);

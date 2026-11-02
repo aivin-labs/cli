@@ -437,7 +437,7 @@ export function createMascotChat({
     if (streamed && payload.kind === ChatEventKind.TIMEOUT) row(ChatRole.ASSISTANT, streamed.text, streamed.id);
     else if (streamed && payload.kind !== ChatEventKind.ANSWER) row(ChatRole.ASSISTANT, '', streamed.id, { remove: true });
     if (payload.kind === ChatEventKind.NEEDS_INPUT) {
-      setPending(payload.session_id, payload.question, text);
+      setPending(payload.session_id, payload.question, payload.more ? `${text} ${t(MascotText.ASK_MORE)}` : text);
       return onAlert({ kind: NotifyKind.NEEDS_YOU, text });
     }
     if (payload.kind === ChatEventKind.ANSWER || payload.kind === ChatEventKind.TIMEOUT) {
@@ -456,7 +456,7 @@ export function createMascotChat({
     received(payload.notice_id);
     if (payload.kind === ChatEventKind.NEEDS_INPUT) {
       stale = null;
-      setPending(payload.session_id, payload.question, text);
+      setPending(payload.session_id, payload.question, payload.more ? `${text} ${t(MascotText.ASK_MORE)}` : text);
       return onAlert({ kind: NotifyKind.NEEDS_YOU, text });
     }
     if (payload.kind !== ChatEventKind.ANSWER && payload.kind !== ChatEventKind.TIMEOUT) return;
