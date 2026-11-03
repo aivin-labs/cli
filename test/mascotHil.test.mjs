@@ -8,6 +8,7 @@ import { PassThrough } from 'stream';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
 const { createMascotChat, ChatRole, AskCommand } = await import('../bin/lib/remote/mascot/ask.mjs');
+const { lucidePath } = await import('../bin/lib/remote/mascot/lucideIcons.mjs');
 const { createMascot, hostScript, HostCommand } = await import('../bin/lib/remote/mascot/index.mjs');
 const { MASCOT_XAML } = await import('../bin/lib/remote/mascot/hostSource.mjs');
 
@@ -52,7 +53,7 @@ test('Aivin hỏi lại trong lượt chat → hiện câu hỏi + nút, linh v�
   assert.deepEqual(pending, [true]);
 
   await chat.choose('team');
-  assert.deepEqual(socket.emitted[1].payload, { text: '', request_id: socket.emitted[1].payload.request_id, session_id: 's1', reply_id: 'm9', option_ids: ['team'], stream: true });
+  assert.deepEqual(socket.emitted[1].payload, { text: '', request_id: socket.emitted[1].payload.request_id, links: true, session_id: 's1', reply_id: 'm9', option_ids: ['team'], stream: true, blocks: true });
   assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text === 'Cả nhóm'), 'dòng của chủ máy là tên nút');
   assert.deepEqual(choices(sent).at(-1).options, []);
   assert.equal(chat.hasPending(), false);
@@ -131,7 +132,7 @@ test('câu chọn nhiều: nút báo multiple + icon của mục; xác nhận c�
   chat.onNotify({ id: 'n5', kind: 'needs_you', title: 'Chọn tệp', text: 'Gửi tệp nào?', session_id: 's5', question: MULTI });
   assert.deepEqual(choices(sent).at(-1), {
     t: AskCommand.CHOICES, multiple: true,
-    options: [{ id: 'a', text: 'Báo cáo', icon: 'FileText' }, { id: 'b', text: 'Hoá đơn' }, { id: 'c', text: 'Ảnh' }],
+    options: [{ id: 'a', text: 'Báo cáo', icon_path: lucidePath('FileText') }, { id: 'b', text: 'Hoá đơn' }, { id: 'c', text: 'Ảnh' }],
   });
   await chat.choose(['a', 'c', 'zz']);
   assert.equal(socket.emitted.length, 0, 'id lạ → không gửi');
@@ -292,7 +293,7 @@ test('nhiều việc cùng hỏi → xếp hàng: nút của câu đầu, dòng 
 
   chat.onChatEvent({ request_id: socket.emitted[0].payload.request_id, kind: 'answer', text: 'Đã gửi.' });
   await chat.reply('không');
-  assert.deepEqual(socket.emitted[1].payload, { text: 'không', request_id: socket.emitted[1].payload.request_id, session_id: 's2', reply_id: 'm2', option_ids: ['n'], stream: true });
+  assert.deepEqual(socket.emitted[1].payload, { text: 'không', request_id: socket.emitted[1].payload.request_id, links: true, session_id: 's2', reply_id: 'm2', option_ids: ['n'], stream: true, blocks: true });
   assert.equal(chat.hasPending(), false);
   assert.deepEqual(pending, [true, false]);
   assert.deepEqual(sent.filter((c) => c.t === 'ask_pin').at(-1), { t: 'ask_pin', on: false });

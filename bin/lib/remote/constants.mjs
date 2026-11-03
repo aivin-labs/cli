@@ -86,6 +86,7 @@ export const DeviceEvent = Object.freeze({
   QUESTIONS: 'device:questions',
   /** CLI → BE: dừng lượt chat đang chạy `{ request_id }` — lượt kết thúc bằng `error` mã `cancelled`. */
   CHAT_CANCEL: 'device:chat_cancel',
+  WEBVIEW: 'device:webview',
   /** CLI → BE (30/10/2026): mở phiên chat mới cho linh vật — câu hỏi kế đi vào phiên mới (phiên cũ vẫn trên Aivin). Ack `{ ok, error? }`. */
   CHAT_NEW: 'device:chat_new',
   /** BE → CLI: yêu cầu bắt đầu phát hình màn hình máy tính trực tiếp (scenecast). */
@@ -108,7 +109,7 @@ export const CastState = Object.freeze({
 });
 
 /** Loại báo chủ động (`device:notify`). */
-export const NotifyKind = Object.freeze({ DONE: 'done', FAILED: 'failed', NEEDS_YOU: 'needs_you' });
+export const NotifyKind = Object.freeze({ DONE: 'done', FAILED: 'failed', NEEDS_YOU: 'needs_you', CUSTOMER: 'customer' });
 
 /** Loại sự kiện của phiên nói chuyện (`device:voice_event`). */
 export const VoiceEventKind = Object.freeze({

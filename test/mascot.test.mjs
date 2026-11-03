@@ -344,6 +344,19 @@ test('tin chat tới lúc cửa sổ chưa sẵn sàng → giữ lại (dòng c�
   m.close();
 });
 
+test('báo khách cần nhân viên: hiện chữ + link, không chuyển sang "xong", không phát nét mặt theo emoji trong lời khách', async () => {
+  const { m, host } = makeMascot();
+  const child = host.spawned[0];
+  child.send({ t: HostEvent.READY });
+  await tick();
+  child.sent.length = 0;
+  m.alert({ kind: 'customer', text: 'Khách trên shop.vn muốn gặp nhân viên 🎉', url: 'https://beta.aivin.vn/?session_id=s1' });
+  assert.ok(child.sent.some((c) => c.t === HostCommand.MAIN && c.text.startsWith('Khách trên shop.vn') && c.url === 'https://beta.aivin.vn/?session_id=s1'));
+  assert.ok(!child.sent.some((c) => c.t === HostCommand.GESTURE), 'không nét mặt');
+  assert.ok(!child.sent.some((c) => c.t === HostCommand.STATE), 'không đổi trạng thái');
+  m.close();
+});
+
 test('mascot.json: ghi nguyên tử, giữ phím tắt khi lưu vị trí; tệp hỏng thì không ghi đè', async () => {
   const { saveMascotSettings, MascotSettingsUnreadable } = await import('../bin/lib/remote/mascot/index.mjs');
   const dir = tmp();
@@ -380,7 +393,7 @@ test('host.ps1: phím tắt đọc từ config + lọc WM_HOTKEY trong C# (khôn
   assert.ok(!script.includes('[System.Windows.Interop.HwndSourceHook]{'), 'không còn hook bằng scriptblock PowerShell');
   assert.ok(!/Ctrl\+Alt\+(Space|V|C)'/.test(script), 'không còn tổ hợp cứng');
   assert.equal((script.match(/Diagnostics\.Process\]::Start\(/g) || []).length, 1, 'chỉ một chỗ Process.Start — trong OpenWebUrl');
-  assert.ok(script.includes("$uri.Scheme -eq 'http' -or $uri.Scheme -eq 'https'"));
+  assert.ok(script.includes("@('http', 'https', 'mailto', 'tel', 'sms') -contains $uri.Scheme"), 'chỉ mở link web, gọi, thư, tin nhắn');
 });
 
 test('mã C# nhúng của cửa sổ linh vật biên dịch được (Windows có .NET Framework)', { skip: process.platform !== 'win32', timeout: 120_000 }, async () => {

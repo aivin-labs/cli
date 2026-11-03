@@ -42,6 +42,30 @@ test('hộp báo: nối lại → lấy báo lỡ lúc offline, hiện + xác nh
   assert.deepEqual(acked(emitted), ['chat:a1', 'chat:a1', 'n2'], 'mọi báo trong hộp đều được xác nhận (kể cả bản trùng) để BE dọn');
 });
 
+test('khách cần nhân viên: mức Min / Mid không hiện, không xác nhận; Max hiện đúng tiêu đề, không gắn nhãn "Cần bạn" / "Xong"', () => {
+  const notice = { id: 'widget_handoff:s9:1', kind: 'customer', title: 'Khách trên shop.vn muốn gặp nhân viên', text: 'Minh: Hoàn tiền đơn 123. Bấm để mở hội thoại và trả lời.', session_id: 's9' };
+  const make = (notifyFreq) => {
+    const sent = [];
+    const emitted = [];
+    const alerts = [];
+    const socket = { connected: true, timeout() { return this; }, emit(event, payload) { emitted.push({ event, payload }); } };
+    const chat = createMascotChat({ socket: () => socket, send: (c) => sent.push(c), onAlert: (a) => alerts.push(a), lang: 'vi', notifyFreq });
+    chat.setServerFeatures([ServerFeature.INBOX]);
+    chat.onNotify(notice);
+    return { sent, emitted, alerts };
+  };
+  for (const level of [0, 1]) {
+    const { sent, emitted, alerts } = make(level);
+    assert.equal(rows(sent).length, 0, `mức ${level} không hiện dòng`);
+    assert.equal(alerts.length, 0, `mức ${level} không bật bong bóng`);
+    assert.deepEqual(acked(emitted), [], `mức ${level} không xác nhận`);
+  }
+  const { sent, alerts } = make(2);
+  assert.equal(rows(sent)[0].text, `${notice.title}\n${notice.text}`);
+  assert.equal(alerts[0].kind, 'customer');
+  assert.equal(alerts[0].text, notice.title);
+});
+
 test('BE cũ (không có inbox): không xin hộp báo, không gửi xác nhận, không kiểm câu hỏi', async () => {
   const { chat, emitted } = setup(() => ({ ok: true }), [ServerFeature.VOICE]);
   chat.onNotify({ id: 'n1', kind: 'needs_you', title: 'T', text: 'Q', session_id: 's1', question: QUESTION });

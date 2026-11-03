@@ -23,10 +23,14 @@
  *   (listening | thinking | speaking), `voice_end { text? }`.
  * Giữ toàn ASCII (xem hostSource.mjs).
  */
+import { ASK_BLOCKS_PS1, ICON_INKS } from './askBlocksSource.mjs';
 import { ASK_BTN, MASCOT_CENTER } from './hostSource.mjs';
+import { lucidePath } from './lucideIcons.mjs';
 
 /** Ô hỏi rảnh chừng này thì tự thu lại. */
 export const ASK_IDLE_MS = 10000;
+/** Câu trả lời có bảng / thẻ / ảnh: cần thời gian đọc hơn một câu chữ. */
+const ASK_RICH_IDLE_MS = 30000;
 
 /**
  * Lựa chọn khi Aivin hỏi lại: mỗi thẻ tô một màu pastel nhạt (xoay vòng hồng → tím nhạt → xanh trời → xanh bạc hà, theo viền ô hỏi), không
@@ -37,18 +41,8 @@ const CHOICE_INK = '#3B4256';
 const CHOICE_HOVER = '#0F1E1B4B';
 /** Viền chấm tròn / ô vuông đầu mỗi lựa chọn (chưa tích). */
 const CHOICE_MARK = '#9AA1B2';
-/**
- * Icon cuối lựa chọn: tên Lucide (như thẻ chọn trên Aivin; so khớp viết thường, bỏ dấu gạch) → mã ký tự Segoe MDL2 Assets. Tên không có ở
- * đây thì không vẽ icon; một emoji / ký hiệu ngắn thì vẽ nguyên.
- */
-const CHOICE_ICON_GLYPHS = Object.freeze({
-  check: 'E73E', checkcircle: 'E930', x: 'E711', file: 'E8A5', filetext: 'E8A5', folder: 'E8B7', folderopen: 'E838', calendar: 'E787',
-  clock: 'E823', mail: 'E715', send: 'E724', globe: 'E774', link: 'E71B', search: 'E721', settings: 'E713', user: 'E77B', users: 'E716',
-  download: 'E896', upload: 'E898', image: 'EB9F', trash: 'E74D', trash2: 'E74D', pencil: 'E70F', edit: 'E70F', play: 'E768', pause: 'E769',
-  star: 'E734', heart: 'EB51', phone: 'E717', lock: 'E72E', unlock: 'E785', alerttriangle: 'E7BA', trianglealert: 'E7BA', info: 'E946',
-  home: 'E80F', refreshcw: 'E72C', copy: 'E8C8', save: 'E74E', monitor: 'E7F4', terminal: 'E756', code: 'E943', thumbsup: 'E8E1',
-  thumbsdown: 'E8E0', arrowright: 'E72A', externallink: 'E8A7', mic: 'E720', camera: 'E722', printer: 'E749', share: 'E72D',
-});
+/** Nút mở link: icon Lucide + màu đậm cùng tông với nền nút (`CHOICE_CARDS[2]`, xanh trời). */
+const LINK_ICON_PATH = lucidePath('external-link');
 
 export const ASK_PS1 = String.raw`
 # ---- Ask box (askHostSource.mjs) ----
@@ -115,7 +109,7 @@ function SetActivatable($on) {
   [void][AivinMascot.Native]::SetWindowLong($script:hwnd, -20, $ex)
 }
 function AskStatus($text) {
-  $el = E 'AskStatus'; $el.Text = [string]$text; $el.Visibility = if ($text) { 'Visible' } else { 'Collapsed' }
+  $el = E 'AskStatus'; SetText $el $text; $el.Visibility = if ($text) { 'Visible' } else { 'Collapsed' }
 }
 $script:askOpen = $false; $script:askFocused = $false
 # The window the person was on right before reaching for the bot: sent with each question / talk so "this" means that window.
@@ -149,13 +143,13 @@ function MascotClick { if ($script:askFocused) { CloseAsk } else { OpenAsk } }
 # One box at a time: while the ask box is open, what the bot does on the machine only updates the text; the bubble
 # (notification) comes back with the latest step once the box closes, if the bot is still busy.
 $script:baseShowBubble = (Get-Item function:ShowBubble).ScriptBlock
-function ShowBubble($text) { if ($script:askOpen) { (E 'NowText').Text = $text; return }; & $script:baseShowBubble $text }
+function ShowBubble($text) { if ($script:askOpen) { SetText (E 'NowText') $text; return }; & $script:baseShowBubble $text }
 $script:baseCloseAsk = (Get-Item function:CloseAsk).ScriptBlock
 function CloseAsk {
   $was = $script:askOpen; & $script:baseCloseAsk
   if (-not $was -or (E 'Panel').Visibility -eq 'Visible') { return }
   if ($script:chatBusy -and $script:chatLast) { ChatBubble $script:chatLast }
-  elseif ((IsBusy) -or $script:state -eq 'waiting') { & $script:baseShowBubble (E 'NowText').Text }
+  elseif ((IsBusy) -or $script:state -eq 'waiting') { & $script:baseShowBubble ([AivinMascot.Emoji]::Text((E 'NowText'))) }
   if ((E 'Bubble').Visibility -eq 'Visible') { $script:bubbleTimer.Stop(); $script:bubbleTimer.Start() }
 }
 # What the chat turn is doing, short, for the bubble on the bot's head while the box is closed: progress lines, the answer as it is
@@ -295,15 +289,37 @@ function TypingDots {
   }
   $sp
 }
+# Link buttons under a bubble (the answer's "open this page" buttons, "view on Aivin"): a click opens the browser, nothing goes to the agent.
+function LinkCard($text, $url, $iconPath = '${LINK_ICON_PATH}') {
+  $dock = New-Object Windows.Controls.DockPanel; $dock.MaxWidth = 192
+  $icon = LucideIcon $(if ($iconPath) { $iconPath } else { '${LINK_ICON_PATH}' }) 13 '${ICON_INKS[2]}'; $icon.Margin = '8,3,0,0'; $icon.VerticalAlignment = 'Top'; [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$dock.Children.Add($icon)
+  $tb = New-Object Windows.Controls.TextBlock; $tb.TextWrapping = 'Wrap'; $tb.Foreground = Brush '${CHOICE_INK}'; SetText $tb $text; [void]$dock.Children.Add($tb)
+  $btn = New-Object Windows.Controls.Button; $btn.Style = $w.FindResource('Btn'); $btn.Content = $dock; $btn.CommandParameter = [string]$url; $btn.ToolTip = [string]$url
+  $btn.FontSize = 13; $btn.FontWeight = 'Normal'; $btn.Padding = '10,6,10,6'; $btn.Margin = '0,0,0,3'; $btn.HorizontalAlignment = 'Left'
+  $btn.Background = Brush '${CHOICE_CARDS[2]}'; $btn.BorderThickness = '0'; $btn.Tag = Brush '${CHOICE_HOVER}'
+  $btn.Add_Click({ param($s) OpenWebUrl $s.CommandParameter })
+  $btn
+}
+function ChatLinks($row, $links) {
+  $list = E 'ChatList'
+  if ($row.links) { [void]$list.Children.Remove($row.links); $row.links = $null }
+  $items = @(@($links) | Where-Object { $_ -and $_.url })
+  if (-not $items.Count) { return }
+  $sp = New-Object Windows.Controls.StackPanel; $sp.Margin = '0,0,0,4'; $sp.HorizontalAlignment = 'Left'
+  foreach ($l in $items) { [void]$sp.Children.Add((LinkCard $l.text $l.url $l.icon_path)) }
+  $after = if ($row.blocks) { $row.blocks } else { $row.box }
+  $list.Children.Insert($list.Children.IndexOf($after) + 1, $sp); $row.links = $sp
+}
+${ASK_BLOCKS_PS1}
 function ChatRow($m) {
   $list = E 'ChatList'; $id = [string]$m.id
   $row = $null; if ($id) { $row = $script:chatRows[$id] }
-  if ($m.remove) { if ($row) { [void]$list.Children.Remove($row.box); $script:chatRows.Remove($id) }; return }
+  if ($m.remove) { if ($row) { ChatLinks $row $null; ChatBlocks $row $null; [void]$list.Children.Remove($row.box); $script:chatRows.Remove($id) }; return }
   (E 'ChatScroll').Visibility = 'Visible'
   if (-not $row) {
     # Segoe UI adds its own space above / below the letters: block line height + slim vertical padding so the space you see is about
     # the same on all four sides.
-    $b = New-Object Windows.Controls.Border; $b.Padding = '10,5,10,5'; $b.Margin = '0,0,0,4'; $b.MaxWidth = 200
+    $b = New-Object Windows.Controls.Border; $b.Padding = '10,5,10,5'; $b.Margin = '0,0,0,4'; $b.MaxWidth = $script:bubbleMax
     $tb = New-Object Windows.Controls.TextBlock; $tb.TextWrapping = 'Wrap'; $tb.FontSize = 14; $tb.LineHeight = 20; $tb.LineStackingStrategy = 'BlockLineHeight'
     $b.Child = $tb; [void]$list.Children.Add($b)
     $slide = New-Object Windows.Media.TranslateTransform 0, 6; $b.RenderTransform = $slide
@@ -334,14 +350,20 @@ function ChatRow($m) {
   $fg = if ($role -eq 'progress') { $P.muted } elseif ($role -eq 'error') { '#CB2634' } else { $P.ink }
   $row.box.Background = Brush $bg; $row.text.Foreground = Brush $fg
   $row.text.FontStyle = if ($role -eq 'progress') { 'Italic' } else { 'Normal' }
-  $row.text.Text = [string]$m.text
+  SetText $row.text $m.text
+  ChatLinks $row $null
+  ChatBlocks $row $m.blocks
+  ChatLinks $row $m.links
+  # The bubble on the bot's head cannot show a table: the owner just asked, so open the box (without taking the keyboard).
+  if ($m.peek -and -not $script:askOpen -and (E 'Panel').Visibility -ne 'Visible') { PeekAsk }
   if ($m.typing) {
     if (-not $row.dots) { $row.dots = TypingDots }
     $row.box.Child = $row.dots; $row.box.Background = Brush '#F4F6FA'; $row.box.CornerRadius = '10,10,10,3'
   } elseif ($row.dots -and $row.box.Child -ne $row.text) { $row.box.Child = $row.text }
   # Words the owner is still saying: lighter until the sentence is settled (the box's own opacity is the fade-in).
   $row.text.Opacity = if ($m.partial) { 0.55 } else { 1 }
-  (E 'ChatScroll').ScrollToEnd()
+  $script:scrollRow = if ($row.blocks) { $row } else { $null }
+  if ($script:scrollRow) { ScrollToRow $row } else { (E 'ChatScroll').ScrollToEnd() }
   InputLayout
 }
 
@@ -349,14 +371,11 @@ function ChatRow($m) {
 # still works. Like the cards in Aivin: a round dot at the start (pick one: click = answer) or a square box (pick several: click ticks /
 # unticks, a confirm button sends the ticked ones), the text, the option's icon at the end when it has one we can draw.
 # Soft look: each card filled with a light pastel (cycling the ask box's glow colors), no border, dark-grey text; hover deepens it.
-$script:iconGlyphs = ConvertFrom-Json '${JSON.stringify(CHOICE_ICON_GLYPHS)}'
-function ChoiceIcon($name) {
-  $n = [string]$name; if (-not $n) { return $null }
-  $tb = New-Object Windows.Controls.TextBlock; $tb.FontSize = 13; $tb.Margin = '8,1,0,0'; $tb.VerticalAlignment = 'Top'; $tb.Foreground = Brush '${CHOICE_INK}'
-  # An emoji / short symbol is drawn as is; a Lucide name (as Aivin's cards use) maps to the matching Segoe MDL2 glyph, unknown = none.
-  if ($n.Length -le 2) { $tb.Text = $n; $tb.FontFamily = 'Segoe UI Emoji'; return $tb }
-  $code = $script:iconGlyphs.(($n -replace '[^A-Za-z0-9]', '').ToLowerInvariant()); if (-not $code) { return $null }
-  $tb.Text = [string][char][Convert]::ToInt32($code, 16); $tb.FontFamily = 'Segoe MDL2 Assets'; $tb.Opacity = 0.75; return $tb
+# Icon at the end of an option: the daemon looks up the Lucide name (the set Aivin's web uses) and sends its outline; an emoji is drawn as is.
+function ChoiceIcon($o, $ink) {
+  if ($o.icon_path) { $i = LucideIcon $o.icon_path 14 $ink; $i.Margin = '8,3,0,0'; $i.VerticalAlignment = 'Top'; return $i }
+  if (-not $o.icon) { return $null }
+  $tb = New-Object Windows.Controls.TextBlock; $tb.FontSize = 13; $tb.Margin = '8,1,0,0'; $tb.VerticalAlignment = 'Top'; SetText $tb $o.icon; $tb
 }
 function ChoiceMark($multi) {
   $m = New-Object Windows.Controls.Border; $m.Width = 13; $m.Height = 13; $m.Margin = '0,2,8,0'; $m.VerticalAlignment = 'Top'
@@ -379,14 +398,14 @@ function SyncConfirm {
 function ChoiceButtons($options, $multiple) {
   $panel = E 'Choices'; $panel.Children.Clear(); $k = 0; $multi = [bool]$multiple
   $script:picked.Clear(); $script:choiceMarks = @{}; $script:choiceConfirm = $null
-  $cards = @(${CHOICE_CARDS.map((c) => `'${c}'`).join(', ')})
+  $cards = @(${CHOICE_CARDS.map((c) => `'${c}'`).join(', ')}); $inks = @(${ICON_INKS.map((c) => `'${c}'`).join(', ')})
   foreach ($o in @($options)) {
     if (-not $o) { continue }
     $c = $cards[$k % $cards.Count]; $k++; $id = [string]$o.id
     $row = New-Object Windows.Controls.DockPanel; $row.Width = 192
     $mark = ChoiceMark $multi; [Windows.Controls.DockPanel]::SetDock($mark, 'Left'); [void]$row.Children.Add($mark)
-    $icon = ChoiceIcon $o.icon; if ($icon) { [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$row.Children.Add($icon) }
-    $tb = New-Object Windows.Controls.TextBlock; $tb.Text = [string]$o.text; $tb.TextWrapping = 'Wrap'; $tb.Foreground = Brush '${CHOICE_INK}'; [void]$row.Children.Add($tb)
+    $icon = ChoiceIcon $o $inks[($k - 1) % $inks.Count]; if ($icon) { [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$row.Children.Add($icon) }
+    $tb = New-Object Windows.Controls.TextBlock; SetText $tb $o.text; $tb.TextWrapping = 'Wrap'; $tb.Foreground = Brush '${CHOICE_INK}'; [void]$row.Children.Add($tb)
     $btn = New-Object Windows.Controls.Button; $btn.Style = $w.FindResource('Btn'); $btn.Content = $row; $btn.CommandParameter = $id
     $btn.FontSize = 13; $btn.FontWeight = 'Normal'; $btn.Padding = '10,6,10,6'; $btn.Margin = '0,0,0,4'; $btn.HorizontalAlignment = 'Stretch'
     $btn.Background = Brush $c; $btn.BorderThickness = '0'; $btn.Tag = Brush '${CHOICE_HOVER}'
@@ -524,11 +543,11 @@ function Handle($m) {
       ChatRow $m
       if (-not $m.remove -and [string]$m.role -ne 'user' -and $m.text) {
         $script:chatLast = ChatShort $m
-        if ($script:askOpen) { HideAskLater ${ASK_IDLE_MS} } else { ChatBubble $script:chatLast }
+        if ($script:askOpen) { HideAskLater $(if ($m.blocks) { ${ASK_RICH_IDLE_MS} } else { ${ASK_IDLE_MS} }) } else { ChatBubble $script:chatLast }
       }
       return
     }
-    'chat_clear' { (E 'ChatList').Children.Clear(); $script:chatRows.Clear(); (E 'ChatScroll').Visibility = 'Collapsed'; InputLayout; return }
+    'chat_clear' { (E 'ChatList').Children.Clear(); $script:chatRows.Clear(); $script:scrollRow = $null; AskWidth $false; (E 'ChatScroll').Visibility = 'Collapsed'; InputLayout; return }
     'chat_busy' {
       $script:chatBusy = [bool]$m.busy; $script:canCancel = [bool]$m.cancel
       (E 'MicBtn').Opacity = if ($script:chatBusy -and -not $script:canCancel) { 0.5 } else { 1 }

@@ -97,3 +97,27 @@ test('lượt im lặng quá lâu (sự kiện mất khi rớt mạng / BE khở
   assert.equal(chat.busy(), false);
   assert.deepEqual(alerts.map((a) => a.text), ['Kết quả A', 'Kết quả B']);
 });
+
+test('nút mở link: câu hỏi xin links; câu chốt kèm nút (lọc link lạ), thành phần không vẽ được thêm nút xem trên Aivin', async () => {
+  const { chat, sent, emitted } = setup();
+  await chat.ask('Mở trang đơn hàng');
+  assert.equal(emitted[0].payload.links, true);
+  chat.onChatEvent({
+    request_id: emitted[0].payload.request_id, kind: 'answer', text: 'Đây bạn nhé 😊', session_id: 's1', rich: true,
+    links: [{ text: 'Mở trang đơn hàng', url: 'https://shop.vn/orders' }, { text: 'Chạy lệnh', url: 'file:///c:/x.exe' }, { text: '', url: 'https://x.vn' }],
+  });
+  const final = assistantRows(sent).at(-1);
+  assert.equal(final.text, 'Đây bạn nhé 😊');
+  assert.deepEqual([final.links[0].text, final.links[0].url], ['Mở trang đơn hàng', 'https://shop.vn/orders']);
+  assert.ok(final.links[0].icon_path);
+  assert.equal(final.links.length, 2, 'bỏ link không phải http(s) và nút không tên');
+  assert.match(final.links[1].url, /session_id=s1/);
+  assert.equal(final.links[1].text, 'Xem đầy đủ trên Aivin');
+});
+
+test('nút mở link: câu trả lời thường không kèm trường links', async () => {
+  const { chat, sent, emitted } = setup();
+  await chat.ask('Chào');
+  chat.onChatEvent({ request_id: emitted[0].payload.request_id, kind: 'answer', text: 'Chào bạn', session_id: 's1' });
+  assert.equal(assistantRows(sent).at(-1).links, undefined);
+});

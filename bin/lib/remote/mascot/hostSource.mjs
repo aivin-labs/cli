@@ -1,5 +1,6 @@
 import { AIVIN_BRAND } from '../brand.mjs';
 import { BOT_FACES, BOT_LAYER_FILES, BOT_XAML } from './bot.mjs';
+import { EMOJI_CS } from './emojiSource.mjs';
 import { RIG_CS, RIG_REFERENCES_PS } from './rigSource.mjs';
 import { VOICE_CS } from './voiceSource.mjs';
 
@@ -334,12 +335,12 @@ $T = $cfg.strings; $P = $cfg.palette
 function Send($o) { [AivinMascot.Output]::Line(($o | ConvertTo-Json -Compress)) }
 # Debug trace: stderr + debug.log in the host folder (stderr is only kept as the last error line by the daemon).
 function Dbg($text) { if ($env:AIVIN_MASCOT_DEBUG) { $line = "$([DateTime]::Now.ToString('HH:mm:ss.fff')) $text"; [Console]::Error.WriteLine("mascot: $line"); try { [IO.File]::AppendAllText((Join-Path $dir 'debug.log'), ($line + [Environment]::NewLine), $utf8) } catch {} } }
-# Clicking a bubble / log row / chat row opens its link in the browser: http(s) only (the daemon filters too) - Process.Start would run
-# file:, shell: or a program path as is.
+# Clicking a bubble / log row / chat row opens its link: http(s), or a call / mail / text from an answer's button (the daemon filters too) - Process.Start
+# would run file:, shell: or a program path as is.
 function OpenWebUrl($u) {
   $s = [string]$u; if (-not $s) { return }
   $uri = $null
-  if ([Uri]::TryCreate($s, [UriKind]::Absolute, [ref]$uri) -and ($uri.Scheme -eq 'http' -or $uri.Scheme -eq 'https')) {
+  if ([Uri]::TryCreate($s, [UriKind]::Absolute, [ref]$uri) -and @('http', 'https', 'mailto', 'tel', 'sms') -contains $uri.Scheme) {
     try { [void][System.Diagnostics.Process]::Start($uri.AbsoluteUri) } catch {}
   } else { Dbg "open url refused: $s" }
 }
@@ -477,11 +478,15 @@ namespace AivinMascot {
   }
 ${RIG_CS}
 ${VOICE_CS}
+${EMOJI_CS}
 }
 '@
 
 $w = [Windows.Markup.XamlReader]::Parse((ReadText 'mascot.xaml'))
 function E($n) { $w.FindName($n) }
+# Text that may hold emoji from the AI: WPF draws color fonts in one color, AivinMascot.Emoji (emojiSource.mjs) draws them in color. Read back with
+# [AivinMascot.Emoji]::Text - TextBlock.Text does not return the same string once it holds pictures.
+function SetText($el, $text) { [AivinMascot.Emoji]::Set($el, [string]$text) }
 $conv = New-Object Windows.Media.BrushConverter
 function Brush($hex) { $conv.ConvertFromString($hex) }
 function Img($file) { $b = New-Object Windows.Media.Imaging.BitmapImage; $b.BeginInit(); $b.UriSource = New-Object Uri (Join-Path $dir $file); $b.CacheOption = 'OnLoad'; $b.EndInit(); $b.Freeze(); $b }
@@ -794,9 +799,9 @@ function HideBubble {
 $script:bubbleUrl = $null
 function ShowBubble($text, $url = $null) {
   $script:bubbleUrl = $url
-  (E 'NowText').Text = $text
+  SetText (E 'NowText') $text
   if ((E 'Panel').Visibility -eq 'Visible') { return }
-  (E 'BubbleText').Text = $text
+  SetText (E 'BubbleText') $text
   (E 'BubbleBox').Cursor = if ($url) { [Windows.Input.Cursors]::Hand } else { [Windows.Input.Cursors]::Arrow }
   $b = E 'Bubble'
   if ($b.Visibility -ne 'Visible') { $b.Visibility = 'Visible'; $w.FindResource('BubbleIn').Begin($b) }
@@ -832,8 +837,8 @@ function LogEntry($m) {
     while ($script:order.Count -gt 150) { $script:rows.Remove($script:order.Dequeue()) }
   }
   if ($m.status) { $row.glyph.Text = $cfg.glyphs.($m.status); $row.glyph.Foreground = Brush $P.log.($m.status) }
-  if ($m.title) { $row.title.Text = $m.title }
-  if ($m.PSObject.Properties['sub']) { $row.sub.Text = [string]$m.sub; $row.sub.Visibility = if ($m.sub) { 'Visible' } else { 'Collapsed' } }
+  if ($m.title) { SetText $row.title $m.title }
+  if ($m.PSObject.Properties['sub']) { SetText $row.sub $m.sub; $row.sub.Visibility = if ($m.sub) { 'Visible' } else { 'Collapsed' } }
   if ($m.time) { $row.time.Text = $m.time }
 }
 
@@ -951,7 +956,7 @@ function Handle($m) {
       $script:notifyFreq = [int]$m.value
       SyncNotifyDesc $script:notifyFreq
     }
-    'main' { if ($m.quiet) { (E 'NowText').Text = $m.text } else { ShowBubble $m.text $m.url } }
+    'main' { if ($m.quiet) { SetText (E 'NowText') $m.text } else { ShowBubble $m.text $m.url } }
     'log' { LogEntry $m }
     'gui' { $script:guiHidden = [bool]$m.active; ApplyVisibility }
     'show' { $script:userHidden = $false; ApplyVisibility }

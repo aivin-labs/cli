@@ -370,6 +370,7 @@ export async function startRemoteClient(options = {}) {
     onChoose: (id) => { void mascotChat?.choose(id); },
     onCancel: () => { void mascotChat?.cancel(); },
     onNewChat: () => { void mascotChat?.newChat(); },
+    onOpenTool: (msg) => { void mascotChat?.openTool(msg); },
     onNotifyFreq: (val) => { mascotChat?.setNotifyFreq(val); },
     // Thả tệp vào bot → đi kèm câu gõ kế tiếp.
     onDrop: (files) => mascotChat?.attach(files),

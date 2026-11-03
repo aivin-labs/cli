@@ -58,7 +58,7 @@ export function requestMascotHide(file = MASCOT_HIDE_FILE) {
   fs.writeFileSync(file, String(Date.now()));
 }
 export const HostEvent = Object.freeze({
-  READY: 'ready', POS: 'pos', PAUSE: 'pause', RESUME: 'resume', HIDE: 'hide', OFF: 'off', ASK: 'ask', CHOOSE: 'choose', CANCEL: 'cancel', NEW_CHAT: 'new_chat',
+  READY: 'ready', POS: 'pos', PAUSE: 'pause', RESUME: 'resume', HIDE: 'hide', OFF: 'off', ASK: 'ask', CHOOSE: 'choose', CANCEL: 'cancel', NEW_CHAT: 'new_chat', OPEN_WEBVIEW: 'open_webview',
   DROP: 'drop', AWAY: 'away', BACK: 'back', NOTIFY_FREQ: 'notify_freq', HOTKEYS: 'hotkeys',
   VOICE_START: 'voice_start', VOICE_AUDIO: 'voice_audio', VOICE_INTERRUPT: 'voice_interrupt', VOICE_STOP: 'voice_stop', VOICE_MIC_LOST: 'voice_mic_lost',
 });
@@ -166,13 +166,13 @@ export function userWindow(w) {
 /**
  * `onPause` / `onResume`: nút trên bảng nhật ký bật / tắt công tắc ngắt (như `aivin remote pause|resume`). `onVoice(msg)`: sự kiện nói
  * chuyện của cửa sổ (`voice_*`, xem ask.mjs); cửa sổ chết giữa chừng → `voice_stop`. `onChoose(id | ids)`: bấm nút trả lời câu Aivin hỏi (câu chọn nhiều: mảng id đã tích).
- * `onCancel()`: bấm nút dừng lượt chat đang chạy. `onNewChat()`: nút "Phiên chat mới" trên bảng nhật ký.
+ * `onCancel()`: bấm nút dừng lượt chat đang chạy. `onNewChat()`: nút "Phiên chat mới" trên bảng nhật ký. `onOpenTool(msg)`: bấm mở công cụ tương tác trong câu trả lời.
  * `onAsk(text, window)`: câu gõ trong ô hỏi + cửa sổ chủ máy đang dùng (`userWindow`). `pid()`: tiến trình của cửa sổ linh vật (null khi
  * chưa chạy). `spawnImpl`, `timers`, `now`, `dir`, `settingsFile`, các mốc `*Ms`: cho test.
  */
 export function createMascot({
   enabled = true, platform = process.platform, env = process.env, lang: preferredLang, onPause = () => {}, onResume = () => {}, say = () => {},
-  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onDrop = () => {}, onNotifyFreq = () => {},
+  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onOpenTool = () => {}, onDrop = () => {}, onNotifyFreq = () => {},
   spawnImpl = spawn, dir = MASCOT_DIR, settingsFile = MASCOT_SETTINGS_FILE, showFile = MASCOT_SHOW_FILE, hideFile = MASCOT_HIDE_FILE, voiceFile = MASCOT_VOICE_FILE, hotkeysFile = MASCOT_HOTKEYS_FILE, now = Date.now, timers = { setTimeout, clearTimeout },
   thinkMs = THINK_MS, resultMs = RESULT_MS, mainThrottleMs = MAIN_THROTTLE_MS, restartDelaysMs = RESTART_DELAYS_MS, awayWaveMs = AWAY_WAVE_MS,
 } = {}) {
@@ -279,6 +279,7 @@ export function createMascot({
     if (msg.t === HostEvent.CANCEL) return onCancel();
     // Nút "Chat mới" trên bảng: phiên chat mới cho linh vật.
     if (msg.t === HostEvent.NEW_CHAT) return onNewChat();
+    if (msg.t === HostEvent.OPEN_WEBVIEW) return onOpenTool(msg);
     if (msg.t === HostEvent.NOTIFY_FREQ && Number.isFinite(msg.value)) {
       const val = Number(msg.value);
       if (val >= 0 && val <= 2) {
@@ -606,6 +607,11 @@ export function createMascot({
       // Cửa sổ mở link bằng Process.Start khi bấm bong bóng / dòng nhật ký: chỉ http(s).
       const url = safeWebUrl(rawUrl);
       if (hiddenUntilWork) { hiddenUntilWork = false; send({ t: HostCommand.SHOW }); }
+      // Khách cần nhân viên không phải việc AI làm trên máy: chỉ hiện chữ, không báo "xong", không nét mặt theo emoji trong lời khách.
+      if (kind === NotifyKind.CUSTOMER) {
+        log({ status: LogStatus.WARN, title: text, ...(url ? { url } : {}) });
+        return main(text, url);
+      }
       const failed = kind === NotifyKind.FAILED;
       const mood = failed ? null : moodOf(text);
       const react = () => { if (mood) send({ t: HostCommand.GESTURE, ...MOOD_GESTURE[mood] }); };
