@@ -2,14 +2,12 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { createHash } from 'crypto';
-import { createRequire } from 'module';
+import { currentCliVersion } from '../update/versions.mjs';
 import { IGNORED_DIRS } from './constants.mjs';
 import { isProtectedPath } from './sandbox.mjs';
 
 export { REMOTE_CONFIG_DIR } from './constants.mjs';
 
-const require = createRequire(import.meta.url);
-const CLI_VERSION = (() => { try { return require('../../../package.json').version; } catch { return 'unknown'; } })();
 
 /** Chương trình đáng biết trên máy — có thì Planner dùng được, và gói công cụ tương ứng (git…) được bật. */
 const KNOWN_BINARIES = [
@@ -119,7 +117,7 @@ export function buildDeviceProfile(roots) {
     shell: detectShell(),
     os: detectOs(),
     node_version: process.version,
-    cli_version: CLI_VERSION,
+    cli_version: currentCliVersion(),
     roots: roots.map((r) => path.resolve(r)),
     binaries: detectBinaries(),
     projects: detectProjects(roots),

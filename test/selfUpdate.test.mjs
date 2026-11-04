@@ -523,6 +523,19 @@ test('02/11/2026: replaceBinary keepBackup giữ nguyên .prev', () => {
   assert.equal(fs.existsSync(`${target}.new`), false);
 });
 
+test('05/11/2026: hồ sơ máy khai đúng phiên bản — cả bản đóng gói (không có package.json; từng báo "unknown" nên BE không biết máy chạy bản nào)', async () => {
+  const { buildDeviceProfile } = await import('../bin/lib/remote/deviceProfile.mjs');
+  const saved = process.env.AIVIN_CLI_BINARY;
+  process.env.AIVIN_CLI_BINARY = '9.8.7';
+  try {
+    assert.equal(buildDeviceProfile([os.tmpdir()]).cli_version, '9.8.7');
+  } finally {
+    if (saved === undefined) delete process.env.AIVIN_CLI_BINARY;
+    else process.env.AIVIN_CLI_BINARY = saved;
+  }
+  assert.match(buildDeviceProfile([os.tmpdir()]).cli_version, /^\d+\.\d+\.\d+/);
+});
+
 test('05/11/2026: BE thúc (device:update) → kiểm ở nhịp kế, tối đa một lần / 10 phút; đang có bản chờ thì không cài; tắt thì bỏ qua; mặc định kiểm mỗi ~1 giờ', async () => {
   let t = 1_000_000;
   let installs = 0;
