@@ -1159,7 +1159,7 @@ aivin remote status | test | logs | reindex | enable | disable | reset-id
 - **Memory stays on this computer**: `~/.aivin/memory/<kind>.yaml` (edit by hand if you like) + `vectors.json`; the agent recalls it
   before planning and saves procedures that worked.
 - Env: `AIVIN_REMOTE_HOME` (config folder), `AIVIN_REMOTE_LIMIT_<GROUP>` (parallel limit per tool group: fs_read, fs_write, exec, git, system, memory).
-- **Stays up to date by itself**: the listener checks for a new release about every 6 hours (and right away when the Aivin server
+- **Stays up to date by itself**: the listener checks for a new release about every hour (and right away when the Aivin server
   asks for a newer minimum version). When started with the computer (`aivin remote enable`), it switches to the new release once the
   computer has had no remote work for 10 minutes; in a window you started yourself it only tells you to restart. If the new release
   crashes 3 times before it has run for 10 minutes, the previous release is put back and the bad one is skipped - by the auto-start

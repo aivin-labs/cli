@@ -897,7 +897,7 @@ export async function startRemoteClient(options = {}) {
       if (!updater) return;
       if (payload?.min_version) updater.setMinVersion(payload.min_version);
       if (payload?.latest_version) updater.setServerHints(payload);
-      void updater.checkNow({ urgent: true });
+      updater.requestCheck();
     }));
     socket.on(DeviceEvent.DESKTOP_CAST_START, guarded(DeviceEvent.DESKTOP_CAST_START, async (payload) => {
     const sessionId = payload?.session_id;

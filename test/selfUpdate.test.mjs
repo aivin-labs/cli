@@ -523,6 +523,48 @@ test('02/11/2026: replaceBinary keepBackup giữ nguyên .prev', () => {
   assert.equal(fs.existsSync(`${target}.new`), false);
 });
 
+test('05/11/2026: BE thúc (device:update) → kiểm ở nhịp kế, tối đa một lần / 10 phút; đang có bản chờ thì không cài; tắt thì bỏ qua; mặc định kiểm mỗi ~1 giờ', async () => {
+  let t = 1_000_000;
+  let installs = 0;
+  const install = async () => { installs++; return { status: UpdateStatus.UP_TO_DATE, latest: 'v1.0.0', current: 'v1.0.0' }; };
+  const opts = { supervised: true, install, settings: () => ({ auto: true }), installedNewer: () => null, record: () => {}, now: () => t, random: () => 0.5, current: '1.0.0', firstCheckMs: 3 * 60_000 };
+  const u = createAutoUpdater({ ...opts, checkEveryMs: 6 * 3_600_000 });
+  try {
+    await u.tick();
+    assert.equal(installs, 0); // chưa tới lượt đầu
+    assert.equal(u.requestCheck(), true);
+    await u.tick();
+    assert.equal(installs, 1);
+    assert.equal(u.requestCheck(), false); // trong 10 phút: bỏ qua
+    await u.tick();
+    assert.equal(installs, 1);
+    t += 10 * 60_000;
+    assert.equal(u.requestCheck(), true);
+    await u.tick();
+    assert.equal(installs, 2);
+  } finally { u.close(); }
+
+  const waiting = createAutoUpdater({ ...opts, installedNewer: () => 'v2.0.0', isIdle: () => false });
+  try {
+    waiting.requestCheck();
+    await waiting.tick();
+    assert.equal(installs, 2); // có bản chờ khởi động lại: không cài chồng
+  } finally { waiting.close(); }
+
+  const off = createAutoUpdater({ ...opts, enabled: false });
+  assert.equal(off.requestCheck(), false);
+  off.close();
+
+  const hourly = createAutoUpdater(opts);
+  try {
+    t += 60 * 60_000;
+    await hourly.tick();
+    const n = installs;
+    assert.ok(hourly.state().nextCheckAt - t <= 1.2 * 3_600_000);
+    assert.equal(n, 3);
+  } finally { hourly.close(); }
+});
+
 test('02/11/2026: tự cập nhật — đã có bản chờ (ready / đĩa có bản mới) thì checkNow không gọi cài; máy chủ đòi bản cao hơn thì vẫn cài', async () => {
   const calls = [];
   const u = createAutoUpdater({
