@@ -44,8 +44,8 @@ const isDir = (p) => {
   try { return fs.statSync(p).isDirectory(); } catch { return false; }
 };
 
-/** Tên hiện trên chip: tên tệp / thư mục (bỏ dấu gạch cuối); ổ đĩa trống tên → cả đường dẫn. */
-export const fileName = (p) => path.basename(String(p).replace(/[\\/]+$/, '')) || String(p);
+/** Tên hiện trên chip: tên tệp / thư mục (bỏ dấu gạch cuối); ổ đĩa trống tên → cả đường dẫn. win32: tách cả `\` lẫn `/` trên mọi hệ điều hành. */
+export const fileName = (p) => path.win32.basename(String(p).replace(/[\\/]+$/, '')) || String(p);
 
 /** Loại của một đường dẫn: thư mục → folder; còn lại theo đuôi tệp (không biết → file). */
 export function fileKind(p, { dir = isDir } = {}) {
