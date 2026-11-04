@@ -140,6 +140,8 @@ export const ServerFeature = Object.freeze({
   CHAT_CANCEL: 'chat_cancel',
   /** Mở phiên chat mới cho linh vật (`device:chat_new`). */
   CHAT_NEW: 'chat_new',
+  /** Giao thêm việc khi lượt trước chưa xong (`device:chat` + `parallel`) — chạy ở phiên riêng, kết quả tới bằng báo chủ động. */
+  CHAT_PARALLEL: 'chat_parallel',
 });
 
 /** Nhóm giới hạn song song trên máy — mỗi công cụ thuộc một nhóm. */

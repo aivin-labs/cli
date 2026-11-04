@@ -147,7 +147,7 @@ export function createMascotChat({
     if (deviceSessions.size > SEEN_NOTIFY_MAX) deviceSessions.delete(deviceSessions.values().next().value);
   };
   /** Năng lực BE (ack của HELLO, `setServerFeatures`): hộp báo + kiểm câu hỏi, dừng lượt, chat mới. */
-  const features = { inbox: false, cancel: false, newChat: false };
+  const features = { inbox: false, cancel: false, newChat: false, parallel: false };
   /** Câu hỏi đang chờ theo thứ tự đến: `{ session_id, reply_id, kind, options, text }`; đầu hàng = câu đang có nút. */
   const queue = [];
   const head = () => queue[0] || null;
@@ -395,6 +395,8 @@ export function createMascotChat({
    * (lượt sau họp) thì không có. Bấm nút trả lời giữ cửa sổ của câu trước (`undefined`).
    */
   async function turn(text, shown, extra, window) {
+    // Câu hỏi MỚI trong lúc lượt trước còn chạy: BE mới nhận chạy song song ở phiên riêng thay vì bắt chờ (04/11/2026).
+    if (current && !call && features.parallel && shown !== null && !extra?.reply_id && !extra?.session_id) return parallelTurn(text, shown, window);
     if (refuseBusy()) return;
     if (window !== undefined) target = window;
     const s = socket();
@@ -424,6 +426,26 @@ export function createMascotChat({
     if (extra.reply_id) resolve(extra.reply_id);
     // Sự kiện có thể tới trước ack — lượt đã xong thì không hẹn giờ nữa.
     if (current === id) armSilence();
+  }
+
+  /**
+   * Việc giao thêm (song song với lượt đang chạy): không chiếm ô hỏi — lượt chính vẫn hiện chữ chạy / câu trả lời của nó. Kết quả việc
+   * này tới bằng báo chủ động (`device:notify`, như việc giao trên web) nên không cần theo dõi sự kiện của nó ở đây.
+   */
+  async function parallelTurn(text, shown, window) {
+    const s = socket();
+    row(ChatRole.USER, shown);
+    if (!s?.connected) return row(ChatRole.ERROR, t(MascotText.ASK_OFFLINE));
+    try {
+      const ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT, {
+        text, request_id: `ask-par-${randomUUID()}`, parallel: true, links: true, blocks: true, ...(window ? { context: { window } } : context()),
+      });
+      if (!ack?.ok) return row(ChatRole.ERROR, errorText(ack?.error));
+      if (ack.session_id) noteDeviceSession(ack.session_id);
+      row(ChatRole.ASSISTANT, t(MascotText.ASK_PARALLEL_SENT), `${ChatRole.ASSISTANT}-${randomUUID()}`);
+    } catch (e) {
+      row(ChatRole.ERROR, failedSend(e));
+    }
   }
 
   /** Tệp / thư mục thả vào bot: giữ tới câu gõ kế tiếp (tối đa MAX_ATTACH), hiện thành chip đính kèm trên dòng nhập (không phải dòng chat). */
@@ -560,6 +582,7 @@ export function createMascotChat({
     features.inbox = has(ServerFeature.INBOX);
     features.cancel = has(ServerFeature.CHAT_CANCEL);
     features.newChat = has(ServerFeature.CHAT_NEW);
+    features.parallel = has(ServerFeature.CHAT_PARALLEL);
   }
 
   /**
