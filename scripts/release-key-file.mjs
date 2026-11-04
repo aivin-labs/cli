@@ -28,9 +28,16 @@ export function askSecret(prompt) {
     const onData = (chunk) => {
       for (const ch of chunk) {
         if (ch === '\r' || ch === '\n') return done();
-        if (ch === '\u0003') return done(new Error('Đã huỷ.'));
-        if (ch === '\u007f' || ch === '\b') value = value.slice(0, -1);
-        else value += ch;
+        if (ch === '\u0003') return done(new Error('Người dùng đã huỷ thao tác bằng phím tắt.'));
+        if (ch === '\u007f' || ch === '\b') {
+          if (value.length > 0) {
+            value = value.slice(0, -1);
+            process.stderr.write('\b \b');
+          }
+        } else {
+          value += ch;
+          process.stderr.write('*');
+        }
       }
     };
     stdin.on('data', onData);
@@ -51,8 +58,9 @@ export const encryptedPem = (privateKey, passphrase) => privateKey.export({ form
 export async function loadReleasePrivateKey(file) {
   const pem = fs.readFileSync(file, 'utf8');
   if (!isEncryptedPem(pem)) throw new Error(`Khoá ${file} chưa mã hoá — chạy \`node scripts/release-key.mjs encrypt "${file}"\` trước khi ký.`);
+  const pass = await readPassphrase();
   try {
-    return createPrivateKey({ key: pem, format: 'pem', passphrase: await readPassphrase() });
+    return createPrivateKey({ key: pem, format: 'pem', passphrase: pass });
   } catch (e) {
     throw new Error('Sai mật khẩu khoá ký.', { cause: e });
   }
