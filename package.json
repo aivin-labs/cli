@@ -15,7 +15,8 @@
     "sign:release": "node scripts/sign-release.mjs",
     "get:publish": "node scripts/publish-get.mjs",
     "get:rollout": "node scripts/rollout-get.mjs",
-    "get:up": "docker compose -f deploy/get/docker-compose.yml up -d"
+    "get:up": "docker compose -f deploy/get/docker-compose.yml up -d",
+    "publish:all": "node scripts/sign-release.mjs && node scripts/publish-get.mjs && npm publish"
   },
   "keywords": [
     "aivin",

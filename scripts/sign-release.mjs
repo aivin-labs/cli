@@ -7,6 +7,7 @@
 // đã cài sẽ không nhận chữ ký đó. Bản build nên lấy từ CI (`npm run release:fetch -- <tag>`), không build trên máy giữ khoá.
 import { sign } from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { RELEASE_PUBLIC_KEYS } from '../bin/lib/releaseKeys.mjs';
@@ -14,8 +15,17 @@ import { releaseKeyId, signedMessage, verifyReleaseSignature } from '../bin/lib/
 import { loadReleasePrivateKey } from './release-key-file.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const keyFile = process.env.AIVIN_RELEASE_KEY_FILE;
-if (!keyFile) throw new Error('Đặt AIVIN_RELEASE_KEY_FILE=<đường dẫn khoá .pem> (tạo bằng scripts/release-key.mjs).');
+let keyFile = process.env.AIVIN_RELEASE_KEY_FILE;
+if (!keyFile) {
+  const defaultDir = path.join(os.homedir(), '.aivin-release');
+  if (fs.existsSync(defaultDir)) {
+    const pems = fs.readdirSync(defaultDir).filter((f) => f.endsWith('.pem') && !f.includes('.bak'));
+    if (pems.length === 1) {
+      keyFile = path.join(defaultDir, pems[0]);
+    }
+  }
+}
+if (!keyFile) throw new Error('Đặt AIVIN_RELEASE_KEY_FILE=<đường dẫn khoá .pem> hoặc lưu tệp khoá trong ~/.aivin-release.');
 const version = `v${JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version}`;
 const sumsFile = path.join(root, 'dist', 'SHA256SUMS');
 if (!fs.existsSync(sumsFile)) throw new Error('Chưa có dist/SHA256SUMS — chạy `npm run build:binary` trước.');
