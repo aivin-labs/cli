@@ -932,6 +932,7 @@ export async function startRemoteClient(options = {}) {
         onMeta: (meta) => { desktopWebRtc.push(meta); syncCastJpeg(); },
         onCursor: (cursor) => desktopWebRtc.pushCursor(cursor),
         onCursorShape: (shape) => desktopWebRtc.pushCursorShape(shape),
+        onInputFocus: (focus) => desktopWebRtc.pushInputFocus?.(focus),
         onCapture: ({ mode, reason }) => say(chalk.gray(`  🖥️  Chụp màn hình: ${mode}${reason ? ` (${reason})` : ''}`)),
         rawPipe: true,
         onReady: (meta) => {

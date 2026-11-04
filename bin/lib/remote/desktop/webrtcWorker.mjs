@@ -71,6 +71,7 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
     push: (m) => rtc.push(m.frame),
     cursor: (m) => rtc.pushCursor(m.cursor),
     cursorShape: (m) => rtc.pushCursorShape(m.shape),
+    inputFocus: (m) => rtc.pushInputFocus(m.focus),
     pipe: (m) => { if (m.name) connectPipe(String(m.name)); },
     close: (m) => { rtc.close(m.viewerId); sendState(); },
     closeAll: () => { rtc.closeAll(); const sock = pipeSocket; pipeSocket = null; pipeName = ''; sock?.destroy(); sendState(); },
@@ -169,6 +170,7 @@ export function createDesktopWebRtcWorker({
     pushCursor: (cursor) => { if (child && peers.size) send({ t: 'cursor', cursor }); },
     // Hình gửi cả khi chưa có người xem: bộ quay chỉ gửi mỗi hình một lần, tiến trình con giữ lại cho người xem sau.
     pushCursorShape: (shape) => { if (child) send({ t: 'cursorShape', shape }); },
+    pushInputFocus: (focus) => { if (child && peers.size) send({ t: 'inputFocus', focus }); },
     attachPipe: (name) => { if (name) send({ t: 'pipe', name }); },
     close: (viewerId) => { peers.delete(viewerId); send({ t: 'close', viewerId }); },
     closeAll,

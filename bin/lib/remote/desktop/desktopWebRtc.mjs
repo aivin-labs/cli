@@ -208,6 +208,15 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     for (const peer of peers.values()) if (peer.localCursor) sendShape(peer, shape);
   }
 
+  /** Ô đang có tiêu điểm trên máy có phải ô nhập chữ không (sau cú nhấp của người xem) — trình duyệt điện thoại tự mở / đóng bàn phím ảo. */
+  function pushInputFocus(focus) {
+    const packet = JSON.stringify({ t: 'input_focus', editable: focus?.editable === true });
+    for (const peer of peers.values()) {
+      if (peer.inputChannel?.readyState !== 'open') continue;
+      try { peer.inputChannel.send(packet); } catch { /* kênh vừa đóng */ }
+    }
+  }
+
   /** Mọi người xem đều có video và tự vẽ con trỏ → bộ quay thôi lồng con trỏ vào khung. */
   function localCursor() {
     return peers.size > 0 && [...peers.values()].every(p => p.video && p.open && p.localCursor);
@@ -238,5 +247,5 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
   }
 
   function closeAll() { for (const id of [...peers.keys()]) close(id); cursorShapes.clear(); }
-  return { start, signal, push, pushRaw, pushCursor, pushCursorShape, localCursor, needsJpeg, hasVideo, anyOpen, needsFallback, close, closeAll };
+  return { start, signal, push, pushRaw, pushCursor, pushCursorShape, pushInputFocus, localCursor, needsJpeg, hasVideo, anyOpen, needsFallback, close, closeAll };
 }

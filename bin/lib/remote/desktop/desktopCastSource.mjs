@@ -27,6 +27,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
+using System.Windows.Automation;
 using System.Windows.Forms;
 
 namespace AivinDesktopCast {
@@ -36,6 +37,27 @@ namespace AivinDesktopCast {
     [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
     [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, ushort bScan, uint dwFlags, UIntPtr dwExtraInfo);
     [DllImport("user32.dll")] public static extern short VkKeyScan(char ch);
+
+    // Gõ chữ: keybd_event chỉ mang được 1 byte mã quét (BYTE bScan) → chữ ngoài Latin-1 (ư ơ đ ạ ế…) bị cắt thành ký tự rác.
+    // SendInput + KEYEVENTF_UNICODE mang đủ 16 bit mỗi đơn vị UTF-16.
+    [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx; public int dy; public int mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+    [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+    [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUTUNION u; }
+    [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    public const uint INPUT_KEYBOARD = 1;
+
+    // Ô nhập chữ đang có tiêu điểm: cửa sổ trước mặt có caret hệ thống (ô Win32, Office, Chromium / Edge đều tạo caret cho trợ năng).
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int left; public int top; public int right; public int bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GUITHREADINFO {
+      public int cbSize; public uint flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture;
+      public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret;
+    }
+    [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO info);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr pid);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int x; public int y; }
@@ -677,6 +699,7 @@ namespace AivinDesktopCast {
           } finally {
             ReleaseModifiers(mods);
           }
+          if (button == 0) ProbeInputFocus();
         } else if (action == "dblclick") {
           Native.SetCursorPos(targetX, targetY);
           Thread.Sleep(10);
@@ -718,6 +741,7 @@ namespace AivinDesktopCast {
           } finally {
             ReleaseModifiers(mods);
           }
+          if (button == 0) ProbeInputFocus();
         } else if (action == "scroll") {
           int deltaY = cmd.ContainsKey("deltaY") ? Convert.ToInt32(cmd["deltaY"]) : 0;
           int deltaX = cmd.ContainsKey("deltaX") ? Convert.ToInt32(cmd["deltaX"]) : 0;
@@ -731,13 +755,7 @@ namespace AivinDesktopCast {
           }
         } else if (action == "type") {
           string text = cmd.ContainsKey("text") ? Convert.ToString(cmd["text"]) : "";
-          if (!string.IsNullOrEmpty(text)) {
-            for (int i = 0; i < text.Length; i++) {
-              char c = text[i];
-              Native.keybd_event(0, (ushort)c, Native.KEYEVENTF_UNICODE, UIntPtr.Zero);
-              Native.keybd_event(0, (ushort)c, Native.KEYEVENTF_UNICODE | Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
-            }
-          }
+          if (!string.IsNullOrEmpty(text)) TypeUnicode(text);
         } else if (action == "key") {
           string key = cmd.ContainsKey("key") ? Convert.ToString(cmd["key"]) : "";
           HandleSpecialKey(key);
@@ -764,6 +782,70 @@ namespace AivinDesktopCast {
       }
     }
 
+    /** Gõ nguyên văn: mỗi đơn vị UTF-16 một cặp nhấn / nhả KEYEVENTF_UNICODE (cặp đại diện của emoji đi liền nhau), gửi theo lô. */
+    static void TypeUnicode(string text) {
+      const int chunk = 64;
+      int size = Marshal.SizeOf(typeof(Native.INPUT));
+      int start = 0;
+      while (start < text.Length) {
+        int end = Math.Min(text.Length, start + chunk);
+        // Không cắt đôi một cặp đại diện giữa hai lô.
+        if (end < text.Length && char.IsHighSurrogate(text[end - 1])) end--;
+        var inputs = new Native.INPUT[(end - start) * 2];
+        for (int i = start; i < end; i++) {
+          int k = (i - start) * 2;
+          inputs[k].type = Native.INPUT_KEYBOARD;
+          inputs[k].u.ki = new Native.KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = Native.KEYEVENTF_UNICODE };
+          inputs[k + 1].type = Native.INPUT_KEYBOARD;
+          inputs[k + 1].u.ki = new Native.KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = Native.KEYEVENTF_UNICODE | Native.KEYEVENTF_KEYUP };
+        }
+        Native.SendInput((uint)inputs.Length, inputs, size);
+        start = end;
+      }
+    }
+
+    static int focusProbeSeq = 0;
+
+    /**
+     * Sau cú nhấp trái của người xem: chờ ứng dụng nhận tiêu điểm rồi báo ô đang chọn có phải ô nhập chữ (có caret) không —
+     * trình duyệt trên điện thoại dựa vào đó tự mở bàn phím ảo. Chạy luồng riêng, không giữ hàng thao tác.
+     */
+    static void ProbeInputFocus() {
+      int seq = Interlocked.Increment(ref focusProbeSeq);
+      ThreadPool.QueueUserWorkItem(_ => {
+        try {
+          Thread.Sleep(150);
+          if (seq != focusProbeSeq) return;
+          var info = new Native.GUITHREADINFO();
+          info.cbSize = Marshal.SizeOf(typeof(Native.GUITHREADINFO));
+          IntPtr fg = Native.GetForegroundWindow();
+          uint tid = fg == IntPtr.Zero ? 0 : Native.GetWindowThreadProcessId(fg, IntPtr.Zero);
+          bool editable = (tid != 0 && Native.GetGUIThreadInfo(tid, ref info) && info.hwndCaret != IntPtr.Zero) || FocusedIsTextInput();
+          var msg = new Dictionary<string, object>();
+          msg["t"] = "input_focus";
+          msg["editable"] = editable;
+          Out.Send(msg);
+        } catch {
+        }
+      });
+    }
+
+    /** Chromium / Edge / Electron chỉ tạo caret hệ thống khi bật trợ năng → hỏi UI Automation: ô Edit, hoặc ô có giá trị sửa được. */
+    static bool FocusedIsTextInput() {
+      try {
+        var fe = AutomationElement.FocusedElement;
+        if (fe == null) return false;
+        var ct = fe.Current.ControlType;
+        if (ct == ControlType.Edit) return true;
+        if (ct == ControlType.ComboBox || ct == ControlType.Document) {
+          object vp;
+          if (fe.TryGetCurrentPattern(ValuePattern.Pattern, out vp)) return !((ValuePattern)vp).Current.IsReadOnly;
+        }
+      } catch {
+      }
+      return false;
+    }
+
     static void HandleSpecialKey(string key) {
       byte vk = KeyNameToVk(key);
       if (vk != 0) {
@@ -780,7 +862,7 @@ export const DESKTOP_CAST_PS1 = String.raw`
 $ErrorActionPreference = 'Stop'
 $dll = $env:AIVIN_CAST_DLL
 $src = $env:AIVIN_CAST_SRC
-$refs = @('System.Drawing', 'System.Windows.Forms', 'System.Web.Extensions', 'System.Core')
+$refs = @('UIAutomationClient', 'UIAutomationTypes', 'WindowsBase', 'System.Drawing', 'System.Windows.Forms', 'System.Web.Extensions', 'System.Core')
 foreach ($r in $refs) { Add-Type -AssemblyName $r }
 if ($dll -and (Test-Path -LiteralPath $dll)) {
   Add-Type -Path $dll

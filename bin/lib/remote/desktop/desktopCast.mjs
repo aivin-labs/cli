@@ -86,6 +86,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     onMeta,
     onCursor,
     onCursorShape,
+    onInputFocus,
     onCapture,
     rawPipe = false,
     onReady,
@@ -174,6 +175,8 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
         onCursor?.({ x: msg.x, y: msg.y, visible: msg.visible, shape: msg.shape });
       } else if (msg.t === 'cursor_shape') {
         onCursorShape?.({ id: msg.id, png: msg.png, hotX: msg.hotX, hotY: msg.hotY });
+      } else if (msg.t === 'input_focus') {
+        onInputFocus?.({ editable: msg.editable === true });
       } else if (msg.t === 'capture') {
         onCapture?.({ mode: msg.mode, reason: msg.reason });
       } else if (msg.t === 'error') {
