@@ -262,6 +262,8 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
       <StackPanel x:Name="Choices" Visibility="Collapsed" Margin="0,2,0,2"/>
      </StackPanel>
     </ScrollViewer>
+    <!-- Tệp thả vào bot, chờ đi kèm câu kế tiếp: chip icon + màu theo loại tệp, nút x để bỏ (askHostSource.mjs dựng theo ask_files). -->
+    <WrapPanel x:Name="AttachBar" Visibility="Collapsed" Margin="-4,0,0,5"/>
     <DockPanel>
      <Button x:Name="MicBtn" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Width="26" Height="26" Margin="6,0,0,0" VerticalAlignment="Bottom"
              Background="${ASK_BTN.bg}" BorderThickness="0" Tag="#14000000">

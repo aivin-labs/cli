@@ -1,10 +1,10 @@
 import { randomUUID } from 'crypto';
-import path from 'path';
 import { ChatEventKind, DeviceEvent, NotifyKind, ServerFeature, VoiceEventKind } from '../constants.mjs';
 import { createAdpcmEncoder, decodeAdpcm, VOICE_CODEC } from './adpcm.mjs';
 import { diagramSourceOf, imageUrlsOf, normalizeBlocks, withImageFiles } from './blocks.mjs';
 import { openWebview, renderDiagram } from './diagramRender.mjs';
 import { fetchMascotImage } from './images.mjs';
+import { fileChip } from './fileChips.mjs';
 import { lucidePath } from './lucideIcons.mjs';
 import { safeLinkUrl, safeWebUrl } from './safeUrl.mjs';
 import { MascotText, mascotText } from './strings.mjs';
@@ -152,11 +152,10 @@ export function createMascotChat({
   const queue = [];
   const head = () => queue[0] || null;
   const seenNotify = new Set();
-  /** Tệp thả vào bot, chờ đi kèm câu kế tiếp; `attachRow` = dòng "📎" đang hiện. */
+  /** Tệp thả vào bot, chờ đi kèm câu kế tiếp. */
   const files = [];
-  let attachRow = null;
-  /** Số tệp đang chờ → cửa sổ (thùng trong tay bot + huy hiệu số tệp). */
-  const syncFiles = () => send({ t: AskCommand.FILES, n: files.length });
+  /** Tệp đang chờ → cửa sổ: số tệp (thùng trong tay bot + huy hiệu) + chip từng tệp trên dòng nhập (icon / màu theo loại, nút × để bỏ). */
+  const syncFiles = () => send({ t: AskCommand.FILES, n: files.length, files: files.map((f) => fileChip(f)) });
   /** Cửa sổ chủ máy đang dùng khi hỏi (mascot/index.mjs `userWindow`) của lượt / cuộc nói chuyện gần nhất, hoặc null. */
   let target = null;
   const context = () => (target ? { context: { window: target } } : {});
@@ -427,14 +426,19 @@ export function createMascotChat({
     if (current === id) armSilence();
   }
 
-  /** Tệp / thư mục thả vào bot: giữ tới câu gõ kế tiếp (tối đa MAX_ATTACH), hiện một dòng "📎 tên tệp" trong ô hỏi. */
+  /** Tệp / thư mục thả vào bot: giữ tới câu gõ kế tiếp (tối đa MAX_ATTACH), hiện thành chip đính kèm trên dòng nhập (không phải dòng chat). */
   function attach(paths) {
     for (const f of paths || []) if (typeof f === 'string' && f && !files.includes(f) && files.length < MAX_ATTACH) files.push(f);
     // Cửa sổ đã tự cộng số tệp lúc thả — luôn báo lại số thật (trùng / quá giới hạn bị bỏ).
     syncFiles();
-    if (!files.length) return;
-    attachRow ||= `attach-${randomUUID()}`;
-    row(ChatRole.USER, t(MascotText.ASK_ATTACHED, { names: files.map((f) => path.basename(f.replace(/[\\/]+$/, '')) || f).join(', ') }), attachRow);
+  }
+
+  /** Bấm × trên chip: bỏ tệp đó khỏi lượt kế tiếp. */
+  function detach(file) {
+    const at = files.indexOf(file);
+    if (at < 0) return;
+    files.splice(at, 1);
+    syncFiles();
   }
 
   /** Câu hỏi mới như chủ máy gõ (luôn vào phiên riêng của máy, kể cả khi đang có câu hỏi chờ). */
@@ -453,7 +457,6 @@ export function createMascotChat({
     if (files.length) {
       if (refuseBusy()) return;
       const sent = files.splice(0);
-      attachRow = null;
       syncFiles();
       const shown = answer || t(MascotText.ASK_FILES_DEFAULT);
       const body = `${shown}\n\n${t(MascotText.ASK_FILES_LABEL)}\n${sent.map((f) => `- ${f}`).join('\n')}`;
@@ -580,7 +583,6 @@ export function createMascotChat({
     target = null;
     currentSessionId = null;
     files.splice(0);
-    attachRow = null;
     syncFiles();
     chatEpoch++;
     send({ t: AskCommand.CLEAR });
@@ -920,7 +922,7 @@ export function createMascotChat({
 
   return {
     openTool,
-    ask, reply, choose, attach, cancel, newChat, onChatEvent, onNotify, syncInbox, checkQuestions, setServerFeatures, busy: () => !!current || !!call, hasPending: () => queue.length > 0, userWindow: () => target,
+    ask, reply, choose, attach, detach, cancel, newChat, onChatEvent, onNotify, syncInbox, checkQuestions, setServerFeatures, busy: () => !!current || !!call, hasPending: () => queue.length > 0, userWindow: () => target,
     voiceStart, voiceAudio, voiceInterrupt, voiceStop, voiceMicLost, voiceDisconnected, onVoiceEvent, setVoiceSupported, inCall: () => !!call,
     setNotifyFreq: (val) => { const v = Number(val); if (Number.isInteger(v) && v >= 0 && v <= 2) currentNotifyFreq = v; },
     setLang: (l) => { if (l) currentLang = l; },

@@ -163,15 +163,22 @@ test('cửa sổ có hàng nút lựa chọn + lệnh ask_choices, bấm nút g�
   assert.ok([...ps].every((c) => c.charCodeAt(0) < 128), 'host.ps1 giữ toàn ASCII');
 });
 
-test('thả tệp vào bot: hiện "📎 tên tệp", câu gõ kế tiếp mang đường dẫn đầy đủ; gửi xong thì bỏ tệp', async () => {
+test('thả tệp vào bot: chip đính kèm (không phải dòng chat), bỏ được bằng ×; câu gõ kế tiếp mang đường dẫn đầy đủ; gửi xong thì bỏ tệp', async () => {
   const { chat, sent, socket } = setup();
   const fileCounts = () => sent.filter((c) => c.t === 'ask_files').map((c) => c.n);
-  chat.attach(['C:/Users/a/Bao cao Q3.xlsx', 'D:/Hop dong/', 'C:/Users/a/Bao cao Q3.xlsx']);
-  assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text.startsWith('📎 Bao cao Q3.xlsx, Hop dong')));
-  // Thùng trong tay bot: số tệp thật (bỏ trùng) — cửa sổ đã tự cộng 3 lúc thả.
-  assert.deepEqual(fileCounts(), [2]);
+  const lastChips = () => sent.filter((c) => c.t === 'ask_files').at(-1).files;
+  chat.attach(['C:/Users/a/Bao cao Q3.xlsx', 'D:/Hop dong/', 'C:/Users/a/Bao cao Q3.xlsx', 'C:/tmp/anh.png']);
+  assert.equal(rows(sent).length, 0, 'tệp đính kèm không thành bong bóng chat');
+  // Thùng trong tay bot: số tệp thật (bỏ trùng) — cửa sổ đã tự cộng lúc thả.
+  assert.deepEqual(fileCounts(), [3]);
+  assert.deepEqual(lastChips().map((c) => [c.name, c.kind]), [['Bao cao Q3.xlsx', 'sheet'], ['Hop dong', 'folder'], ['anh.png', 'image']]);
+  assert.ok(lastChips().every((c) => c.icon_path && /^#[0-9A-F]{6}$/.test(c.ink) && /^#[0-9A-F]{6}$/.test(c.bg)));
+  chat.detach('C:/tmp/anh.png');
+  chat.detach('C:/khong-co.txt');
+  assert.deepEqual(fileCounts(), [3, 2], 'bấm × → bỏ đúng tệp đó; tệp lạ thì bỏ qua');
+  assert.deepEqual(lastChips().map((c) => c.path), ['C:/Users/a/Bao cao Q3.xlsx', 'D:/Hop dong/']);
   await chat.reply('tóm tắt rồi gửi sếp');
-  assert.deepEqual(fileCounts(), [2, 0], 'gửi đi → thùng cất đi');
+  assert.deepEqual(fileCounts(), [3, 2, 0], 'gửi đi → thùng cất đi');
   assert.equal(socket.emitted[0].payload.text, 'tóm tắt rồi gửi sếp\n\nTệp trên máy này:\n- C:/Users/a/Bao cao Q3.xlsx\n- D:/Hop dong/');
   assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text === 'tóm tắt rồi gửi sếp'), 'dòng của chủ máy chỉ là câu gõ');
   chat.onChatEvent({ request_id: socket.emitted[0].payload.request_id, kind: 'answer', text: 'ok' });
@@ -249,6 +256,11 @@ test('cửa sổ: thả tệp, theo dõi đi vắng, chơi với bot (lắc → 
   assert.match(ps, /\$script:rig\.Tray\('deny', \$script:files\)/);
   assert.match(ps, /PlayFace 'gulp' 'hello'/);
   assert.match(ps, /'ask_files' \{/);
+  // Chip tệp trong ô hỏi: nút × gửi detach; chỉ có tệp (chưa gõ) vẫn gửi được.
+  assert.match(MASCOT_XAML, /x:Name="AttachBar"/);
+  assert.match(ps, /function AttachChips\(\$chips\)/);
+  assert.match(ps, /Send @\{ t = 'detach'; path = \[string\]\$s\.CommandParameter \}/);
+  assert.match(ps, /-not \$text -and -not \$script:files/);
   assert.match(ps, /public void Tray\(string mode, int count\)/);
   assert.match(MASCOT_XAML, /x:Name="DropZone"/);
   assert.match(MASCOT_XAML, /x:Name="TrayCount"/);

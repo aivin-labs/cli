@@ -374,6 +374,8 @@ export async function startRemoteClient(options = {}) {
     onNotifyFreq: (val) => { mascotChat?.setNotifyFreq(val); },
     // Thả tệp vào bot → đi kèm câu gõ kế tiếp.
     onDrop: (files) => mascotChat?.attach(files),
+    // Bấm × trên chip tệp trong ô hỏi → bỏ tệp đó.
+    onDetach: (file) => mascotChat?.detach(file),
     // Nói chuyện trực tiếp: mic / loa ở cửa sổ, phiên thoại realtime trên BE (mascot/ask.mjs).
     onVoice: (msg) => {
       if (!mascotChat) return;

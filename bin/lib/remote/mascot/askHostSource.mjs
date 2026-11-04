@@ -43,6 +43,8 @@ const CHOICE_HOVER = '#0F1E1B4B';
 const CHOICE_MARK = '#9AA1B2';
 /** Nút mở link: icon Lucide + màu đậm cùng tông với nền nút (`CHOICE_CARDS[2]`, xanh trời). */
 const LINK_ICON_PATH = lucidePath('external-link');
+/** Nút x trên chip tệp đính kèm. */
+const DETACH_ICON_PATH = lucidePath('x');
 
 export const ASK_PS1 = String.raw`
 # ---- Ask box (askHostSource.mjs) ----
@@ -227,10 +229,12 @@ $script:clickCheckTimer.Start()
 (E 'Mascot').Add_MouseRightButtonUp({ param($s, $e) CloseAsk; OpenPanel; $e.Handled = $true })
 # One button: empty box = mic, typed text = send.
 # Waiting on a turn the server can stop (chat_busy { cancel }): the empty-box button is a stop button instead of the mic.
-function StopMode { $script:chatBusy -and $script:canCancel -and -not $script:voiceLive -and -not (E 'AskBox').Text.Trim() }
+function StopMode { $script:chatBusy -and $script:canCancel -and -not $script:voiceLive -and -not (E 'AskBox').Text.Trim() -and -not $script:files }
 function SyncAction {
-  $typed = [bool](E 'AskBox').Text.Trim()
+  # Files waiting (chips above the input): the button sends even with nothing typed, and the hint asks what to do with them.
+  $typed = [bool](E 'AskBox').Text.Trim() -or ($script:files -gt 0 -and -not $script:voiceLive)
   $stop = StopMode
+  (E 'AskHint').Text = if ($script:files -gt 0) { $T.ask_attached } else { $T.ask_hint }
   (E 'AskHint').Visibility = if ((E 'AskBox').Text) { 'Collapsed' } else { 'Visible' }
   (E 'SendIcon').Visibility = if ($typed) { 'Visible' } else { 'Collapsed' }; (E 'MicIcon').Visibility = if ($typed -or $stop) { 'Collapsed' } else { 'Visible' }
   (E 'StopIcon').Visibility = if ($stop) { 'Visible' } else { 'Collapsed' }
@@ -260,7 +264,7 @@ function AttendAsk {
 $script:chatBusy = $false
 $script:canCancel = $false
 function SubmitAsk {
-  $text = (E 'AskBox').Text.Trim(); if (-not $text -or $script:chatBusy -or $script:voiceLive) { return }
+  $text = (E 'AskBox').Text.Trim(); if ((-not $text -and -not $script:files) -or $script:chatBusy -or $script:voiceLive) { return }
   NoteTarget; (E 'AskBox').Text = ''; $script:rig.Play('ack'); Send @{ t = 'ask'; text = $text; window = $script:askTarget }
 }
 (E 'AskBox').Add_KeyDown({ param($s, $e)
@@ -431,6 +435,30 @@ function ChoiceButtons($options, $multiple) {
   if ($panel.Children.Count) { (E 'ChatScroll').Visibility = 'Visible'; (E 'ChatScroll').ScrollToEnd() }
 }
 
+# Attached files: one chip each above the input - the file type's icon + colour (fileChips.mjs), its name (full path in the tooltip),
+# an x that drops it (detach -> the daemon answers with the new ask_files).
+function AttachChips($chips) {
+  $bar = E 'AttachBar'; $bar.Children.Clear()
+  foreach ($c in @($chips)) {
+    if (-not $c -or -not $c.path) { continue }
+    $ink = [string]$c.ink; if (-not $ink) { $ink = '#64748B' }
+    $chip = New-Object Windows.Controls.Border; $chip.CornerRadius = '8'; $chip.Padding = '6,2,2,2'; $chip.Margin = '4,0,0,4'; $chip.ToolTip = [string]$c.path
+    $chip.Background = Brush $(if ($c.bg) { [string]$c.bg } else { '#F8FAFC' })
+    # Hairline in the type's colour (ink at ~20 %): keeps the very light chip readable on the white box.
+    $chip.BorderThickness = '1'; $chip.BorderBrush = Brush ('#33' + $ink.TrimStart('#'))
+    $row = New-Object Windows.Controls.StackPanel; $row.Orientation = 'Horizontal'
+    if ($c.icon_path) { $i = LucideIcon $c.icon_path 13 $ink; $i.VerticalAlignment = 'Center'; $i.Margin = '0,0,5,0'; [void]$row.Children.Add($i) }
+    $tb = New-Object Windows.Controls.TextBlock; $tb.Text = [string]$c.name; $tb.FontSize = 12; $tb.Foreground = Brush $ink; $tb.MaxWidth = 140
+    $tb.TextTrimming = 'CharacterEllipsis'; $tb.VerticalAlignment = 'Center'; [void]$row.Children.Add($tb)
+    $x = New-Object Windows.Controls.Button; $x.Style = $w.FindResource('IconBtn'); $x.Width = 18; $x.Height = 18; $x.Margin = '3,0,0,0'
+    $x.Background = Brush '#00000000'; $x.BorderThickness = '0'; $x.Tag = Brush '#1F000000'; $x.ToolTip = $T.ask_detach
+    $x.Content = LucideIcon '${DETACH_ICON_PATH}' 10 $ink; $x.CommandParameter = [string]$c.path
+    $x.Add_Click({ param($s) Send @{ t = 'detach'; path = [string]$s.CommandParameter } })
+    [void]$row.Children.Add($x); $chip.Child = $row; [void]$bar.Children.Add($chip)
+  }
+  $bar.Visibility = if ($bar.Children.Count) { 'Visible' } else { 'Collapsed' }
+}
+
 # Voice: a live conversation with Aivin (voiceSource.mjs streams the mic / speaker). '' = off, else connecting | listening | thinking | speaking,
 # or recording (older Aivin server without live voice: talk, click the mic to send, it goes through voice-to-text).
 $script:voiceLive = ''
@@ -561,6 +589,8 @@ function Handle($m) {
     }
     'ask_status' { AskStatus $m.text; return }
     'ask_choices' { ChoiceButtons $m.options $m.multiple; return }
+    # Files waiting for the next question: chips above the input; then on to the bot's tray (no return).
+    'ask_files' { $chips = @($m.files | Where-Object { $_ }); $more = $chips.Count -gt (E 'AttachBar').Children.Count; $script:files = [int]$m.n; AttachChips $chips; SyncAction; if ($more) { PeekAsk; HideAskLater ${ASK_IDLE_MS} } }
     'ask_pin' {
       $script:askPinned = [bool]$m.on
       if ($script:askPinned) { $script:userHidden = $false; ApplyVisibility; AskHide 'Panel'; PeekAsk; (E 'ChatScroll').ScrollToEnd() }

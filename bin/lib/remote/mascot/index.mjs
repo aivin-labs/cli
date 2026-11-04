@@ -59,7 +59,7 @@ export function requestMascotHide(file = MASCOT_HIDE_FILE) {
 }
 export const HostEvent = Object.freeze({
   READY: 'ready', POS: 'pos', PAUSE: 'pause', RESUME: 'resume', HIDE: 'hide', OFF: 'off', ASK: 'ask', CHOOSE: 'choose', CANCEL: 'cancel', NEW_CHAT: 'new_chat', OPEN_WEBVIEW: 'open_webview',
-  DROP: 'drop', AWAY: 'away', BACK: 'back', NOTIFY_FREQ: 'notify_freq', HOTKEYS: 'hotkeys',
+  DROP: 'drop', DETACH: 'detach', AWAY: 'away', BACK: 'back', NOTIFY_FREQ: 'notify_freq', HOTKEYS: 'hotkeys',
   VOICE_START: 'voice_start', VOICE_AUDIO: 'voice_audio', VOICE_INTERRUPT: 'voice_interrupt', VOICE_STOP: 'voice_stop', VOICE_MIC_LOST: 'voice_mic_lost',
 });
 const VOICE_EVENTS = new Set([HostEvent.VOICE_START, HostEvent.VOICE_AUDIO, HostEvent.VOICE_INTERRUPT, HostEvent.VOICE_STOP, HostEvent.VOICE_MIC_LOST]);
@@ -172,7 +172,7 @@ export function userWindow(w) {
  */
 export function createMascot({
   enabled = true, platform = process.platform, env = process.env, lang: preferredLang, onPause = () => {}, onResume = () => {}, say = () => {},
-  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onOpenTool = () => {}, onDrop = () => {}, onNotifyFreq = () => {},
+  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onOpenTool = () => {}, onDrop = () => {}, onDetach = () => {}, onNotifyFreq = () => {},
   spawnImpl = spawn, dir = MASCOT_DIR, settingsFile = MASCOT_SETTINGS_FILE, showFile = MASCOT_SHOW_FILE, hideFile = MASCOT_HIDE_FILE, voiceFile = MASCOT_VOICE_FILE, hotkeysFile = MASCOT_HOTKEYS_FILE, now = Date.now, timers = { setTimeout, clearTimeout },
   thinkMs = THINK_MS, resultMs = RESULT_MS, mainThrottleMs = MAIN_THROTTLE_MS, restartDelaysMs = RESTART_DELAYS_MS, awayWaveMs = AWAY_WAVE_MS,
 } = {}) {
@@ -289,6 +289,7 @@ export function createMascot({
       return;
     }
     if (msg.t === HostEvent.DROP && Array.isArray(msg.files)) return onDrop(msg.files.filter((f) => typeof f === 'string' && f));
+    if (msg.t === HostEvent.DETACH && typeof msg.path === 'string' && msg.path) return onDetach(msg.path);
     if (msg.t === HostEvent.AWAY) { away = { since: now(), done: 0, failed: 0, needs: 0 }; return; }
     if (msg.t === HostEvent.BACK) return welcomeBack();
     if (msg.t === HostEvent.VOICE_START) { voiceOn = true; return onVoice({ t: msg.t, window: userWindow(msg.window) }); }
