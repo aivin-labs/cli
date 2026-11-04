@@ -10,6 +10,34 @@ const MAX_BUFFERED_BYTES = 512 * 1024;
 export const INPUT_CHANNEL = 'aivin-desktop-input';
 const MAX_INPUT_MESSAGE_BYTES = 8 * 1024;
 
+const MAX_CURSOR_SHAPES = 64;
+/** Thử nối lại khi peer hỏng hẳn (`failed`): dựng peer mới, cùng người xem; hết lượt thì ở lại JPEG. Peer nối được thì đặt lại. */
+const RECONNECT_DELAYS_MS = [1000, 3000, 8000];
+
+/**
+ * Ghi băng thông video vào SDP answer (bên gửi đọc từ đây): mặc định libwebrtc trần ~2,5 Mbps, cuộn trang chữ 1440x810 chỉ còn ~7,5 khung/giây
+ * (đo 03/11/2026). `{ start_kbps, min_kbps, max_kbps }` do BE gửi (`config/device_agent.json`); thiếu thì giữ nguyên SDP.
+ */
+export function withVideoBitrate(sdp, bitrate) {
+  const params = [['x-google-start-bitrate', bitrate?.start_kbps], ['x-google-min-bitrate', bitrate?.min_kbps], ['x-google-max-bitrate', bitrate?.max_kbps]]
+    .filter(([, v]) => Number.isFinite(v) && v > 0)
+    .map(([k, v]) => `${k}=${Math.round(v)}`)
+    .join(';');
+  if (!params || typeof sdp !== 'string') return sdp;
+  const eol = sdp.includes('\r\n') ? '\r\n' : '\n';
+  const lines = sdp.split(eol);
+  const out = [];
+  for (const line of lines) {
+    const vp8 = line.match(/^a=rtpmap:(\d+) VP8\/90000/i);
+    out.push(line);
+    if (!vp8) continue;
+    const fmtp = lines.findIndex(l => l.startsWith(`a=fmtp:${vp8[1]} `));
+    if (fmtp < 0) out.push(`a=fmtp:${vp8[1]} ${params}`);
+    else lines[fmtp] = `${lines[fmtp]};${params}`;
+  }
+  return out.join(eol);
+}
+
 export function packDesktopFrame(frame) {
   const image = Buffer.from(String(frame?.image || ''), 'base64');
   const meta = Buffer.from(JSON.stringify({
@@ -17,7 +45,7 @@ export function packDesktopFrame(frame) {
     width: frame?.width, height: frame?.height,
     screenWidth: frame?.screenWidth, screenHeight: frame?.screenHeight,
     screenX: frame?.screenX, screenY: frame?.screenY,
-    monitor: frame?.monitor, screens: frame?.screens,
+    monitor: frame?.monitor, screens: frame?.screens, stats: frame?.stats,
     mime: 'image/jpeg', bytes: image.length,
   }) + '\n');
   return Buffer.concat([meta, image]);
@@ -36,8 +64,10 @@ export function unpackDesktopFrame(packet) {
   }
 }
 
-export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onPeerReady = () => {}, loadRuntime } = {}) {
+export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onPeerReady = () => {}, onCursorMode = () => {}, loadRuntime } = {}) {
   const peers = new Map();
+  /** Hình con trỏ đã thấy trong phiên — người xem nối sau vẫn nhận đủ (bộ quay chỉ gửi mỗi hình một lần). */
+  const cursorShapes = new Map();
   let runtime = null;
   let sequence = 0;
   /**
@@ -53,7 +83,17 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     return runtime;
   };
 
-  async function start({ sessionId, viewerId, iceServers = [] }) {
+  /** Peer hỏng hẳn: dựng lại sau một nhịp (BE chuyển offer mới, FE tự nối lại). Trong lúc chờ người xem nhận JPEG. */
+  function scheduleReconnect(peer) {
+    if (peer.retryTimer || peer.attempt >= RECONNECT_DELAYS_MS.length) return;
+    peer.retryTimer = setTimeout(() => {
+      if (peers.get(peer.viewerId) !== peer) return;
+      start({ sessionId: peer.sessionId, viewerId: peer.viewerId, iceServers: peer.iceServers, videoBitrate: peer.videoBitrate, attempt: peer.attempt + 1 }).catch(() => false);
+    }, RECONNECT_DELAYS_MS[peer.attempt]);
+    peer.retryTimer.unref?.();
+  }
+
+  async function start({ sessionId, viewerId, iceServers = [], videoBitrate = null, attempt = 0 }) {
     close(viewerId);
     const wrtc = await load();
     const RTCPeerConnection = wrtc?.RTCPeerConnection || wrtc?.default?.RTCPeerConnection;
@@ -65,30 +105,50 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     if (VideoSource && !videoSource) videoSource = new VideoSource({ isScreencast: true });
     const track = videoSource ? videoSource.createTrack() : null;
     if (track) pc.addTrack(track);
-    const peer = { pc, channel, inputChannel, track, video: !!track, sessionId, viewerId, open: false, dropped: 0 };
+    const peer = { pc, channel, inputChannel, track, video: !!track, sessionId, viewerId, iceServers, videoBitrate, attempt, retryTimer: null, open: false, dropped: 0 };
     inputChannel.onmessage = ({ data }) => {
       const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
       if (text.length > MAX_INPUT_MESSAGE_BYTES) return;
       let msg;
       try { msg = JSON.parse(text); } catch { return; }
+      if (msg?.control === 'cursor') {
+        peer.localCursor = msg.local === true;
+        if (peer.localCursor) for (const shape of cursorShapes.values()) sendShape(peer, shape);
+        onCursorMode();
+        return;
+      }
       // Mã phiên lấy từ peer (đã gắn lúc BE mời), không tin mã trong gói.
       onInput({ ...msg, session_id: peer.sessionId }, viewerId);
     };
     peers.set(viewerId, peer);
     channel.binaryType = 'arraybuffer';
-    channel.onopen = () => {
+    const markConnected = () => {
       peer.open = true;
+      peer.attempt = 0;
       emitStatus({ session_id: sessionId, viewer_id: viewerId, state: 'connected', transport: 'webrtc', video: peer.video });
       onPeerReady(viewerId);
     };
-    channel.onclose = () => { peer.open = false; };
+    channel.onopen = markConnected;
+    // Kênh đóng trước khi peer báo `failed` (chạy thật: ~19 s): báo ngay để BE gửi JPEG, không để người xem đứng hình trong lúc đó.
+    channel.onclose = () => {
+      const wasOpen = peer.open;
+      peer.open = false;
+      if (wasOpen && peers.get(viewerId) === peer) emitStatus({ session_id: sessionId, viewer_id: viewerId, state: 'disconnected', transport: 'jpeg' });
+    };
     pc.onicecandidate = ({ candidate }) => {
       emitSignal({ session_id: sessionId, viewer_id: viewerId, type: 'ice', candidate: candidate?.toJSON?.() || candidate || null });
     };
     pc.onconnectionstatechange = () => {
-      if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
+      if (peers.get(viewerId) !== peer) return;
+      const state = pc.connectionState;
+      if (['failed', 'closed', 'disconnected'].includes(state)) {
+        const wasOpen = peer.open;
         peer.open = false;
-        emitStatus({ session_id: sessionId, viewer_id: viewerId, state: pc.connectionState, transport: 'jpeg' });
+        if (wasOpen || state !== 'disconnected') emitStatus({ session_id: sessionId, viewer_id: viewerId, state, transport: 'jpeg' });
+        if (state === 'failed') scheduleReconnect(peer);
+      } else if (state === 'connected' && !peer.open && channel.readyState === 'open') {
+        // Mạng chập chờn: `disconnected` tự hồi về `connected` nhưng kênh không mở lại (onopen không chạy lần nữa) — không có nhánh này là kẹt JPEG.
+        markConnected();
       }
     };
     await pc.setLocalDescription(await pc.createOffer());
@@ -100,7 +160,7 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     const peer = peers.get(String(msg?.viewer_id || ''));
     if (!peer || msg?.session_id !== peer.sessionId) return false;
     if (msg.type === 'answer' && msg.sdp) {
-      await peer.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      await peer.pc.setRemoteDescription({ type: 'answer', sdp: withVideoBitrate(msg.sdp, peer.videoBitrate) });
       return true;
     }
     if (msg.type === 'ice') {
@@ -127,6 +187,32 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     return sent;
   }
 
+  function sendShape(peer, shape) {
+    if (peer.inputChannel?.readyState !== 'open') return;
+    try { peer.inputChannel.send(JSON.stringify({ t: 'cursor_shape', ...shape })); } catch { /* kênh vừa đóng */ }
+  }
+
+  /** Vị trí con trỏ: kênh không gửi lại — mất một gói thì gói sau đè lên. Chỉ tới người xem đã báo tự vẽ con trỏ. */
+  function pushCursor(cursor) {
+    const packet = Buffer.from(JSON.stringify({ t: 'cursor', ...cursor }) + '\n');
+    for (const peer of peers.values()) {
+      if (!peer.localCursor || !peer.open || peer.channel.readyState !== 'open') continue;
+      try { peer.channel.send(packet); } catch { /* kênh vừa đóng */ }
+    }
+  }
+
+  /** Hình con trỏ: kênh tin cậy (kênh thao tác) vì chỉ gửi một lần. */
+  function pushCursorShape(shape) {
+    if (cursorShapes.size >= MAX_CURSOR_SHAPES) cursorShapes.delete(cursorShapes.keys().next().value);
+    cursorShapes.set(shape.id, shape);
+    for (const peer of peers.values()) if (peer.localCursor) sendShape(peer, shape);
+  }
+
+  /** Mọi người xem đều có video và tự vẽ con trỏ → bộ quay thôi lồng con trỏ vào khung. */
+  function localCursor() {
+    return peers.size > 0 && [...peers.values()].every(p => p.video && p.open && p.localCursor);
+  }
+
   /** Khung thô I420 từ tiến trình quay → nguồn video (mọi track cùng nguồn). */
   function pushRaw(frame) {
     if (!videoSource || ![...peers.values()].some(p => p.video && p.open)) return false;
@@ -144,12 +230,13 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     const peer = peers.get(String(viewerId || ''));
     if (!peer) return;
     peers.delete(String(viewerId));
+    clearTimeout(peer.retryTimer);
     try { peer.channel.close(); } catch { /* already closed */ }
     try { peer.inputChannel?.close(); } catch { /* already closed */ }
     try { peer.track?.stop(); } catch { /* already stopped */ }
     try { peer.pc.close(); } catch { /* already closed */ }
   }
 
-  function closeAll() { for (const id of [...peers.keys()]) close(id); }
-  return { start, signal, push, pushRaw, needsJpeg, hasVideo, anyOpen, needsFallback, close, closeAll };
+  function closeAll() { for (const id of [...peers.keys()]) close(id); cursorShapes.clear(); }
+  return { start, signal, push, pushRaw, pushCursor, pushCursorShape, localCursor, needsJpeg, hasVideo, anyOpen, needsFallback, close, closeAll };
 }

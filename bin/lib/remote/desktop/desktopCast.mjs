@@ -29,23 +29,39 @@ const MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024;
  * Độ dài vô lý → `onCorrupt` (đóng pipe, không cố đồng bộ lại).
  */
 export function createRawFrameReader(onFrame, onCorrupt = () => {}) {
-  let buf = Buffer.alloc(0);
+  const header = Buffer.alloc(RAW_HEADER_BYTES);
+  let headerFilled = 0;
+  let frame = null;
+  let filled = 0;
   return (chunk) => {
-    buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
-    while (buf.length >= RAW_HEADER_BYTES) {
-      const width = buf.readInt32LE(0);
-      const height = buf.readInt32LE(4);
-      const length = buf.readInt32LE(8);
-      if (width <= 0 || height <= 0 || length !== width * height * 1.5 || length > MAX_RAW_FRAME_BYTES) {
-        buf = Buffer.alloc(0);
-        onCorrupt();
-        return;
+    let pos = 0;
+    while (pos < chunk.length) {
+      if (!frame) {
+        const n = chunk.copy(header, headerFilled, pos, pos + RAW_HEADER_BYTES - headerFilled);
+        headerFilled += n;
+        pos += n;
+        if (headerFilled < RAW_HEADER_BYTES) return;
+        headerFilled = 0;
+        const width = header.readInt32LE(0);
+        const height = header.readInt32LE(4);
+        const length = header.readInt32LE(8);
+        if (width <= 0 || height <= 0 || length !== width * height * 1.5 || length > MAX_RAW_FRAME_BYTES) {
+          onCorrupt();
+          return;
+        }
+        // Vùng nhớ riêng cho từng khung (bộ mã hoá giữ tham chiếu), chép thẳng từng khúc: khúc pipe 64 KB, ghép dần cả khung ăn luồng chính ~9 ms.
+        frame = { width, height, data: new Uint8ClampedArray(length) };
+        filled = 0;
       }
-      if (buf.length < RAW_HEADER_BYTES + length) return;
-      // Chép ra vùng nhớ riêng: bộ mã hoá giữ tham chiếu, `buf` sẽ bị cắt / ghép tiếp.
-      const data = Uint8ClampedArray.from(buf.subarray(RAW_HEADER_BYTES, RAW_HEADER_BYTES + length));
-      buf = buf.subarray(RAW_HEADER_BYTES + length);
-      onFrame({ width, height, data });
+      const piece = chunk.subarray(pos, pos + frame.data.length - filled);
+      frame.data.set(piece, filled);
+      filled += piece.length;
+      pos += piece.length;
+      if (filled === frame.data.length) {
+        const done = frame;
+        frame = null;
+        onFrame(done);
+      }
     }
   };
 }
@@ -68,6 +84,9 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     monitor = -1,
     onFrame,
     onMeta,
+    onCursor,
+    onCursorShape,
+    onCapture,
     rawPipe = false,
     onReady,
     onError,
@@ -135,6 +154,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
           monitor: msg.monitor,
           screens: msg.screens,
           ts: msg.ts,
+          stats: msg.stats,
         });
       } else if (msg.t === 'meta') {
         onMeta?.({
@@ -148,7 +168,14 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
           monitor: msg.monitor,
           screens: msg.screens,
           ts: msg.ts,
+          stats: msg.stats,
         });
+      } else if (msg.t === 'cursor') {
+        onCursor?.({ x: msg.x, y: msg.y, visible: msg.visible, shape: msg.shape });
+      } else if (msg.t === 'cursor_shape') {
+        onCursorShape?.({ id: msg.id, png: msg.png, hotX: msg.hotX, hotY: msg.hotY });
+      } else if (msg.t === 'capture') {
+        onCapture?.({ mode: msg.mode, reason: msg.reason });
       } else if (msg.t === 'error') {
         onError?.(new Error(msg.error || 'Desktop cast error'));
       }
@@ -192,6 +219,14 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       config({ jpeg: on });
     }
 
+    /** Con trỏ lồng vào khung hình (mặc định) hay gửi riêng để FE tự vẽ. */
+    let cursorInFrame = true;
+    function setCursorInFrame(on) {
+      if (cursorInFrame === on) return;
+      cursorInFrame = on;
+      config({ cursor: on });
+    }
+
     /** Gửi ngay một khung (người xem mới nối, màn hình đang đứng yên). */
     function refresh() {
       if (!child.stdin || child.stdin.destroyed) return;
@@ -222,6 +257,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       sendInput,
       config,
       setJpeg,
+      setCursorInFrame,
       refresh,
       stop,
       pipeName,
@@ -260,6 +296,10 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     activeSession?.setJpeg(on);
   }
 
+  function setCursorInFrame(on) {
+    activeSession?.setCursorInFrame(on);
+  }
+
   function refresh() {
     activeSession?.refresh();
   }
@@ -285,6 +325,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     sendInput,
     config,
     setJpeg,
+    setCursorInFrame,
     refresh,
     pipeName,
     stop,

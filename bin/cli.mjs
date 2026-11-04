@@ -64,6 +64,9 @@ import { MascotText, mascotLang, mascotText } from './lib/remote/mascot/strings.
 import { DESKTOP_WEBRTC_WORKER_ARG, runDesktopWebRtcWorker } from './lib/remote/desktop/webrtcWorker.mjs';
 import { DemoScope, UiResult, showMascotDemo, showMascotUi } from './lib/remote/mascot/ui.mjs';
 import { desktopAppStatus, installDesktopApp, uninstallDesktopApp } from './lib/remote/autoStart.mjs';
+import { OpenDisplay, openFile, openText } from './lib/openFile.mjs';
+import { OPEN_WITH_EXTENSIONS, SAFE_DEFAULT_EXTENSIONS, defaultAssociationsXml, openDefaultAppsSettings } from './lib/remote/desktop/fileAssociation.mjs';
+import { showOSNotification } from './lib/remote/notify.mjs';
 import { createMeetingManager, requestMeeting } from './lib/remote/meeting/index.mjs';
 import { DEFAULT_CHAT_HOTKEYS, DEFAULT_HOTKEYS, hotkeyCandidates, parseHotkey, probeHotkey } from './lib/remote/mascot/hotkey.mjs';
 import { RESTART_EXIT_CODE, UPDATE_ROLLED_BACK, UpdateStatus, cleanupRetired, downloadRoot, installUpdate, isStandaloneBinary, saveUpdateSettings } from './lib/selfUpdate.mjs';
@@ -1063,9 +1066,11 @@ program
 
 program
   .command('desktop [action]')
-  .description('Aivin as a desktop app: install (Windows: system tray + Start menu; macOS: menu bar + Aivin.app; Linux: app menu + tray) and start it with the computer | uninstall | status (default)')
+  .description('Aivin as a desktop app: install (Windows: system tray + Start menu; macOS: menu bar + Aivin.app; Linux: app menu + tray) and start it with the computer | uninstall | defaults (Windows: pick AIVIN Bot as default for file types) | status (default)')
   .option('--no-autostart', "install: don't start Aivin with the computer (turn it on later from Aivin's menu or the system's startup settings)")
   .option('--no-launch', "install: don't open Aivin now")
+  .option('--export-xml <file>', 'defaults (Windows): write a default-associations file for IT (Group Policy / Intune) instead of opening Settings')
+  .option('--all', 'defaults --export-xml: include Office formats, not only md/txt/csv')
   .action((action = 'status', options) => {
     // Chỗ bật / tắt khởi động cùng máy của từng hệ điều hành — cùng chỗ menu Aivin và `aivin remote enable|disable` đổi.
     const startupWhere = { win32: 'Task Manager → Startup apps', darwin: 'System Settings → General → Login Items', linux: 'Startup Applications / Autostart' }[process.platform] || '';
@@ -1076,6 +1081,8 @@ program
         console.log(chalk.green(`✅ Đã cài Aivin vào máy: ${where}.`));
         console.log(chalk.gray(`   Ứng dụng: ${res.exe}`));
         console.log(chalk.gray(`   Khởi động cùng máy: ${res.autostart ? 'bật' : 'tắt'} (đổi ở menu Aivin hoặc ${startupWhere})`));
+        if (res.openWith?.registered) console.log(chalk.gray('   Mở tệp: chuột phải tệp → "Mở bằng AIVIN Bot", hoặc Open with → AIVIN Bot → Always để mở mặc định'));
+        else if (res.openWith?.error) console.log(chalk.yellow(`   ⚠️  Chưa thêm được "Mở bằng AIVIN Bot": ${res.openWith.error}`));
         if (process.platform === 'linux' && !desktopAppStatus().tray) {
           console.log(chalk.yellow('   ⚠️  Máy chưa có AppIndicator cho python3 nên không có biểu tượng khay — Aivin vẫn chạy nền. Cài: sudo apt install gir1.2-ayatanaappindicator3-0.1 (Ubuntu / Debian)'));
         }
@@ -1087,7 +1094,19 @@ program
         if (!res.removed) console.log(chalk.yellow('   ⚠️  Ứng dụng còn đang chạy nên chưa xoá hết được tệp — chạy lại lệnh này sau ít giây.'));
         return;
       }
-      if (action !== 'status') throw new Error('Dùng: aivin desktop install [--no-autostart] [--no-launch] | uninstall | status');
+      if (action === 'defaults') {
+        if (process.platform !== 'win32') throw new Error('`aivin desktop defaults` chỉ có trên Windows.');
+        if (options.exportXml) {
+          fs.writeFileSync(options.exportXml, defaultAssociationsXml(options.all ? OPEN_WITH_EXTENSIONS : SAFE_DEFAULT_EXTENSIONS));
+          console.log(chalk.green(`✅ Đã ghi ${options.exportXml} — IT áp bằng Group Policy "Set a default associations configuration file" hoặc Intune.`));
+          return;
+        }
+        openDefaultAppsSettings();
+        console.log(chalk.green('✅ Đã mở Settings → Default apps → AIVIN Bot. Chọn AIVIN Bot cho từng loại tệp để nháy đúp là mở bằng Aivin.'));
+        console.log(chalk.gray(`   Nên chọn: ${SAFE_DEFAULT_EXTENSIONS.map((e) => `.${e}`).join(', ')}. Tệp Office dựng lại định dạng khi xuất, nên cân nhắc trước khi đặt mặc định.`));
+        return;
+      }
+      if (action !== 'status') throw new Error('Dùng: aivin desktop install [--no-autostart] [--no-launch] | uninstall | defaults [--export-xml <tệp>] [--all] | status');
       const st = desktopAppStatus();
       if (st.supported === false) return console.log(chalk.gray(`Chưa có ứng dụng Aivin trên màn hình cho ${process.platform} — dùng \`aivin remote enable\`.`));
       console.log(chalk.blue('🖥️  Aivin trên máy này:'));
@@ -1095,9 +1114,33 @@ program
       if (st.installed) console.log(chalk.gray(`   Tìm bằng:           ${st.search || 'không'}`));
       console.log(chalk.gray(`   Khởi động cùng máy: ${st.startup.registered ? (st.startup.enabled ? 'bật' : `tắt (${startupWhere})`) : 'không'}`));
       if (process.platform === 'linux') console.log(chalk.gray(`   Biểu tượng khay:    ${st.tray ? 'có' : 'không (thiếu python3 + AppIndicator) — vẫn chạy nền'}`));
+      if (process.platform === 'win32') console.log(chalk.gray(`   Mở bằng AIVIN Bot:  ${st.openWith ? 'có (chuột phải tệp / Open with)' : 'chưa — aivin desktop install'}`));
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);
+    }
+  });
+
+program
+  .command('open <files...>')
+  .description('Open files from this computer in your Aivin Drive (uploads once; the same content reopens the same Drive file). Windows: `aivin desktop install` adds "Open with AIVIN Bot" to Explorer.')
+  .option('-w, --workspace <id>', 'Workspace to upload into (default: your personal workspace)')
+  .option('--tab', 'Open in a normal browser tab instead of its own window')
+  .option('--print', 'Print the Drive link instead of opening anything')
+  .action(async (files, options) => {
+    // Gọi từ Explorer qua Aivin.exe --open (không có console) → báo bằng thông báo hệ điều hành.
+    const toast = process.env.AIVIN_OPEN_UI === 'toast';
+    for (const file of files) {
+      try {
+        if (toast) showOSNotification({ title: 'AIVIN Bot', body: openText('opening', { name: path.basename(file) }) });
+        const display = options.print ? OpenDisplay.NONE : options.tab ? OpenDisplay.TAB : OpenDisplay.WINDOW;
+        const res = await openFile(file, { workspace: options.workspace, display });
+        console.log(options.print ? res.url : chalk.green(`✅ ${res.name} → ${res.url}${res.reused ? ' (Drive copy reused)' : ''}${res.viewOnly ? ' (view only, not signed in - closes with its window)' : ''}`));
+      } catch (error) {
+        console.error(chalk.red('❌'), error.message);
+        if (toast) showOSNotification({ title: openText('failed_title'), body: error.message });
+        process.exitCode = 1;
+      }
     }
   });
 

@@ -16,6 +16,8 @@ export const CastInputRejection = Object.freeze({
 const ACTIONS = new Set(CAST_INPUT_ACTIONS);
 const MAX_COORD = 100_000;
 const MAX_SCROLL = 10_000;
+/** Toạ độ theo tỷ lệ (rx, ry): 0 = mép trái / trên, 65535 = mép phải / dưới. */
+const RATIO_SCALE = 65_535;
 const MAX_KEY_CHARS = 24;
 
 function finiteIn(value, limit) {
@@ -38,6 +40,9 @@ export function sanitizeCastInput(raw, maxTypeChars = 2000) {
   const x = finiteIn(raw.x, MAX_COORD);
   const y = finiteIn(raw.y, MAX_COORD);
   if (x !== undefined && y !== undefined) { cmd.x = Math.round(x); cmd.y = Math.round(y); }
+  const rx = finiteIn(raw.rx, RATIO_SCALE);
+  const ry = finiteIn(raw.ry, RATIO_SCALE);
+  if (rx >= 0 && ry >= 0) { cmd.rx = Math.round(rx); cmd.ry = Math.round(ry); }
   const button = Number(raw.button);
   if (button === 0 || button === 1 || button === 2) cmd.button = button;
   const deltaX = finiteIn(raw.deltaX, MAX_SCROLL);

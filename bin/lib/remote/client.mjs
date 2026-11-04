@@ -409,10 +409,18 @@ export async function startRemoteClient(options = {}) {
     onInput: (raw, viewerId) => applyRemoteInput(raw, viewerId),
     // Người xem vừa nối: gửi ngay một khung (màn hình đứng yên thì bộ quay không tự gửi).
     onPeerReady: () => desktopCast.refresh(),
+    onState: () => syncCastJpeg(),
     log: (m) => say(chalk.gray(`  ${m}`)),
   });
-  /** Chỉ nén JPEG khi còn người xem cần: chưa có WebRTC / không có video, hoặc khung thô chưa tới bộ mã hoá (pipe chưa nối). */
-  const syncCastJpeg = () => desktopCast.setJpeg(desktopWebRtc.needsJpeg() || !desktopWebRtc.videoLive());
+  /**
+   * Chỉ nén JPEG khi còn người xem cần: chưa có WebRTC / không có video, hoặc khung thô chưa tới bộ mã hoá (pipe chưa nối).
+   * Con trỏ tách khỏi khung chỉ khi mọi người xem đều có video + tự vẽ con trỏ (FE cũ, đường JPEG vẫn thấy con trỏ trong hình).
+   */
+  const syncCastJpeg = () => {
+    const jpeg = desktopWebRtc.needsJpeg() || !desktopWebRtc.videoLive();
+    desktopCast.setJpeg(jpeg);
+    desktopCast.setCursorInFrame(jpeg || !desktopWebRtc.localCursor());
+  };
   /** Dừng hẳn phiên trên máy (tạm dừng / mất kết nối / tắt daemon); `notify` = báo BE kết thúc phiên. */
   const stopDesktopCast = (reason, notify = true) => {
     const sessionId = desktopCast.sessionId();
@@ -920,6 +928,9 @@ export async function startRemoteClient(options = {}) {
         },
         // Mọi người xem đã có video → tiến trình quay thôi nén JPEG, chỉ gửi meta (toạ độ) + khung thô cho bộ mã hoá video.
         onMeta: (meta) => { desktopWebRtc.push(meta); syncCastJpeg(); },
+        onCursor: (cursor) => desktopWebRtc.pushCursor(cursor),
+        onCursorShape: (shape) => desktopWebRtc.pushCursorShape(shape),
+        onCapture: ({ mode, reason }) => say(chalk.gray(`  🖥️  Chụp màn hình: ${mode}${reason ? ` (${reason})` : ''}`)),
         rawPipe: true,
         onReady: (meta) => {
           say(chalk.cyan(`  🖥️  Đang có người xem + điều khiển màn hình máy này từ web (${meta.bounds?.width}x${meta.bounds?.height})`));
@@ -939,7 +950,7 @@ export async function startRemoteClient(options = {}) {
       desktopCast.config(castConfig);
     }
     const webRtcStarted = payload?.transport === 'webrtc'
-      ? await desktopWebRtc.start({ sessionId, viewerId, iceServers: payload?.ice_servers || [] }).catch(() => false)
+      ? await desktopWebRtc.start({ sessionId, viewerId, iceServers: payload?.ice_servers || [], videoBitrate: payload?.video_bitrate || null }).catch(() => false)
       : false;
     if (webRtcStarted) desktopWebRtc.attachPipe(desktopCast.pipeName());
     if (!webRtcStarted) emitCastStatus({

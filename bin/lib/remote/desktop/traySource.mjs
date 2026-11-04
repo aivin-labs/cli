@@ -40,6 +40,9 @@ namespace AivinDesktop {
 
     [STAThread]
     static int Main(string[] args) {
+      // "Mở bằng AIVIN Bot" (Explorer / Open with): chuyển cho aivin open, không đụng tới khay đang chạy.
+      int openAt = Array.IndexOf(args, "--open");
+      if (openAt >= 0) return OpenFiles(args, openAt + 1);
       bool autostart = Array.IndexOf(args, "--autostart") >= 0;
       bool installed = Array.IndexOf(args, "--installed") >= 0;
       bool quit = Array.IndexOf(args, "--quit") >= 0;
@@ -66,6 +69,28 @@ namespace AivinDesktop {
 
     /** Aivin.exe đã được thay (TrayApp.SwapIfExeReplaced): thoát xong mở lại từ tệp mới. */
     internal static bool Relaunch;
+
+    /**
+     * Chạy ẩn "<lệnh aivin> open <tệp>..." — lệnh aivin lấy từ launch.cfg (phần đứng trước "remote start"; bản npm là node + cli.mjs),
+     * nên tự đi theo đường dẫn mới sau khi CLI cập nhật. Không chờ: tải lên + mở trình duyệt là việc của aivin open.
+     */
+    static int OpenFiles(string[] args, int from) {
+      Config cfg = Config.Load(Path.Combine(Path.Combine(Home, "desktop"), "launch.cfg"));
+      if (string.IsNullOrEmpty(cfg.Exe) || from >= args.Length) return 1;
+      StringBuilder line = new StringBuilder();
+      foreach (string a in cfg.Args) {
+        if (a == "remote") break;
+        line.Append(TrayApp.Quote(a)).Append(' ');
+      }
+      line.Append("open");
+      for (int i = from; i < args.Length; i++) line.Append(' ').Append(TrayApp.Quote(args[i]));
+      ProcessStartInfo psi = new ProcessStartInfo(cfg.Exe, line.ToString());
+      psi.UseShellExecute = false;
+      psi.CreateNoWindow = true;
+      psi.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+      psi.EnvironmentVariables["AIVIN_OPEN_UI"] = "toast";
+      try { Process.Start(psi); return 0; } catch { return 1; }
+    }
 
     static void Signal(string name) {
       try { using (EventWaitHandle e = EventWaitHandle.OpenExisting(name)) e.Set(); } catch { }
@@ -828,7 +853,7 @@ namespace AivinDesktop {
     }
 
     /** Một đối số dòng lệnh Windows (quy tắc CommandLineToArgvW). */
-    static string Quote(string a) {
+    internal static string Quote(string a) {
       if (a.Length > 0 && a.IndexOfAny(new char[] { ' ', '\t', '"' }) < 0) return a;
       StringBuilder sb = new StringBuilder("\"");
       int slashes = 0;

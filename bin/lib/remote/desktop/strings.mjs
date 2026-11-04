@@ -32,6 +32,8 @@ export const TRAY_STRINGS = Object.freeze({
     pairOk: 'Kết nối',
     pairCancel: 'Huỷ',
     shortcut: 'Aivin — cho các agent Aivin làm việc trên máy tính này',
+    openWith: 'Mở bằng AIVIN Bot',
+    fileType: 'Tài liệu mở bằng AIVIN Bot',
   },
   en: {
     running: 'Running — ready for work',
@@ -65,6 +67,8 @@ export const TRAY_STRINGS = Object.freeze({
     pairOk: 'Connect',
     pairCancel: 'Cancel',
     shortcut: 'Aivin — lets your Aivin agents work on this computer',
+    openWith: 'Open with AIVIN Bot',
+    fileType: 'Document opened with AIVIN Bot',
   },
 });
 

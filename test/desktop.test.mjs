@@ -205,3 +205,10 @@ test('DESKTOP_CAST_CSHARP: chỉ dùng cú pháp C# 5 và hỗ trợ LockBits, m
   assert.ok(DESKTOP_CAST_CSHARP.includes('ExtractModifiers'));
   assert.ok(DESKTOP_CAST_CSHARP.includes('MOUSEEVENTF_HWHEEL'));
 });
+
+test('DESKTOP_CAST_CSHARP: có DXGI + đường lùi GDI, con trỏ gửi riêng, không còn backtick trong nguồn C#', () => {
+  assert.ok(DESKTOP_CAST_CSHARP.includes('class DxgiScreen'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('CaptureGdi'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('class CursorTracker'));
+  assert.ok(!DESKTOP_CAST_CSHARP.includes('`'), 'không còn dấu backtick làm hỏng chuỗi nguồn');
+});

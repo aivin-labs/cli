@@ -11,6 +11,7 @@ import {
   DESKTOP_DIR, RUN_KEY, STARTUP_VALUE, TrayLaunch, installDesktop, isDesktopInstalled, launcherExePath, readSavedDaemonArgs, setStartupApproved,
   startMenuShortcutPath, startupState, uninstallDesktop,
 } from './desktop/index.mjs';
+import { fileAssociationsRegistered } from './desktop/fileAssociation.mjs';
 import { installMacDesktop, isMacDesktopInstalled, macAgentPath, macAppPath, macStartupState, setMacStartup, uninstallMacDesktop } from './desktop/mac.mjs';
 import {
   hasLinuxDesktopSession, installLinuxDesktop, isLinuxDesktopInstalled, linuxAppEntryPath, linuxAutostartPath, linuxStartupState, linuxTrayAvailable,
@@ -440,7 +441,7 @@ export function desktopAppStatus() {
   if (process.platform === 'win32') {
     return {
       installed: isDesktopInstalled(), app: launcherExePath(), search: fs.existsSync(startMenuShortcutPath()) ? 'Start menu' : null,
-      startup: startupState(), tray: true,
+      startup: startupState(), tray: true, openWith: fileAssociationsRegistered(),
     };
   }
   const desktop = POSIX_DESKTOP[process.platform];

@@ -1,17 +1,20 @@
 /**
  * Tiến trình phát hình ảnh màn hình trực tiếp và điều khiển từ xa trên Windows (Desktop Scenecast).
  * Tương thích C# 5 / .NET Framework 4.5+ / PowerShell 5.1:
- * - Chụp màn hình qua Graphics.CopyFromScreen.
- * - Lồng con trỏ chuột thật của Windows vào khung hình (GetCursorInfo + DrawIcon).
+ * - Chụp màn hình bằng Desktop Duplication, lùi Graphics.CopyFromScreen khi không dùng được (desktopCastCaptureSource.mjs).
+ * - Con trỏ: gửi vị trí + hình riêng để FE vẽ tức thì; người xem chưa hỗ trợ / đường JPEG thì lồng vào khung hình (GetCursorInfo + DrawIcon).
  * - Hỗ trợ đa màn hình: lấy danh sách màn hình và chuyển đổi màn hình cần chụp theo thời gian thực.
  * - Co ảnh về chiều rộng tối đa (giữ tỉ lệ), nén ảnh sang định dạng JPEG nhẹ.
- * - So sánh ảnh thu nhỏ (64x36) để chỉ gửi khung hình khi có chuyển động hoặc giữ nhịp định kỳ (1 FPS).
+ * - So sánh nguyên khung (memcmp) để chỉ gửi khi hình đổi hoặc giữ nhịp định kỳ (1 FPS): thay đổi nhỏ như con trỏ, gõ chữ cũng phải đi ngay
+ *   (đo 03/11/2026: ảnh thu nhỏ 64x36 + ngưỡng làm chúng chờ tới nhịp 1 s). Đường JPEG thì đổi nhỏ giới hạn 5 khung/giây, đỡ tải máy chủ.
  * - Nhận lệnh chuột, bàn phím và phím tắt hệ thống (hotkeys) qua stdin và thực thi qua Win32 API.
  * - Hỗ trợ thay đổi độ phân giải, chất lượng nén JPEG, giới hạn FPS và chọn màn hình theo thời gian thực.
  * - Luồng video (02/11/2026): có `pipe` → mở named pipe gửi khung thô I420 ([rộng, cao, độ dài] int32 LE + dữ liệu) cho Node đưa vào
  *   RTCVideoSource (WebRTC tự mã hoá VP8, chỉ gửi phần đổi). JPEG chỉ nén khi còn người xem cần (`jpeg` qua config); không thì gửi dòng
  *   `meta` (kích thước, màn hình) để FE quy đổi toạ độ.
  */
+
+import { DESKTOP_CAST_CAPTURE_CSHARP } from './desktopCastCaptureSource.mjs';
 
 export const DESKTOP_CAST_CSHARP = String.raw`
 using System;
@@ -47,6 +50,28 @@ namespace AivinDesktopCast {
 
     [DllImport("user32.dll")] public static extern bool GetCursorInfo(out CURSORINFO pci);
     [DllImport("user32.dll")] public static extern bool DrawIcon(IntPtr hDC, int X, int Y, IntPtr hIcon);
+    [DllImport("msvcrt.dll", CallingConvention = CallingConvention.Cdecl)] public static extern int memcmp(IntPtr a, IntPtr b, UIntPtr count);
+    [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")] public static extern void CopyMemory(IntPtr dst, IntPtr src, uint count);
+    [DllImport("winmm.dll")] public static extern uint timeBeginPeriod(uint ms);
+    [DllImport("kernel32.dll")] public static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
+    [DllImport("user32.dll")] public static extern bool GetIconInfo(IntPtr hIcon, out ICONINFO info);
+    [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
+    [DllImport("gdi32.dll")] public static extern int GetObject(IntPtr obj, int size, out BITMAP bm);
+    [DllImport("gdi32.dll")] public static extern int GetDIBits(IntPtr hdc, IntPtr hbm, uint start, uint lines, [Out] int[] bits, ref BITMAPINFOHEADER info, uint usage);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ICONINFO { public bool fIcon; public int xHotspot; public int yHotspot; public IntPtr hbmMask; public IntPtr hbmColor; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAP { public int bmType; public int bmWidth; public int bmHeight; public int bmWidthBytes; public ushort bmPlanes; public ushort bmBitsPixel; public IntPtr bmBits; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFOHEADER {
+      public int biSize; public int biWidth; public int biHeight; public ushort biPlanes; public ushort biBitCount;
+      public int biCompression; public int biSizeImage; public int biXPelsPerMeter; public int biYPelsPerMeter; public int biClrUsed; public int biClrImportant;
+    }
 
     public const int CURSOR_SHOWING = 0x00000001;
 
@@ -131,11 +156,11 @@ namespace AivinDesktopCast {
   }
 
   public static class CastScreen {
-    /** BGR 24 bit → I420 (Y đủ, U/V lấy trung bình khối 2x2); kích thước cắt về số chẵn. */
+    /** BGRX 32 bit → I420 (Y đủ, U/V lấy trung bình khối 2x2); kích thước cắt về số chẵn. */
     public static byte[] ToI420(Bitmap bmp, out int w, out int h) {
       w = bmp.Width & ~1;
       h = bmp.Height & ~1;
-      var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+      var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
       try {
         int stride = Math.Abs(data.Stride);
         var raw = new byte[stride * h];
@@ -149,7 +174,7 @@ namespace AivinDesktopCast {
           int row = y * stride;
           int yRow = y * w;
           for (int x = 0; x < w; x++) {
-            int i = row + x * 3;
+            int i = row + x * 4;
             int b = raw[i], g = raw[i + 1], r = raw[i + 2];
             outBuf[yRow + x] = (byte)(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
           }
@@ -159,7 +184,7 @@ namespace AivinDesktopCast {
           int row1 = row0 + stride;
           int cRow = (y / 2) * cw;
           for (int x = 0; x < w; x += 2) {
-            int i0 = row0 + x * 3, i1 = i0 + 3, i2 = row1 + x * 3, i3 = i2 + 3;
+            int i0 = row0 + x * 4, i1 = i0 + 4, i2 = row1 + x * 4, i3 = i2 + 4;
             int b = (raw[i0] + raw[i1] + raw[i2] + raw[i3]) >> 2;
             int g = (raw[i0 + 1] + raw[i1 + 1] + raw[i2 + 1] + raw[i3 + 1]) >> 2;
             int r = (raw[i0 + 2] + raw[i1 + 2] + raw[i2 + 2] + raw[i3 + 2]) >> 2;
@@ -199,18 +224,26 @@ namespace AivinDesktopCast {
       return list;
     }
 
-    public static Bitmap Grab(Rectangle r) {
-      var bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format24bppRgb);
-      using (var g = Graphics.FromImage(bmp)) {
+    /** Chụp vùng màn hình vào ảnh có sẵn (không kèm con trỏ). */
+    public static void CopyScreen(Bitmap dst, Rectangle r) {
+      using (var g = Graphics.FromImage(dst)) {
         g.CopyFromScreen(r.Left, r.Top, 0, 0, r.Size);
+      }
+    }
 
-        // Lồng con trỏ chuột thật của Windows vào ảnh
+    /** Bản sao của khung có lồng con trỏ thật của Windows (đường JPEG / người xem chưa tự vẽ con trỏ). */
+    public static Bitmap WithCursor(Bitmap src, Rectangle r) {
+      var copy = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppRgb);
+      using (var g = Graphics.FromImage(copy)) {
+        g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+        g.DrawImageUnscaled(src, 0, 0);
         try {
           Native.CURSORINFO pci;
           pci.cbSize = Marshal.SizeOf(typeof(Native.CURSORINFO));
           if (Native.GetCursorInfo(out pci) && (pci.flags & Native.CURSOR_SHOWING) != 0) {
-            int cursorX = pci.ptScreenPos.x - r.Left;
-            int cursorY = pci.ptScreenPos.y - r.Top;
+            var hot = CursorTracker.Hotspot(pci.hCursor);
+            int cursorX = pci.ptScreenPos.x - hot.X - r.Left;
+            int cursorY = pci.ptScreenPos.y - hot.Y - r.Top;
             if (cursorX >= -32 && cursorX < r.Width && cursorY >= -32 && cursorY < r.Height) {
               IntPtr hdc = g.GetHdc();
               try {
@@ -222,14 +255,15 @@ namespace AivinDesktopCast {
           }
         } catch {}
       }
-      return bmp;
+      return copy;
     }
 
     public static Bitmap Scale(Bitmap src, int maxWidth) {
       if (src.Width <= maxWidth) return src;
       int h = (int)Math.Round(src.Height * (double)maxWidth / src.Width);
-      var dst = new Bitmap(maxWidth, h, PixelFormat.Format24bppRgb);
+      var dst = new Bitmap(maxWidth, h, PixelFormat.Format32bppRgb);
       using (var g = Graphics.FromImage(dst)) {
+        g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
         g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
         g.DrawImage(src, 0, 0, maxWidth, h);
       }
@@ -288,9 +322,29 @@ namespace AivinDesktopCast {
       for (int i = 0; i < a.Length; i++) s += Math.Abs(a[i] - b[i]);
       return (double)s / a.Length;
     }
+
+    /** Hai khung giống hệt từng điểm ảnh — ~0,3 ms ở 1080p, rẻ hơn tạo ảnh thu nhỏ. */
+    public static bool SameFrame(Bitmap a, Bitmap b) {
+      if (a == null || b == null || a.Width != b.Width || a.Height != b.Height) return false;
+      var rect = new Rectangle(0, 0, a.Width, a.Height);
+      var da = a.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+      try {
+        var db = b.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+        try {
+          return Native.memcmp(da.Scan0, db.Scan0, (UIntPtr)(ulong)((long)Math.Abs(da.Stride) * a.Height)) == 0;
+        } finally {
+          b.UnlockBits(db);
+        }
+      } finally {
+        a.UnlockBits(da);
+      }
+    }
   }
 
   public static class CastHost {
+    const long JPEG_SMALL_CHANGE_INTERVAL_MS = 200;
+    const double JPEG_BIG_CHANGE_DIFF = 4.5;
+    const int RATIO_SCALE = 65535;
     static volatile bool running = true;
     public static bool Running { get { return running; } }
     static volatile bool jpegEnabled = true;
@@ -298,6 +352,7 @@ namespace AivinDesktopCast {
     static bool rawEnabled = false;
     static volatile int currentMonitor = -1;
     static Rectangle currentBounds;
+    public static Rectangle CurrentBounds { get { return currentBounds; } }
     static int currentImageWidth = 0;
     static int currentImageHeight = 0;
     static volatile int targetMaxFps = 15;
@@ -306,6 +361,7 @@ namespace AivinDesktopCast {
 
     public static void Run(string argsJson) {
       Native.SetProcessDPIAware();
+      Native.timeBeginPeriod(1);
       var a = Out.Parse(argsJson);
       currentMonitor = a.ContainsKey("monitor") ? Convert.ToInt32(a["monitor"]) : -1;
       targetMaxFps = a.ContainsKey("max_fps") ? Convert.ToInt32(a["max_fps"]) : 15;
@@ -333,7 +389,12 @@ namespace AivinDesktopCast {
       Out.Send(readyMsg);
 
       var clock = System.Diagnostics.Stopwatch.StartNew();
-      byte[] lastThumb = null;
+      var source = new FrameSource();
+      var hostStats = new HostStats();
+      CursorTracker.Start();
+      byte[] lastJpegThumb = null;
+      bool changePending = false;
+      int lastCursorSeq = -1;
       long lastSendMs = 0;
 
       while (running) {
@@ -341,51 +402,32 @@ namespace AivinDesktopCast {
         long targetFrameInterval = 1000 / Math.Max(1, targetMaxFps);
         try {
           currentBounds = CastScreen.GetBounds(currentMonitor);
-          using (var rawBmp = CastScreen.Grab(currentBounds)) {
-            var thumb = CastScreen.Thumb(rawBmp);
-            double diff = CastScreen.Diff(thumb, lastThumb);
-            long nowMs = clock.ElapsedMilliseconds;
-            bool forceKeepAlive = (nowMs - lastSendMs) >= 1000;
-            bool refresh = refreshRequested;
-            if (refresh) refreshRequested = false;
+          if (source.Capture(currentBounds, (int)targetFrameInterval, frameStartMs)) {
+            changePending = true;
+            hostStats.OnChange(source.Frame, clock.ElapsedMilliseconds);
+          }
+          bool cursorInFrame = CursorTracker.DrawInFrame;
+          int cursorSeq = CursorTracker.Seq;
+          if (cursorInFrame && cursorSeq != lastCursorSeq) changePending = true;
+          long nowMs = clock.ElapsedMilliseconds;
+          bool forceKeepAlive = (nowMs - lastSendMs) >= 1000;
+          bool refresh = refreshRequested;
+          if (refresh) refreshRequested = false;
 
-            if (diff > 4.5 || forceKeepAlive || lastThumb == null || refresh) {
-              lastThumb = thumb;
-              lastSendMs = nowMs;
+          bool jpegMode = jpegEnabled || !rawEnabled;
+          bool sendChange = changePending;
+          if (sendChange && jpegMode && lastJpegThumb != null && (nowMs - lastSendMs) < JPEG_SMALL_CHANGE_INTERVAL_MS) {
+            sendChange = CastScreen.Diff(CastScreen.Thumb(source.Frame), lastJpegThumb) > JPEG_BIG_CHANGE_DIFF;
+          }
 
-              Bitmap scaled = null;
-              try {
-                Bitmap encodeBmp = rawBmp;
-                if (rawBmp.Width > targetMaxWidth) {
-                  scaled = CastScreen.Scale(rawBmp, targetMaxWidth);
-                  encodeBmp = scaled;
-                }
-                currentImageWidth = encodeBmp.Width;
-                currentImageHeight = encodeBmp.Height;
-                if (rawEnabled && RawPipe.Connected) {
-                  int rw, rh;
-                  byte[] i420 = CastScreen.ToI420(encodeBmp, out rw, out rh);
-                  RawPipe.Write(rw, rh, i420);
-                }
-                bool sendJpeg = jpegEnabled || !rawEnabled;
-                var frameMsg = Out.Msg(sendJpeg ? "frame" : "meta");
-                if (sendJpeg) frameMsg["image"] = Convert.ToBase64String(CastScreen.Jpeg(encodeBmp, targetQuality));
-                frameMsg["width"] = currentImageWidth;
-                frameMsg["height"] = currentImageHeight;
-                frameMsg["screenWidth"] = currentBounds.Width;
-                frameMsg["screenHeight"] = currentBounds.Height;
-                frameMsg["screenX"] = currentBounds.X;
-                frameMsg["screenY"] = currentBounds.Y;
-                frameMsg["monitor"] = currentMonitor;
-                frameMsg["screens"] = CastScreen.GetScreens();
-                frameMsg["ts"] = nowMs;
-                Out.Send(frameMsg);
-              } finally {
-                if (scaled != null && !object.ReferenceEquals(scaled, rawBmp)) {
-                  scaled.Dispose();
-                }
-              }
-            }
+          if (sendChange || forceKeepAlive || refresh) {
+            changePending = false;
+            lastSendMs = nowMs;
+            lastCursorSeq = cursorSeq;
+            if (jpegMode) lastJpegThumb = CastScreen.Thumb(source.Frame);
+            long sendStartMs = clock.ElapsedMilliseconds;
+            SendFrame(source.Frame, cursorInFrame, jpegMode, nowMs, hostStats);
+            hostStats.AddLoad(clock.ElapsedMilliseconds - sendStartMs);
           }
         } catch (Exception ex) {
           var warnMsg = Out.Msg("warn");
@@ -393,17 +435,53 @@ namespace AivinDesktopCast {
           Out.Send(warnMsg);
         }
 
-        long elapsed = clock.ElapsedMilliseconds - frameStartMs;
-        long sleepMs = targetFrameInterval - elapsed;
-        if (sleepMs > 5) {
-          Thread.Sleep((int)sleepMs);
-        } else {
-          Thread.Sleep(5);
-        }
+        long sleepMs = targetFrameInterval - (clock.ElapsedMilliseconds - frameStartMs);
+        if (sleepMs > 0) Thread.Sleep((int)sleepMs);
+        else if (!source.UsingDxgi) Thread.Sleep(1);
       }
+      source.Dispose();
 
       var stoppedMsg = Out.Msg("stopped");
       Out.Send(stoppedMsg);
+    }
+
+    static void SendFrame(Bitmap frame, bool cursorInFrame, bool jpegMode, long nowMs, HostStats hostStats) {
+      Bitmap withCursor = null;
+      Bitmap scaled = null;
+      try {
+        Bitmap encodeBmp = frame;
+        if (cursorInFrame) {
+          withCursor = CastScreen.WithCursor(frame, currentBounds);
+          encodeBmp = withCursor;
+        }
+        if (encodeBmp.Width > targetMaxWidth) {
+          scaled = CastScreen.Scale(encodeBmp, targetMaxWidth);
+          encodeBmp = scaled;
+        }
+        currentImageWidth = encodeBmp.Width;
+        currentImageHeight = encodeBmp.Height;
+        if (rawEnabled && RawPipe.Connected) {
+          int rw, rh;
+          byte[] i420 = CastScreen.ToI420(encodeBmp, out rw, out rh);
+          RawPipe.Write(rw, rh, i420);
+        }
+        var frameMsg = Out.Msg(jpegMode ? "frame" : "meta");
+        if (jpegMode) frameMsg["image"] = Convert.ToBase64String(CastScreen.Jpeg(encodeBmp, targetQuality));
+        frameMsg["width"] = currentImageWidth;
+        frameMsg["height"] = currentImageHeight;
+        frameMsg["screenWidth"] = currentBounds.Width;
+        frameMsg["screenHeight"] = currentBounds.Height;
+        frameMsg["screenX"] = currentBounds.X;
+        frameMsg["screenY"] = currentBounds.Y;
+        frameMsg["monitor"] = currentMonitor;
+        frameMsg["screens"] = CastScreen.GetScreens();
+        frameMsg["ts"] = nowMs;
+        frameMsg["stats"] = hostStats.Snapshot(nowMs);
+        Out.Send(frameMsg);
+      } finally {
+        if (scaled != null) scaled.Dispose();
+        if (withCursor != null) withCursor.Dispose();
+      }
     }
 
     static void ReadInputLoop() {
@@ -446,10 +524,18 @@ namespace AivinDesktopCast {
         }
         if (cmd.ContainsKey("max_width")) {
           int w = Convert.ToInt32(cmd["max_width"]);
-          if (w >= 640 && w <= 2560) targetMaxWidth = w;
+          if (w >= 640 && w <= 2560) {
+            // Đổi độ rộng lúc màn hình đứng yên: phải có khung mới ngay, không chờ nhịp giữ.
+            if (w != targetMaxWidth) refreshRequested = true;
+            targetMaxWidth = w;
+          }
         }
         if (cmd.ContainsKey("jpeg") && cmd["jpeg"] is bool) {
           jpegEnabled = (bool)cmd["jpeg"];
+          refreshRequested = true;
+        }
+        if (cmd.ContainsKey("cursor") && cmd["cursor"] is bool) {
+          CursorTracker.SetDrawInFrame((bool)cmd["cursor"]);
           refreshRequested = true;
         }
         if (cmd.ContainsKey("monitor")) {
@@ -558,7 +644,11 @@ namespace AivinDesktopCast {
 
         int targetX = currentBounds.X;
         int targetY = currentBounds.Y;
-        if (currentImageWidth > 0 && currentImageHeight > 0) {
+        if (cmd.ContainsKey("rx") && cmd.ContainsKey("ry")) {
+          // Toạ độ theo tỷ lệ: đúng cả khi độ rộng khung vừa đổi (chế độ Tự động) hoặc video bị hạ độ phân giải.
+          targetX += (int)Math.Round(Convert.ToDouble(cmd["rx"]) / RATIO_SCALE * (currentBounds.Width - 1));
+          targetY += (int)Math.Round(Convert.ToDouble(cmd["ry"]) / RATIO_SCALE * (currentBounds.Height - 1));
+        } else if (currentImageWidth > 0 && currentImageHeight > 0) {
           targetX += (int)Math.Round((rx / currentImageWidth) * currentBounds.Width);
           targetY += (int)Math.Round((ry / currentImageHeight) * currentBounds.Height);
         }
@@ -684,7 +774,7 @@ namespace AivinDesktopCast {
     }
   }
 }
-`;
+` + DESKTOP_CAST_CAPTURE_CSHARP;
 
 export const DESKTOP_CAST_PS1 = String.raw`
 $ErrorActionPreference = 'Stop'

@@ -1284,6 +1284,47 @@ aivin desktop                         # status
   just without an icon - connect it with `aivin remote start --code <code>` once.
 - Running `aivin remote enable` again replaces the scheduled task, Startup-folder script or older LaunchAgent / autostart entry made by
   older aivin versions.
+- **Open with AIVIN Bot** (Windows): install also adds "Open with AIVIN Bot" to the right-click menu (Windows 11: "Show more options")
+  and to "Open with" for `docx doc odt rtf xlsx xls xlsm ods csv pptx ppt odp pdf md txt` - see [`aivin open`](#aivin-open-files). Only
+  `HKCU\Software` is written (no admin). Windows doesn't let apps make themselves the default, so to open those files with a double-click
+  either pick Open with → AIVIN Bot → "Always", or run `aivin desktop defaults` to go straight to AIVIN Bot's page in Settings → Default
+  apps. For a whole company, `aivin desktop defaults --export-xml <file> [--all]` writes a file IT can push with the Group Policy "Set a
+  default associations configuration file" or Intune (`md txt csv` by default, `--all` adds Office formats). Installed before this
+  version? Run `aivin desktop install` again.
+
+## `aivin open <files...>`
+
+Opens files from this computer in your Aivin Drive: uploads each file to your personal workspace (or `--workspace <id>`) and opens it
+in the Aivin editor in your browser. The Drive copy is the one you work on from then on:
+
+- the **same content** opened again reopens the same Drive file (with whatever you changed there) - matched by sha256 in
+  `~/.aivin/opened-files.json`;
+- a file that **changed on this computer** is uploaded as a new Drive file - the earlier Drive copy is never overwritten.
+
+```bash
+aivin open contract.docx report.pdf
+aivin open budget.xlsx --workspace <id>
+aivin open notes.md --tab          # a normal browser tab instead of its own window
+aivin open notes.md --print        # print the Drive link instead of opening anything
+```
+
+Files open in their own window (no address bar or tabs) when your default browser is Chromium-based (Edge, Chrome, Brave), since that is
+where your Aivin sign-in lives. With any other default browser they open in a normal tab.
+
+**Not signed in (or the saved key was revoked): view only.** Nothing is uploaded to your Drive. `aivin open` serves a read-only page from
+this computer (`127.0.0.1`, random path) and keeps running until you close that window:
+
+- `.pdf`, `.md`, `.txt`, `.csv` are shown straight from this computer.
+- Office files (`docx doc odt rtf xlsx xls xlsm ods pptx ppt odp`) are converted to PDF by the Aivin server, which does not keep the
+  file. The page asks first; "Don't ask again on this computer" is saved in `~/.aivin/open-settings.json`. Servers that turned this off
+  answer "sign in to open it". The PDF is kept on this computer in `~/.aivin/preview-cache/` (by file content, up to 500 MB, unused
+  copies removed after 30 days), so opening the same unchanged file again shows it at once without sending anything.
+- **Sign in to edit and use AI** runs the browser sign-in of `aivin login`, uploads the file to your Drive and switches the same window to
+  the editor.
+
+Opened from Explorer, `Aivin.exe --open "<file>"` runs this command hidden (no console window) and shows a system notification while it
+uploads, or when it fails (e.g. not signed in - run `aivin login`). Needs a server that accepts CLI API keys on Drive upload (Aivin
+backend from 04/11/2026).
 
 ## `aivin update`
 

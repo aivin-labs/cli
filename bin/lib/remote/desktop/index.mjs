@@ -8,6 +8,7 @@ import { lockHolder } from '../daemonLock.mjs';
 import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
 import { TRAY_CS } from './traySource.mjs';
 import { trayStrings } from './strings.mjs';
+import { registerFileAssociations, unregisterFileAssociations } from './fileAssociation.mjs';
 import { currentCliVersion } from '../../selfUpdate.mjs';
 
 /**
@@ -287,10 +288,20 @@ export function installDesktop({ argv, rollback = null, lang = 'en', autostart =
   for (const p of legacyStartMenuShortcutPaths()) fs.rmSync(p, { force: true });
   if (built || !fs.existsSync(lnk)) ensureStartMenuShortcut({ exe, lnk, lang });
   if (autostart) registerStartup(exe);
+  const openWith = registerOpenWith(exe, lang);
   if (launch && built) quitRunningTray({ exe });
   else if (launch) restartListener();
   if (launch) launchTray({ exe, mode: launchMode });
-  return { exe, shortcut: lnk, built, autostart: startupState().enabled };
+  return { exe, shortcut: lnk, built, autostart: startupState().enabled, openWith };
+}
+
+/** "Mở bằng AIVIN Bot" (fileAssociation.mjs) — lỗi registry không làm hỏng cả bước cài. */
+function registerOpenWith(exe, lang) {
+  try {
+    return registerFileAssociations({ exe, lang });
+  } catch (e) {
+    return { registered: false, error: String(e?.message || e).trim() };
+  }
 }
 
 /** Gỡ: đóng khay (dừng daemon nó đang giữ), xoá mục khởi động, lối tắt, Aivin.exe, desktop\. */
@@ -300,6 +311,7 @@ export function uninstallDesktop({ wait = sleepSync } = {}) {
     try { execFileSync(exe, ['--quit'], { stdio: 'ignore', windowsHide: true, timeout: 10_000 }); } catch { /* không chạy */ }
   }
   unregisterStartup();
+  unregisterFileAssociations();
   fs.rmSync(startMenuShortcutPath(), { force: true });
   for (const p of legacyStartMenuShortcutPaths()) fs.rmSync(p, { force: true });
   for (let i = 0; i < 20 && fs.existsSync(exe); i++) {

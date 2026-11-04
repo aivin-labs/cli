@@ -11,9 +11,10 @@ import { createWebRtcRuntimeLoader } from './webrtcRuntime.mjs';
  * thoát của daemon (trình giữ chạy / tự lùi bản dựa vào mã đó), và lỗi native giữa phiên chỉ làm mất WebRTC (lùi JPEG), không mất daemon.
  *
  * Giao thức: mỗi dòng stdin / stdout một JSON.
- * daemon → con: `start {sessionId, viewerId, iceServers}` · `signal {msg}` · `push {frame}` · `pipe {name}` · `close {viewerId}` · `closeAll`
+ * daemon → con: `start {sessionId, viewerId, iceServers, videoBitrate}` ·`signal {msg}` · `push {frame}` · `pipe {name}` · `close {viewerId}` · `closeAll`
+ * daemon → con (con trỏ): `cursor {cursor}` · `cursorShape {shape}`
  * con → daemon: `started {viewerId, ok}` · `signal {payload}` · `status {payload}` · `input {raw, viewerId}` · `peerReady {viewerId}` ·
- * `state {needsFallback, needsJpeg, hasVideo, videoLive}` · `log {text}`
+ * `state {needsFallback, needsJpeg, hasVideo, videoLive, localCursor}` · `log {text}`
  * Khung thô I420 không đi qua daemon: con tự nối named pipe của tiến trình quay.
  */
 
@@ -27,7 +28,7 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
   let rtc;
   const sendState = () => {
     const state = {
-      needsFallback: rtc.needsFallback(), needsJpeg: rtc.needsJpeg(), hasVideo: rtc.hasVideo(), videoLive: Date.now() - lastRawAt < VIDEO_LIVE_MS,
+      needsFallback: rtc.needsFallback(), needsJpeg: rtc.needsJpeg(), hasVideo: rtc.hasVideo(), videoLive: Date.now() - lastRawAt < VIDEO_LIVE_MS, localCursor: rtc.localCursor(),
     };
     const key = JSON.stringify(state);
     if (key !== lastState) { lastState = key; send({ t: 'state', ...state }); }
@@ -37,6 +38,7 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
     emitStatus: (payload) => { send({ t: 'status', payload }); sendState(); },
     onInput: (raw, viewerId) => send({ t: 'input', raw, viewerId }),
     onPeerReady: (viewerId) => { send({ t: 'peerReady', viewerId }); sendState(); },
+    onCursorMode: () => sendState(),
     loadRuntime: createWebRtcRuntimeLoader({ log: (text) => send({ t: 'log', text }) }),
   });
 
@@ -61,12 +63,14 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
 
   const handlers = {
     start: async (m) => {
-      const ok = await rtc.start({ sessionId: m.sessionId, viewerId: m.viewerId, iceServers: m.iceServers || [] }).catch(() => false);
+      const ok = await rtc.start({ sessionId: m.sessionId, viewerId: m.viewerId, iceServers: m.iceServers || [], videoBitrate: m.videoBitrate || null }).catch(() => false);
       send({ t: 'started', viewerId: m.viewerId, ok });
       sendState();
     },
     signal: (m) => rtc.signal(m.msg).catch(() => false),
     push: (m) => rtc.push(m.frame),
+    cursor: (m) => rtc.pushCursor(m.cursor),
+    cursorShape: (m) => rtc.pushCursorShape(m.shape),
     pipe: (m) => { if (m.name) connectPipe(String(m.name)); },
     close: (m) => { rtc.close(m.viewerId); sendState(); },
     closeAll: () => { rtc.closeAll(); const sock = pipeSocket; pipeSocket = null; pipeName = ''; sock?.destroy(); sendState(); },
@@ -89,10 +93,11 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
  * và `videoLive`. Tiến trình con dựng khi phiên đầu cần, tắt khi `closeAll`; con chết giữa phiên → coi như không ai có WebRTC (lùi JPEG).
  */
 export function createDesktopWebRtcWorker({
-  command, emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onPeerReady = () => {}, log = () => {}, spawnImpl = spawn,
+  command, emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onPeerReady = () => {}, onState = () => {}, log = () => {}, spawnImpl = spawn,
 } = {}) {
   let child = null;
-  let state = { needsFallback: true, needsJpeg: true, hasVideo: false, videoLive: false };
+  const NO_PEER_STATE = { needsFallback: true, needsJpeg: true, hasVideo: false, videoLive: false, localCursor: false };
+  let state = NO_PEER_STATE;
   const waiting = new Map();
   const peers = new Set();
 
@@ -108,14 +113,18 @@ export function createDesktopWebRtcWorker({
       else if (m.t === 'status') emitStatus(m.payload);
       else if (m.t === 'input') onInput(m.raw, m.viewerId);
       else if (m.t === 'peerReady') onPeerReady(m.viewerId);
-      else if (m.t === 'state') state = { needsFallback: !!m.needsFallback, needsJpeg: !!m.needsJpeg, hasVideo: !!m.hasVideo, videoLive: !!m.videoLive };
+      else if (m.t === 'state') {
+        state = { needsFallback: !!m.needsFallback, needsJpeg: !!m.needsJpeg, hasVideo: !!m.hasVideo, videoLive: !!m.videoLive, localCursor: !!m.localCursor };
+        onState();
+      }
       else if (m.t === 'log') log(String(m.text || ''));
       else if (m.t === 'started') { waiting.get(m.viewerId)?.(!!m.ok); waiting.delete(m.viewerId); }
     });
     const gone = () => {
       if (child !== proc) return;
       child = null;
-      state = { needsFallback: true, needsJpeg: true, hasVideo: false, videoLive: false };
+      state = NO_PEER_STATE;
+      onState();
       for (const done of waiting.values()) done(false);
       waiting.clear();
       peers.clear();
@@ -130,14 +139,14 @@ export function createDesktopWebRtcWorker({
     try { child.stdin.write(JSON.stringify(msg) + '\n'); } catch { /* con vừa chết */ }
   };
 
-  function start({ sessionId, viewerId, iceServers = [] }) {
+  function start({ sessionId, viewerId, iceServers = [], videoBitrate = null }) {
     ensure();
     peers.add(viewerId);
     return new Promise((resolve) => {
       const timer = setTimeout(() => { waiting.delete(viewerId); resolve(false); }, 30_000);
       timer.unref?.();
       waiting.set(viewerId, (ok) => { clearTimeout(timer); resolve(ok); });
-      send({ t: 'start', sessionId, viewerId, iceServers });
+      send({ t: 'start', sessionId, viewerId, iceServers, videoBitrate });
     });
   }
 
@@ -150,13 +159,16 @@ export function createDesktopWebRtcWorker({
     // Con tự thoát khi stdin đóng; kẹt thì giết.
     setTimeout(() => { try { proc.kill(); } catch { /* đã thoát */ } }, 3000).unref?.();
     child = null;
-    state = { needsFallback: true, needsJpeg: true, hasVideo: false, videoLive: false };
+    state = NO_PEER_STATE;
   }
 
   return {
     start,
     signal: async (msg) => { send({ t: 'signal', msg }); return true; },
     push: (frame) => { if (child && peers.size) send({ t: 'push', frame }); },
+    pushCursor: (cursor) => { if (child && peers.size) send({ t: 'cursor', cursor }); },
+    // Hình gửi cả khi chưa có người xem: bộ quay chỉ gửi mỗi hình một lần, tiến trình con giữ lại cho người xem sau.
+    pushCursorShape: (shape) => { if (child) send({ t: 'cursorShape', shape }); },
     attachPipe: (name) => { if (name) send({ t: 'pipe', name }); },
     close: (viewerId) => { peers.delete(viewerId); send({ t: 'close', viewerId }); },
     closeAll,
@@ -164,5 +176,6 @@ export function createDesktopWebRtcWorker({
     needsJpeg: () => state.needsJpeg,
     hasVideo: () => state.hasVideo,
     videoLive: () => state.videoLive,
+    localCursor: () => state.localCursor,
   };
 }
