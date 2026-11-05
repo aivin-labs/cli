@@ -153,6 +153,16 @@ test('câu chọn nhiều: nút báo multiple + icon của mục; xác nhận c�
   assert.equal(single.socket.emitted.length, 0);
 });
 
+test('nút lựa chọn / nút link vừa ô hỏi cả khi có thanh cuộn: icon ở mép phải không bị cắt', async () => {
+  const { CHOICE_ROW_WIDTH } = await import('../bin/lib/remote/mascot/askHostSource.mjs');
+  const widthWithScrollbar = 207;
+  const buttonPadding = 20;
+  assert.ok(CHOICE_ROW_WIDTH + buttonPadding <= widthWithScrollbar);
+  const ps = hostScript();
+  assert.ok(ps.includes(`$row.Width = ${CHOICE_ROW_WIDTH}`));
+  assert.ok(ps.includes(`$dock.MaxWidth = ${CHOICE_ROW_WIDTH}`));
+});
+
 test('cửa sổ có hàng nút lựa chọn + lệnh ask_choices, bấm nút gửi sự kiện choose', () => {
   assert.match(MASCOT_XAML, /x:Name="Choices"/);
   const ps = hostScript();
