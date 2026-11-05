@@ -1,9 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { execFileSync, execSync } from 'child_process';
+import { execSync } from 'child_process';
 import { RELEASE_PUBLIC_KEYS } from '../bin/lib/releaseKeys.mjs';
 import { verifyReleaseSignature } from '../bin/lib/selfUpdate.mjs';
+import { runTool, waitForCiBuild } from './release-ci.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(root);
@@ -13,14 +14,12 @@ let pkg = readPkg();
 let version = `v${pkg.version}`;
 const REPO = process.env.AIVIN_CLI_REPO || 'aivin-labs/cli';
 const RELEASE_BRANCH = 'main';
-const CI_TIMEOUT_MS = 20 * 60_000;
-const CI_POLL_MS = 15_000;
 const SHIPPED = ['bin', 'docs', 'README.md', 'package.json', 'LICENSE'];
 const dist = path.join(root, 'dist');
 const site = path.join(root, 'deploy', 'get', 'site');
 // Khong qua shell: cmd.exe nuot ky tu ^ trong `tag^{commit}` (tag co that van bi bao "chua co tag").
-const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-const gh = (...args) => execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+const git = (...args) => runTool('git', args);
+const gh = (...args) => runTool('gh', args);
 const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
 const hasTag = (tag) => { try { git('rev-parse', '--verify', `${tag}^{commit}`); return true; } catch { return false; } };
 
@@ -66,22 +65,6 @@ function ensureTaggedRelease() {
   }
 }
 
-/** Cho CI cua tag build xong. CI do -> dung, khong ky gi. Chay lai publish.bat sau khi sua (tag da co, khong tang them). */
-async function waitForCiBuild(tag) {
-  const deadline = Date.now() + CI_TIMEOUT_MS;
-  let announced = false;
-  while (Date.now() < deadline) {
-    let run = null;
-    try { [run] = JSON.parse(gh('run', 'list', '--repo', REPO, '--branch', tag, '--limit', '1', '--json', 'status,conclusion,url')); } catch { /* mang chap chon - thu lai */ }
-    if (run?.status === 'completed') {
-      if (run.conclusion !== 'success') throw new Error(`CI cua ${tag} that bai (${run.conclusion}): ${run.url}`);
-      return;
-    }
-    if (!announced) { console.log(`Dang cho CI build ${tag} (thuong ~3 phut)...`); announced = true; }
-    await sleep(CI_POLL_MS);
-  }
-  throw new Error(`Qua ${CI_TIMEOUT_MS / 60_000} phut CI chua xong ${tag} - xem \`gh run list --repo ${REPO}\`, roi chay lai publish.bat.`);
-}
 const read = (file) => { try { return fs.readFileSync(file, 'utf8').trim(); } catch { return ''; } };
 
 /** Đăng nhập npm trước khi đụng tới deploy; nếu chưa có phiên thì mở luồng login tương tác. */
@@ -118,7 +101,8 @@ try {
   // Buoc 1: ban build trong dist phai dung la cua tag nay (dist/ cua ban cu khong bao gio duoc ky thanh ban moi)
   console.log(`\n[1/4] Kiem tra ban build cho ${version}...`);
   if (read(path.join(dist, 'RELEASE_TAG')) !== version || !fs.existsSync(path.join(dist, 'SHA256SUMS'))) {
-    await waitForCiBuild(version);
+    // CI do -> dung, khong ky gi; loi kem tom tat log.
+    await waitForCiBuild(version, { repo: REPO, gh, sleep });
     console.log(`dist/ khong phai ban build ${version} - dang tai tu GitHub Release ${version}...`);
     execSync(`node scripts/release-fetch.mjs ${version}`, { stdio: 'inherit' });
   } else {
