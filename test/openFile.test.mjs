@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import { appWindowCommand, driveOpenUrl, fileSha256, indexKey, openText, readOpenIndex, writeOpenIndex, OpenFileError, OpenFileFailure } from '../bin/lib/openFile.mjs';
-import { DEFAULT_APPS_URI, associationRegCommands, associationStamp, defaultAssociationsXml, openCommand, shareCommand, workHereCommand, unregisterFileAssociations, OPEN_WITH_PROGID } from '../bin/lib/remote/desktop/fileAssociation.mjs';
+import { DEFAULT_APPS_URI, associationRegCommands, associationStamp, defaultAssociationsXml, ensureUninstallEntry, openCommand, shareCommand, uninstallEntryCommands, unregisterUninstallEntry, workHereCommand, unregisterFileAssociations, OPEN_WITH_PROGID } from '../bin/lib/remote/desktop/fileAssociation.mjs';
 import { launcherSource } from '../bin/lib/remote/desktop/index.mjs';
 
 test('driveOpenUrl dùng deep-link open_file của FE, bỏ / thừa ở cuối web url', () => {
@@ -86,6 +86,40 @@ test('"Làm việc ở đây với AIVIN Bot": có trong menu nền thư mục v
   const src = launcherSource('C:\\h');
   assert.ok(src.indexOf('"--workdir"') > 0 && src.indexOf('"--workdir"') < src.indexOf('new Mutex'));
   assert.match(src, /p\[1\] == ':'/);
+});
+
+test('Programs & Features: mục HKCU trỏ Aivin.exe --uninstall, Aivin.exe nhận cờ trước mutex (05/11/2026)', () => {
+  const cmds = uninstallEntryCommands({ exe: 'C:\\A\\Aivin.exe', version: '1.0.25', location: 'C:\\A' });
+  const flat = cmds.map((c) => c.join(' '));
+  assert.ok(cmds.every((c) => c[1] === 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AivinBot'));
+  assert.ok(flat.some((l) => l.includes('DisplayName') && l.includes('AIVIN Bot')));
+  assert.ok(flat.some((l) => l.includes('UninstallString') && l.includes('"C:\\A\\Aivin.exe" --uninstall')));
+  const src = launcherSource('C:\\h');
+  assert.ok(src.indexOf('"--uninstall"') > 0 && src.indexOf('"--uninstall"') < src.indexOf('new Mutex'));
+  assert.match(src, /uninstall --yes/);
+  assert.match(src, /MessageBoxDefaultButton\.Button2/, 'mặc định không xoá dữ liệu');
+});
+
+test('Programs & Features trên khoá thử: ghi khi thiếu / đổi bản, không ghi lại khi không đổi, xoá sạch', { skip: process.platform !== 'win32' }, () => {
+  const root = `HKCU\\Software\\AivinUninstallTest${process.pid}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-uninst-'));
+  const stampFile = path.join(dir, 'u.sha');
+  const opts = { exe: 'C:\\Tên Có Dấu\\Aivin.exe', location: 'C:\\Tên Có Dấu', stampFile, root };
+  const key = `${root}\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AivinBot`;
+  const query = () => execFileSync('reg', ['query', key], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    assert.equal(ensureUninstallEntry({ ...opts, version: '1.0.25' }), true);
+    assert.match(query(), /--uninstall/);
+    assert.match(query(), /NoRepair\s+REG_DWORD\s+0x1/);
+    assert.equal(ensureUninstallEntry({ ...opts, version: '1.0.25' }), false);
+    assert.equal(ensureUninstallEntry({ ...opts, version: '1.0.26' }), true);
+    assert.match(query(), /1\.0\.26/);
+    unregisterUninstallEntry({ root });
+    assert.throws(query);
+    assert.equal(ensureUninstallEntry({ ...opts, version: '1.0.26' }), true, 'bị xoá thì ghi lại');
+  } finally {
+    try { execFileSync('reg', ['delete', root, '/f'], { stdio: 'ignore', windowsHide: true }); } catch { /* đã xoá */ }
+  }
 });
 
 test('dấu bộ khoá đổi khi đổi ngôn ngữ / chỗ Aivin.exe → daemon biết phải ghi lại', () => {

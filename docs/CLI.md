@@ -1301,6 +1301,22 @@ aivin desktop                         # status
   starts, it rebuilds `Aivin.exe` if its code changed, rewrites the registry entries if they changed or were removed, and adds the
   Send to shortcut if it's missing.
 
+## `aivin uninstall` (Windows)
+
+Removes Aivin from this computer: the app and everything `aivin desktop uninstall` removes, the `aivin` command and its PATH entry, and this
+computer's connection to your account (device token, sign-in key). `aivin desktop install` also adds **AIVIN Bot** to Programs & Features and
+Settings → Apps, and uninstalling there does the same thing after asking whether to delete your data.
+
+```bash
+aivin uninstall                # asks first
+aivin uninstall --yes          # keeps your data in .aivin
+aivin uninstall --yes --delete-data
+```
+
+Your data in `.aivin` (the bot's memory, file copies kept for undo, browser sign-ins, logs) stays unless you choose to delete it; deleting cannot
+be undone. If you weren't signed in on this computer or the server can't be reached, the computer stays listed on your account as offline, with no
+token left here; revoke it in Aivin if you want it gone. An install from npm keeps the command: run `npm rm -g @aivin-labs/cli`.
+
 ## `aivin share <paths...>`
 
 Attaches files or folders to the AIVIN Bot chat box on this computer, the same as dropping them on the mascot. Type your question and

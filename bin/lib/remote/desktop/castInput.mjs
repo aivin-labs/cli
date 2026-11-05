@@ -69,16 +69,26 @@ export function createCastInputGate({ isPaused = () => false, isAiBusy = () => f
   let lastHumanAt = null;
   let accepted = 0;
   let window = { start: 0, count: 0 };
+  /** Nút chuột người xem đang giữ trên máy: gói nhả của chúng luôn được qua cổng, không thì nút kẹt xuống tới hết phiên. */
+  const heldButtons = new Set();
   const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
 
   function accept(raw) {
-    if (isPaused()) return { ok: false, reason: CastInputRejection.PAUSED };
-    if (isAiBusy()) return { ok: false, reason: CastInputRejection.AI_ACTIVE };
+    const releasing = raw?.action === 'mouseup' && heldButtons.has(Number(raw.button) || 0);
+    const blocked = isPaused() ? CastInputRejection.PAUSED : isAiBusy() ? CastInputRejection.AI_ACTIVE : null;
+    if (blocked && !releasing) return { ok: false, reason: blocked };
     const t = now();
     if (t - window.start >= 1000) window = { start: t, count: 0 };
-    if (++window.count > maxPerSec) return { ok: false, reason: CastInputRejection.RATE_LIMITED };
+    if (++window.count > maxPerSec && !releasing) return { ok: false, reason: CastInputRejection.RATE_LIMITED };
     const cmd = sanitizeCastInput(raw);
     if (!cmd) return { ok: false, reason: CastInputRejection.INVALID };
+    if (cmd.action === 'mousedown') heldButtons.add(cmd.button ?? 0);
+    if (cmd.action === 'mouseup') heldButtons.delete(cmd.button ?? 0);
+    if (blocked) {
+      // Chỉ nhả nút, không kéo con trỏ khỏi chỗ AI đang bấm; không tính là người đang thao tác.
+      const { x: _x, y: _y, rx: _rx, ry: _ry, ...release } = cmd;
+      return { ok: true, cmd: release };
+    }
     lastHumanAt = t;
     accepted++;
     return { ok: true, cmd };
@@ -94,5 +104,8 @@ export function createCastInputGate({ isPaused = () => false, isAiBusy = () => f
   /** Số thao tác đã nhận từ lần gọi trước (nhật ký phiên trên máy) — đọc xong đặt lại 0. */
   function takeAcceptedCount() { const n = accepted; accepted = 0; return n; }
 
-  return { accept, waitHumanIdle, takeAcceptedCount, lastHumanInputAt: () => lastHumanAt };
+  /** Máy vừa nhả hết nút (`release_all`): AI sắp bấm hoặc người xem đã rời. Trả có đang giữ nút nào không để nơi gọi biết cần gửi lệnh nhả. */
+  function takeHeldInput() { const had = heldButtons.size > 0; heldButtons.clear(); return had; }
+
+  return { accept, waitHumanIdle, takeAcceptedCount, takeHeldInput, lastHumanInputAt: () => lastHumanAt };
 }

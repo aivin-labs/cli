@@ -8,7 +8,7 @@ import { lockHolder } from '../daemonLock.mjs';
 import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
 import { TRAY_CS } from './traySource.mjs';
 import { trayStrings } from './strings.mjs';
-import { associationStamp, ensureFileAssociations, registerFileAssociations, unregisterFileAssociations } from './fileAssociation.mjs';
+import { associationStamp, ensureFileAssociations, ensureUninstallEntry, registerFileAssociations, registerUninstallEntry, unregisterFileAssociations, unregisterUninstallEntry } from './fileAssociation.mjs';
 import { currentCliVersion } from '../../selfUpdate.mjs';
 
 /**
@@ -241,6 +241,16 @@ export function ensureSendToShortcut({ exe = launcherExePath(), lnk = sendToShor
 }
 
 const ASSOCIATION_STAMP_FILE = path.join(DESKTOP_DIR, 'associations.sha');
+const UNINSTALL_STAMP_FILE = path.join(DESKTOP_DIR, 'uninstall.sha');
+
+const uninstallEntryOptions = (exe) => ({ exe, version: String(currentCliVersion()).replace(/^v/, ''), location: path.dirname(exe) });
+
+/** Giữ các dòng khác của launch.cfg (lệnh daemon, tự lùi bản), chỉ thay chữ `s.*` — bản mới có thêm chữ mà khay đọc. Trả true khi có đổi. */
+export function refreshLaunchStrings(text, lang, platform = 'win32') {
+  const keep = String(text).split(/\r?\n/).filter((l) => l && !l.startsWith('s.'));
+  const strings = Object.entries(trayStrings(lang, platform)).map(([k, v]) => `s.${k}=${String(v).replace(/[\r\n]+/g, ' ')}`);
+  return [...keep, ...strings].join('\r\n') + '\r\n';
+}
 
 /**
  * Daemon khởi động trên Windows (sau mỗi lần tự cập nhật): máy đã cài ứng dụng Aivin thì bắt kịp bản đang chạy mà không cần
@@ -254,6 +264,10 @@ export function refreshDesktopIntegration({ lang = 'en' } = {}) {
   if (built) done.push('launcher');
   if (ensureFileAssociations({ exe, lang, stampFile: ASSOCIATION_STAMP_FILE })) done.push('associations');
   if (built || !fs.existsSync(sendToShortcutPath())) { ensureSendToShortcut({ exe, lang }); done.push('send_to'); }
+  if (ensureUninstallEntry({ ...uninstallEntryOptions(exe), stampFile: UNINSTALL_STAMP_FILE })) done.push('uninstall_entry');
+  const cfg = fs.readFileSync(LAUNCH_CONFIG_FILE, 'utf8');
+  const nextCfg = refreshLaunchStrings(cfg, lang);
+  if (nextCfg !== cfg) { fs.writeFileSync(LAUNCH_CONFIG_FILE, nextCfg); done.push('menu_text'); }
   return done;
 }
 
@@ -333,6 +347,7 @@ function registerOpenWith(exe, lang) {
     res = { registered: false, error: String(e?.message || e).trim() };
   }
   try { ensureSendToShortcut({ exe, lang }); res.sendTo = true; } catch { res.sendTo = false; }
+  try { registerUninstallEntry(uninstallEntryOptions(exe)); res.uninstallEntry = true; } catch { res.uninstallEntry = false; }
   return res;
 }
 
@@ -344,6 +359,7 @@ export function uninstallDesktop({ wait = sleepSync } = {}) {
   }
   unregisterStartup();
   unregisterFileAssociations();
+  unregisterUninstallEntry();
   fs.rmSync(startMenuShortcutPath(), { force: true });
   fs.rmSync(sendToShortcutPath(), { force: true });
   for (const p of legacyStartMenuShortcutPaths()) fs.rmSync(p, { force: true });

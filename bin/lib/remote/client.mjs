@@ -46,6 +46,7 @@ import { createAutoUpdater } from './autoUpdate.mjs';
 import { createDesktopCastManager } from './desktop/desktopCast.mjs';
 import { createDesktopWebRtcWorker } from './desktop/webrtcWorker.mjs';
 import { CastInputRejection, createCastInputGate } from './desktop/castInput.mjs';
+import { createCastFileDrop, FileDropReason, revealInExplorer } from './desktop/castFileDrop.mjs';
 import {
   BootAction, MAX_BOOTS_BEFORE_ROLLBACK, RESTART_EXIT_CODE, UPDATE_CONFIRM_AFTER_MS, UPDATE_ROLLED_BACK, checkBootAfterUpdate, cleanupRetired, clearStaleInstalledMarker,
   confirmUpdate, ingestSupervisorRollback, isStandaloneBinary, noteCleanExit, updateProfile,
@@ -444,12 +445,26 @@ export async function startRemoteClient(options = {}) {
     castBlockedNoticeAt = Date.now();
     emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.INPUT_BLOCKED, reason: res.reason });
   };
+  /** AI sắp bấm / người xem rời giữa lúc đang kéo: nhả nút + phím bổ trợ trên máy, gói nhả của người xem có thể không bao giờ tới. */
+  const releaseCastInput = () => { if (castGate.takeHeldInput()) desktopCast.sendInput({ action: 'release_all' }); };
+  const castFileDrop = createCastFileDrop({
+    reply: (viewerId, msg) => desktopWebRtc.replyFile(viewerId, msg),
+    checkAllowed: () => (isRemotePaused() ? FileDropReason.PAUSED : aiGuiBusy > 0 ? FileDropReason.AI_ACTIVE : null),
+    onSaved: ({ path: file, name, bytes, reveal }) => {
+      say(chalk.cyan(`  📥 Đã nhận tệp từ web: ${file}`));
+      logActivity({ type: 'desktop_cast_file', id: desktopCast.sessionId(), name, bytes });
+      // Không mở cửa sổ đè lên giữa lúc AI đang bấm.
+      if (reveal && aiGuiBusy === 0) revealInExplorer(file);
+    },
+  });
   // WebRTC chạy ở tiến trình con (thư viện native sập lúc thoát — xem webrtcWorker.mjs), daemon chỉ chuyển tín hiệu / thao tác / JPEG.
   const desktopWebRtc = createDesktopWebRtcWorker({
     command: cliLaunchCommand(),
     emitSignal: (payload) => { if (socket?.connected) socket.emit(DeviceEvent.DESKTOP_CAST_SIGNAL, payload); },
     emitStatus: emitCastStatus,
     onInput: (raw, viewerId) => applyRemoteInput(raw, viewerId),
+    onFile: (viewerId, msg, sessionId) => { if (sessionId === desktopCast.sessionId()) castFileDrop.message(viewerId, msg); },
+    onFileChunk: (viewerId, bytes) => castFileDrop.chunk(viewerId, bytes),
     // Người xem vừa nối: gửi ngay một khung (màn hình đứng yên thì bộ quay không tự gửi).
     onPeerReady: () => desktopCast.refresh(),
     onState: () => syncCastJpeg(),
@@ -468,6 +483,8 @@ export async function startRemoteClient(options = {}) {
   const stopDesktopCast = (reason, notify = true) => {
     const sessionId = desktopCast.sessionId();
     desktopWebRtc.closeAll();
+    void castFileDrop.closeAll();
+    castGate.takeHeldInput(); // Tiến trình điều khiển tự nhả khi dừng.
     if (!desktopCast.isActive()) return;
     desktopCast.stop();
     // Nhật ký trên máy của chủ máy: phiên xem + số thao tác đã nhận (cả qua WebRTC, không qua máy chủ).
@@ -817,6 +834,7 @@ export async function startRemoteClient(options = {}) {
       if (guiWrite) {
         // Người đang điều khiển từ web → AI chờ người thôi tay (tối đa 3 s) rồi mới bấm; trong lúc AI bấm, thao tác từ web bị bỏ.
         await castGate.waitHumanIdle();
+        releaseCastInput();
         aiGuiBusy++;
       }
       ({ tool, outcome } = await runOnce(call, streamer));
@@ -1011,7 +1029,11 @@ export async function startRemoteClient(options = {}) {
   }));
   socket.on(DeviceEvent.DESKTOP_CAST_STOP, guarded(DeviceEvent.DESKTOP_CAST_STOP, (payload) => {
     if (payload?.session_id && payload.session_id !== desktopCast.sessionId()) return;
-    if (payload?.viewer_id) desktopWebRtc.close(payload.viewer_id);
+    if (payload?.viewer_id) {
+      desktopWebRtc.close(payload.viewer_id);
+      void castFileDrop.close(payload.viewer_id);
+      releaseCastInput();
+    }
     if (payload?.final !== false) stopDesktopCast('server', false);
   }));
   socket.on(DeviceEvent.DESKTOP_CAST_INPUT, guarded(DeviceEvent.DESKTOP_CAST_INPUT, (payload) => applyRemoteInput(payload)));

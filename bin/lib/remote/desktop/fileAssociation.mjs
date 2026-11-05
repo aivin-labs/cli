@@ -109,6 +109,47 @@ export function associationRegCommands({ exe, lang = 'en', extensions = OPEN_WIT
   return cmds;
 }
 
+/** Mục trong Programs & Features / Settings → Apps: chỉ HKCU, không cần admin. Gỡ = `Aivin.exe --uninstall` (hỏi chủ máy rồi gọi `aivin uninstall`). */
+export const UNINSTALL_ENTRY = 'AivinBot';
+
+export function uninstallEntryCommands({ exe, version = '', location = '', root = HKCU_SOFTWARE }) {
+  const key = `${root}\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${UNINSTALL_ENTRY}`;
+  return [
+    ['add', key, '/v', 'DisplayName', '/d', REGISTERED_APP_NAME, '/f'],
+    ['add', key, '/v', 'Publisher', '/d', 'Aivin Labs', '/f'],
+    ['add', key, '/v', 'DisplayVersion', '/d', version, '/f'],
+    ['add', key, '/v', 'DisplayIcon', '/d', `"${exe}",0`, '/f'],
+    ['add', key, '/v', 'InstallLocation', '/d', location, '/f'],
+    ['add', key, '/v', 'UninstallString', '/d', `"${exe}" --uninstall`, '/f'],
+    ['add', key, '/v', 'NoModify', '/t', 'REG_DWORD', '/d', '1', '/f'],
+    ['add', key, '/v', 'NoRepair', '/t', 'REG_DWORD', '/d', '1', '/f'],
+  ];
+}
+
+export function registerUninstallEntry(options) {
+  if (process.platform !== 'win32') return;
+  for (const args of uninstallEntryCommands(options)) reg(args);
+}
+
+/** Ghi lại khi phiên bản / chỗ Aivin.exe đổi, hoặc mục bị xoá. Trả true khi vừa ghi. */
+export function ensureUninstallEntry({ stampFile, root = HKCU_SOFTWARE, ...options }) {
+  if (process.platform !== 'win32') return false;
+  const stamp = createHash('sha256').update(JSON.stringify(uninstallEntryCommands({ ...options, root }))).digest('hex');
+  let saved = null;
+  try { saved = fs.readFileSync(stampFile, 'utf8').trim(); } catch { /* chưa ghi lần nào */ }
+  let present = true;
+  try { reg(['query', `${root}\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${UNINSTALL_ENTRY}`, '/v', 'UninstallString']); } catch { present = false; }
+  if (saved === stamp && present) return false;
+  for (const args of uninstallEntryCommands({ ...options, root })) reg(args);
+  fs.writeFileSync(stampFile, stamp);
+  return true;
+}
+
+export function unregisterUninstallEntry({ root = HKCU_SOFTWARE } = {}) {
+  if (process.platform !== 'win32') return;
+  regDelete([`${root}\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${UNINSTALL_ENTRY}`]);
+}
+
 /** Dấu của bộ khoá đang ghi — đổi (thêm đuôi / mục mới, đổi ngôn ngữ, đổi chỗ Aivin.exe) thì daemon ghi lại (ensureFileAssociations). */
 export function associationStamp({ exe, lang = 'en', extensions = OPEN_WITH_EXTENSIONS }) {
   return createHash('sha256').update(JSON.stringify(associationRegCommands({ exe, lang, extensions }))).digest('hex');

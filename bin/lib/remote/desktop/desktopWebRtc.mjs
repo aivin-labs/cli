@@ -9,6 +9,9 @@ const MAX_BUFFERED_BYTES = 512 * 1024;
 /** Kênh thao tác chuột / phím người xem → máy: tin cậy + đúng thứ tự (nhả chuột không được đến trước nhấn), đi thẳng peer-to-peer. */
 export const INPUT_CHANNEL = 'aivin-desktop-input';
 const MAX_INPUT_MESSAGE_BYTES = 8 * 1024;
+/** Kênh tệp người xem kéo thả / dán vào màn hình (castFileDrop.mjs): tin cậy + đúng thứ tự, tách khỏi kênh thao tác để tệp lớn không làm trễ chuột. */
+export const FILE_CHANNEL = 'aivin-desktop-files';
+const MAX_FILE_CHUNK_BYTES = 256 * 1024;
 
 const MAX_CURSOR_SHAPES = 64;
 /** Thử nối lại khi peer hỏng hẳn (`failed`): dựng peer mới, cùng người xem; hết lượt thì ở lại JPEG. Peer nối được thì đặt lại. */
@@ -64,7 +67,7 @@ export function unpackDesktopFrame(packet) {
   }
 }
 
-export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onPeerReady = () => {}, onCursorMode = () => {}, loadRuntime } = {}) {
+export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onFile = () => {}, onFileChunk = () => {}, onPeerReady = () => {}, onCursorMode = () => {}, loadRuntime } = {}) {
   const peers = new Map();
   /** Hình con trỏ đã thấy trong phiên — người xem nối sau vẫn nhận đủ (bộ quay chỉ gửi mỗi hình một lần). */
   const cursorShapes = new Map();
@@ -101,11 +104,25 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     const pc = new RTCPeerConnection({ iceServers });
     const channel = pc.createDataChannel('aivin-desktop-frames', { ordered: false, maxRetransmits: 0 });
     const inputChannel = pc.createDataChannel(INPUT_CHANNEL, { ordered: true });
+    const fileChannel = pc.createDataChannel(FILE_CHANNEL, { ordered: true });
     const VideoSource = wrtc?.nonstandard?.RTCVideoSource || wrtc?.default?.nonstandard?.RTCVideoSource;
     if (VideoSource && !videoSource) videoSource = new VideoSource({ isScreencast: true });
     const track = videoSource ? videoSource.createTrack() : null;
     if (track) pc.addTrack(track);
-    const peer = { pc, channel, inputChannel, track, video: !!track, sessionId, viewerId, iceServers, videoBitrate, attempt, retryTimer: null, open: false, dropped: 0 };
+    const peer = { pc, channel, inputChannel, fileChannel, track, video: !!track, sessionId, viewerId, iceServers, videoBitrate, attempt, retryTimer: null, open: false, dropped: 0 };
+    fileChannel.binaryType = 'arraybuffer';
+    fileChannel.onmessage = ({ data }) => {
+      if (typeof data !== 'string') {
+        const bytes = Buffer.from(data);
+        if (bytes.length <= MAX_FILE_CHUNK_BYTES) onFileChunk(viewerId, bytes);
+        return;
+      }
+      if (data.length > MAX_INPUT_MESSAGE_BYTES) return;
+      let msg;
+      try { msg = JSON.parse(data); } catch { return; }
+      // Mã phiên lấy từ peer như kênh thao tác.
+      onFile(viewerId, msg, peer.sessionId);
+    };
     inputChannel.onmessage = ({ data }) => {
       const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
       if (text.length > MAX_INPUT_MESSAGE_BYTES) return;
@@ -217,6 +234,13 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     }
   }
 
+  /** Trả lời đúng người xem đang gửi tệp. */
+  function replyFile(viewerId, msg) {
+    const channel = peers.get(String(viewerId || ''))?.fileChannel;
+    if (channel?.readyState !== 'open') return;
+    try { channel.send(JSON.stringify(msg)); } catch { /* kênh vừa đóng */ }
+  }
+
   /** Mọi người xem đều có video và tự vẽ con trỏ → bộ quay thôi lồng con trỏ vào khung. */
   function localCursor() {
     return peers.size > 0 && [...peers.values()].every(p => p.video && p.open && p.localCursor);
@@ -242,10 +266,11 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     clearTimeout(peer.retryTimer);
     try { peer.channel.close(); } catch { /* already closed */ }
     try { peer.inputChannel?.close(); } catch { /* already closed */ }
+    try { peer.fileChannel?.close(); } catch { /* already closed */ }
     try { peer.track?.stop(); } catch { /* already stopped */ }
     try { peer.pc.close(); } catch { /* already closed */ }
   }
 
   function closeAll() { for (const id of [...peers.keys()]) close(id); cursorShapes.clear(); }
-  return { start, signal, push, pushRaw, pushCursor, pushCursorShape, pushInputFocus, localCursor, needsJpeg, hasVideo, anyOpen, needsFallback, close, closeAll };
+  return { start, signal, push, pushRaw, pushCursor, pushCursorShape, pushInputFocus, replyFile, localCursor, needsJpeg, hasVideo, anyOpen, needsFallback, close, closeAll };
 }

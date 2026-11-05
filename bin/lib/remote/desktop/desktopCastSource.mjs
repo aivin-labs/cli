@@ -531,6 +531,9 @@ namespace AivinDesktopCast {
         }
       } catch {
         running = false;
+      } finally {
+        // Dừng phiên hoặc daemon chết (stdin đóng) lúc người xem đang kéo: không để nút chuột / phím bổ trợ kẹt xuống trên máy.
+        ReleaseHeldInput();
       }
     }
 
@@ -657,9 +660,35 @@ namespace AivinDesktopCast {
       }
     }
 
+    // Nút + phím bổ trợ đang giữ qua mousedown (chỉ luồng đọc lệnh đụng tới). Gói mouseup không đủ để biết cần nhả gì: người xem có thể thả Ctrl trước khi thả chuột.
+    static readonly List<int> heldButtons = new List<int>();
+    static readonly List<byte> heldModifiers = new List<byte>();
+
+    static void MouseButton(int button, bool down) {
+      uint flag = button == 2 ? (down ? Native.MOUSEEVENTF_RIGHTDOWN : Native.MOUSEEVENTF_RIGHTUP)
+        : button == 1 ? (down ? Native.MOUSEEVENTF_MIDDLEDOWN : Native.MOUSEEVENTF_MIDDLEUP)
+        : (down ? Native.MOUSEEVENTF_LEFTDOWN : Native.MOUSEEVENTF_LEFTUP);
+      Native.mouse_event(flag, 0, 0, 0, 0);
+    }
+
+    static void ReleaseHeldModifiers() {
+      ReleaseModifiers(heldModifiers);
+      heldModifiers.Clear();
+    }
+
+    static void ReleaseHeldInput() {
+      for (int i = heldButtons.Count - 1; i >= 0; i--) MouseButton(heldButtons[i], false);
+      heldButtons.Clear();
+      ReleaseHeldModifiers();
+    }
+
     static void HandleInput(Dictionary<string, object> cmd) {
       try {
         string action = cmd.ContainsKey("action") ? Convert.ToString(cmd["action"]) : "";
+        if (action == "release_all") {
+          ReleaseHeldInput();
+          return;
+        }
         double rx = cmd.ContainsKey("x") ? Convert.ToDouble(cmd["x"]) : 0;
         double ry = cmd.ContainsKey("y") ? Convert.ToDouble(cmd["y"]) : 0;
         var mods = ExtractModifiers(cmd);
@@ -727,20 +756,21 @@ namespace AivinDesktopCast {
         } else if (action == "mousedown") {
           int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
           Native.SetCursorPos(targetX, targetY);
-          PressModifiers(mods);
-          if (button == 2) Native.mouse_event(Native.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
-          else if (button == 1) Native.mouse_event(Native.MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, 0);
-          else Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+          var newMods = new List<byte>();
+          for (int i = 0; i < mods.Count; i++) {
+            if (!heldModifiers.Contains(mods[i])) newMods.Add(mods[i]);
+          }
+          PressModifiers(newMods);
+          heldModifiers.AddRange(newMods);
+          MouseButton(button, true);
+          if (!heldButtons.Contains(button)) heldButtons.Add(button);
         } else if (action == "mouseup") {
           int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
-          Native.SetCursorPos(targetX, targetY);
-          try {
-            if (button == 2) Native.mouse_event(Native.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-            else if (button == 1) Native.mouse_event(Native.MOUSEEVENTF_MIDDLEUP, 0, 0, 0, 0);
-            else Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-          } finally {
-            ReleaseModifiers(mods);
-          }
+          // Gói không toạ độ = chỉ nhả tại chỗ (AI đang bấm trên máy): không kéo con trỏ đi.
+          if (cmd.ContainsKey("rx") || cmd.ContainsKey("x")) Native.SetCursorPos(targetX, targetY);
+          MouseButton(button, false);
+          heldButtons.Remove(button);
+          if (heldButtons.Count == 0) ReleaseHeldModifiers();
           if (button == 0) ProbeInputFocus();
         } else if (action == "scroll") {
           int deltaY = cmd.ContainsKey("deltaY") ? Convert.ToInt32(cmd["deltaY"]) : 0;

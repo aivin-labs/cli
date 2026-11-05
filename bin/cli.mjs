@@ -61,6 +61,7 @@ import { DAEMON_RUNNING } from './lib/remote/daemonLock.mjs';
 import { runPolicyCommand } from './lib/remote/policyCommand.mjs';
 import { loadMascotSettings, requestMascotAttach, saveMascotSettings } from './lib/remote/mascot/index.mjs';
 import { forgetWorkFolder } from './lib/remote/workFolder.mjs';
+import { ServerRevoke, uninstallAivin } from './lib/remote/desktop/uninstall.mjs';
 import { MascotText, mascotLang, mascotText } from './lib/remote/mascot/strings.mjs';
 import { DESKTOP_WEBRTC_WORKER_ARG, runDesktopWebRtcWorker } from './lib/remote/desktop/webrtcWorker.mjs';
 import { DemoScope, UiResult, showMascotDemo, showMascotUi } from './lib/remote/mascot/ui.mjs';
@@ -1094,6 +1095,7 @@ program
         return;
       }
       if (action === 'uninstall') {
+        assertHumanCommand('desktop', 'uninstall');
         const res = uninstallDesktopApp();
         console.log(chalk.green('✅ Đã gỡ ứng dụng Aivin trên màn hình và mục khởi động cùng máy (lệnh `aivin` vẫn còn).'));
         if (!res.removed) console.log(chalk.yellow('   ⚠️  Ứng dụng còn đang chạy nên chưa xoá hết được tệp — chạy lại lệnh này sau ít giây.'));
@@ -1146,6 +1148,37 @@ program
         if (toast) showOSNotification({ title: openText('failed_title'), body: error.message });
         process.exitCode = 1;
       }
+    }
+  });
+
+program
+  .command('uninstall')
+  .description('Windows: remove Aivin from this computer - the app, the aivin command, its PATH entry and this computer\'s connection to your account. Your data in .aivin stays unless you add --delete-data. Programs & Features runs this too.')
+  .option('--yes', 'Do not ask for confirmation')
+  .option('--delete-data', 'Also delete the .aivin folder: the bot\'s memory, file copies kept for undo, browser sign-ins, logs. Cannot be undone.')
+  .action(async (options) => {
+    // Gọi từ Programs & Features (không có console) → báo bằng thông báo hệ điều hành.
+    const toast = process.env.AIVIN_OPEN_UI === 'toast';
+    try {
+      let deleteData = !!options.deleteData;
+      if (!options.yes) {
+        const { go } = await inquirer.prompt([{ type: 'confirm', name: 'go', default: false, message: 'Gỡ Aivin khỏi máy này (ứng dụng, lệnh aivin, kết nối của máy với tài khoản)?' }]);
+        if (!go) return;
+        if (!deleteData) ({ deleteData } = await inquirer.prompt([{ type: 'confirm', name: 'deleteData', default: false, message: 'Xoá luôn dữ liệu trong .aivin (ghi nhớ của bot, bản sao tệp để hoàn tác, phiên đăng nhập trình duyệt)? Xoá rồi không lấy lại được.' }]));
+      }
+      const res = await uninstallAivin({ deleteData, serverUrl: missionServerUrl(), apiKey: process.env.API_KEY });
+      const notes = [
+        res.server !== ServerRevoke.DONE ? 'Máy có thể còn trong danh sách của tài khoản (ngoại tuyến) — thu hồi trên Aivin nếu cần.' : '',
+        !res.removesBinary ? 'Bản cài qua npm: gỡ lệnh bằng npm rm -g @aivin-labs/cli.' : '',
+        !deleteData ? 'Dữ liệu vẫn còn trong thư mục .aivin.' : '',
+      ].filter(Boolean);
+      console.log(chalk.green('✅ Đã gỡ Aivin khỏi máy này.'));
+      for (const note of notes) console.log(chalk.gray(`   ${note}`));
+      if (toast) showOSNotification({ title: 'AIVIN Bot', body: ['Đã gỡ khỏi máy này.', ...notes].join(' ') });
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      if (toast) showOSNotification({ title: 'AIVIN Bot', body: error.message });
+      process.exitCode = 1;
     }
   });
 

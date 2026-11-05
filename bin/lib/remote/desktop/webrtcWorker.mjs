@@ -13,7 +13,9 @@ import { createWebRtcRuntimeLoader } from './webrtcRuntime.mjs';
  * Giao thức: mỗi dòng stdin / stdout một JSON.
  * daemon → con: `start {sessionId, viewerId, iceServers, videoBitrate}` ·`signal {msg}` · `push {frame}` · `pipe {name}` · `close {viewerId}` · `closeAll`
  * daemon → con (con trỏ): `cursor {cursor}` · `cursorShape {shape}`
+ * daemon → con (tệp thả vào): `fileReply {viewerId, msg}`
  * con → daemon: `started {viewerId, ok}` · `signal {payload}` · `status {payload}` · `input {raw, viewerId}` · `peerReady {viewerId}` ·
+ * `file {viewerId, msg, sessionId}` · `fileChunk {viewerId, data}` (base64; người gửi chờ `ack` nên ống không dồn quá cỡ cửa sổ gửi) ·
  * `state {needsFallback, needsJpeg, hasVideo, videoLive, localCursor}` · `log {text}`
  * Khung thô I420 không đi qua daemon: con tự nối named pipe của tiến trình quay.
  */
@@ -37,6 +39,8 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
     emitSignal: (payload) => send({ t: 'signal', payload }),
     emitStatus: (payload) => { send({ t: 'status', payload }); sendState(); },
     onInput: (raw, viewerId) => send({ t: 'input', raw, viewerId }),
+    onFile: (viewerId, msg, sessionId) => send({ t: 'file', viewerId, msg, sessionId }),
+    onFileChunk: (viewerId, bytes) => send({ t: 'fileChunk', viewerId, data: bytes.toString('base64') }),
     onPeerReady: (viewerId) => { send({ t: 'peerReady', viewerId }); sendState(); },
     onCursorMode: () => sendState(),
     loadRuntime: createWebRtcRuntimeLoader({ log: (text) => send({ t: 'log', text }) }),
@@ -72,6 +76,7 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
     cursor: (m) => rtc.pushCursor(m.cursor),
     cursorShape: (m) => rtc.pushCursorShape(m.shape),
     inputFocus: (m) => rtc.pushInputFocus(m.focus),
+    fileReply: (m) => rtc.replyFile(m.viewerId, m.msg),
     pipe: (m) => { if (m.name) connectPipe(String(m.name)); },
     close: (m) => { rtc.close(m.viewerId); sendState(); },
     closeAll: () => { rtc.closeAll(); const sock = pipeSocket; pipeSocket = null; pipeName = ''; sock?.destroy(); sendState(); },
@@ -94,7 +99,7 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
  * và `videoLive`. Tiến trình con dựng khi phiên đầu cần, tắt khi `closeAll`; con chết giữa phiên → coi như không ai có WebRTC (lùi JPEG).
  */
 export function createDesktopWebRtcWorker({
-  command, emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onPeerReady = () => {}, onState = () => {}, log = () => {}, spawnImpl = spawn,
+  command, emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onFile = () => {}, onFileChunk = () => {}, onPeerReady = () => {}, onState = () => {}, log = () => {}, spawnImpl = spawn,
 } = {}) {
   let child = null;
   const NO_PEER_STATE = { needsFallback: true, needsJpeg: true, hasVideo: false, videoLive: false, localCursor: false };
@@ -113,6 +118,8 @@ export function createDesktopWebRtcWorker({
       if (m.t === 'signal') emitSignal(m.payload);
       else if (m.t === 'status') emitStatus(m.payload);
       else if (m.t === 'input') onInput(m.raw, m.viewerId);
+      else if (m.t === 'file') onFile(m.viewerId, m.msg, m.sessionId);
+      else if (m.t === 'fileChunk') onFileChunk(m.viewerId, Buffer.from(String(m.data || ''), 'base64'));
       else if (m.t === 'peerReady') onPeerReady(m.viewerId);
       else if (m.t === 'state') {
         state = { needsFallback: !!m.needsFallback, needsJpeg: !!m.needsJpeg, hasVideo: !!m.hasVideo, videoLive: !!m.videoLive, localCursor: !!m.localCursor };
@@ -171,6 +178,7 @@ export function createDesktopWebRtcWorker({
     // Hình gửi cả khi chưa có người xem: bộ quay chỉ gửi mỗi hình một lần, tiến trình con giữ lại cho người xem sau.
     pushCursorShape: (shape) => { if (child) send({ t: 'cursorShape', shape }); },
     pushInputFocus: (focus) => { if (child && peers.size) send({ t: 'inputFocus', focus }); },
+    replyFile: (viewerId, msg) => send({ t: 'fileReply', viewerId, msg }),
     attachPipe: (name) => { if (name) send({ t: 'pipe', name }); },
     close: (viewerId) => { peers.delete(viewerId); send({ t: 'close', viewerId }); },
     closeAll,

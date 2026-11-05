@@ -45,6 +45,7 @@ namespace AivinDesktop {
       if (openAt >= 0) return OpenFiles(args, openAt + 1);
       string id = ((uint)Home.ToLowerInvariant().GetHashCode()).ToString("x8");
       // "Gửi cho AIVIN Bot" (chuột phải / Send to): ghi yêu cầu cho daemon rồi mở Aivin (khay đang chạy thì báo nó, chưa thì mở khay).
+      if (Array.IndexOf(args, "--uninstall") >= 0) return Uninstall();
       int shareAt = Array.IndexOf(args, "--share");
       if (shareAt >= 0) return SendRequest(args, shareAt + 1, id, ".txt");
       int workAt = Array.IndexOf(args, "--workdir");
@@ -126,6 +127,40 @@ namespace AivinDesktop {
       if (running) Signal("Local\\AivinTrayOpen-" + id);
       else try { Process.Start(Application.ExecutablePath); } catch { }
       return 0;
+    }
+
+    /**
+     * Programs & Features / Settings → Apps: hỏi chủ máy rồi chạy ẩn "<lệnh aivin> uninstall --yes" và thoát ngay — Aivin.exe đang chạy thì lệnh đó không xoá được tệp này.
+     * launch.cfg thiếu chữ (bản cũ, chưa kịp làm mới) → tiếng Anh; thiếu lệnh aivin → thử bin\aivin.exe cạnh tệp này.
+     */
+    static int Uninstall() {
+      Config cfg = Config.Load(Path.Combine(Path.Combine(Home, "desktop"), "launch.cfg"));
+      string prompt = cfg.T("uninstallPrompt");
+      if (prompt == "uninstallPrompt") prompt = "Remove AIVIN Bot from this computer?\n\nThe app, the aivin command and this computer's connection to your account will be removed.\nAlso delete your data (the bot's memory, file copies kept for undo, browser sign-ins)? This cannot be undone.\n\nYes = remove and delete data\nNo = remove, keep data\nCancel = do not remove";
+      DialogResult choice = MessageBox.Show(prompt, "AIVIN Bot", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+      if (choice == DialogResult.Cancel) return 1;
+      string exe = cfg.Exe;
+      StringBuilder line = new StringBuilder();
+      foreach (string a in cfg.Args) {
+        if (a == "remote") break;
+        line.Append(TrayApp.Quote(a)).Append(' ');
+      }
+      if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) {
+        exe = Path.Combine(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "bin"), "aivin.exe");
+        line.Length = 0;
+      }
+      line.Append("uninstall --yes");
+      if (choice == DialogResult.Yes) line.Append(" --delete-data");
+      ProcessStartInfo psi = new ProcessStartInfo(exe, line.ToString());
+      psi.UseShellExecute = false;
+      psi.CreateNoWindow = true;
+      psi.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+      psi.EnvironmentVariables["AIVIN_OPEN_UI"] = "toast";
+      try { Process.Start(psi); return 0; } catch {
+        string failed = cfg.T("uninstallFailed");
+        MessageBox.Show(failed == "uninstallFailed" ? "Could not remove it automatically. Open a terminal and run: aivin uninstall" : failed, "AIVIN Bot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return 1;
+      }
     }
 
     static void Signal(string name) {
