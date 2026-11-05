@@ -4,6 +4,7 @@ import { spawn } from 'child_process';
 import { DeviceErrorCode, ToolGroup } from '../constants.mjs';
 import { DeviceToolError, resolveInRoots } from '../sandbox.mjs';
 import { showOSNotification } from '../notify.mjs';
+import { PS_UTF8_PREFIX } from '../processes.mjs';
 import { createWindowsHost } from './windowsHost.mjs';
 
 /**
@@ -163,14 +164,16 @@ export function matchApps(apps, query) {
 
 function runPowerShellJson(script, signal) {
   return new Promise((resolve, reject) => {
-    const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true });
-    let out = '';
-    c.stdout.on('data', (d) => { out += d.toString(); });
+    // Đầu ra UTF-8: tên cửa sổ / ứng dụng tiếng Việt không thành `?` (PowerShell không console ghi theo bảng mã OEM).
+    const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `${PS_UTF8_PREFIX}${script}`], { windowsHide: true });
+    const chunks = [];
+    c.stdout.on('data', (d) => { chunks.push(d); });
     const onAbort = () => { try { c.kill(); } catch { /* đã thoát */ } };
     signal?.addEventListener('abort', onAbort, { once: true });
     c.on('error', (e) => reject(e));
     c.on('close', () => {
       signal?.removeEventListener('abort', onAbort);
+      const out = Buffer.concat(chunks).toString('utf8');
       try { const v = JSON.parse(out || 'null'); resolve(Array.isArray(v) ? v : v ? [v] : []); } catch (e) { reject(e); }
     });
   });

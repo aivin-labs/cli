@@ -101,6 +101,8 @@ export const DeviceEvent = Object.freeze({
   DESKTOP_CAST_CONFIG: 'device:desktop_cast_config',
   DESKTOP_CAST_SIGNAL: 'device:desktop_cast_signal',
   DESKTOP_CAST_STATUS: 'device:desktop_cast_status',
+  /** CLI → BE: ô có tiêu điểm sau cú nhấp có phải ô nhập chữ — cho người xem đường JPEG (WebRTC đi kênh thao tác). */
+  DESKTOP_CAST_INPUT_FOCUS: 'device:desktop_cast_input_focus',
 });
 
 /** Trạng thái phiên xem màn hình gửi BE (`device:desktop_cast_status`) — khớp BE `DesktopCastState`. */

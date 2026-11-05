@@ -178,7 +178,8 @@ export function scrubEnv(env = process.env) {
 export const AGENT_CALL_ENV = 'AIVIN_AGENT_CALL';
 
 export function agentEnv(env = process.env) {
-  return { ...scrubEnv(env), [AGENT_CALL_ENV]: '1' };
+  // Python ghi ra ống theo bảng mã máy (cp1252) → UnicodeEncodeError khi in chữ Việt; ép UTF-8 trừ khi người dùng đã tự đặt.
+  return { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...scrubEnv(env), [AGENT_CALL_ENV]: '1' };
 }
 
 const HUMAN_ONLY_REMOTE_COMMANDS = new Set(['start', 'pair', 'unpair', 'pause', 'resume', 'enable', 'disable', 'reset-id', 'do', 'forget-folder']);

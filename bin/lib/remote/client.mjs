@@ -999,7 +999,13 @@ export async function startRemoteClient(options = {}) {
         onMeta: (meta) => { desktopWebRtc.push(meta); syncCastJpeg(); },
         onCursor: (cursor) => desktopWebRtc.pushCursor(cursor),
         onCursorShape: (shape) => desktopWebRtc.pushCursorShape(shape),
-        onInputFocus: (focus) => desktopWebRtc.pushInputFocus?.(focus),
+        onInputFocus: (focus) => {
+          desktopWebRtc.pushInputFocus?.(focus);
+          // Người xem chưa có kênh WebRTC không nhận được tin trên → gửi qua máy chủ để điện thoại vẫn tự mở bàn phím.
+          if (desktopWebRtc.needsFallback() && socket.connected) {
+            socket.emit(DeviceEvent.DESKTOP_CAST_INPUT_FOCUS, { session_id: sessionId, editable: focus?.editable === true });
+          }
+        },
         onCapture: ({ mode, reason }) => say(chalk.gray(`  🖥️  Chụp màn hình: ${mode}${reason ? ` (${reason})` : ''}`)),
         rawPipe: true,
         onReady: (meta) => {

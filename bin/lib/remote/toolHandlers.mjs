@@ -2,6 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
+import { StringDecoder } from 'string_decoder';
 import { DeviceErrorCode, IGNORED_DIRS, MemoryKind, ToolGroup } from './constants.mjs';
 import { isSecretPath } from './secretPaths.mjs';
 import {
@@ -343,6 +344,8 @@ function runProcess(cmd, argv, { cwd, signal, onOutput, env, maxOutput = MAX_EXE
     const settle = (code, extra = {}) => {
       if (settled) return;
       settled = true;
+      if (stdout.length < maxOutput) stdout += outDec.end();
+      if (stderr.length < maxOutput) stderr += errDec.end();
       timers.forEach(clearTimeout);
       signal?.removeEventListener('abort', onAbort);
       child.stdout.destroy();
@@ -363,8 +366,11 @@ function runProcess(cmd, argv, { cwd, signal, onOutput, env, maxOutput = MAX_EXE
       timers.push(setTimeout(() => settle(-1), ABORT_SETTLE_MS));
     };
     signal?.addEventListener('abort', onAbort, { once: true });
-    child.stdout.on('data', (chunk) => { const t = chunk.toString(); if (stdout.length < maxOutput) stdout += t; onOutput?.('stdout', t); });
-    child.stderr.on('data', (chunk) => { const t = chunk.toString(); if (stderr.length < maxOutput) stderr += t; onOutput?.('stderr', t); });
+    // StringDecoder: chunk cắt giữa ký tự UTF-8 nhiều byte không thành `�` (chữ Việt / emoji ở biên chunk).
+    const outDec = new StringDecoder('utf8');
+    const errDec = new StringDecoder('utf8');
+    child.stdout.on('data', (chunk) => { const t = outDec.write(chunk); if (stdout.length < maxOutput) stdout += t; if (t) onOutput?.('stdout', t); });
+    child.stderr.on('data', (chunk) => { const t = errDec.write(chunk); if (stderr.length < maxOutput) stderr += t; if (t) onOutput?.('stderr', t); });
     child.on('error', (e) => {
       settled = true;
       timers.forEach(clearTimeout);
