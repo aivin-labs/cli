@@ -15,7 +15,7 @@ if errorlevel 1 (
     echo.
     echo ========================================================
     echo   [HOAN TAT] Phat hanh thanh cong!
-    echo   Cua so se tu dong dong sau 5 giay...
+    echo   Nhan phim bat ky de dong cua so.
     echo ========================================================
-    timeout /t 5
+    pause
 )

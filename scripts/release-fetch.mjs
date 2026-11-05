@@ -37,6 +37,8 @@ try {
   for (const [, file] of lines) fs.copyFileSync(path.join(tmp, file), path.join(dist, file));
   fs.writeFileSync(path.join(dist, 'SHA256SUMS'), lines.map(([h, f]) => `${h.toLowerCase()}  ${f}`).join('\n') + '\n');
   fs.rmSync(path.join(dist, 'SHA256SUMS.sig'), { force: true });
+  // release-publish chỉ dùng lại dist/ khi tag này khớp package.json — dist/ của bản cũ không bao giờ bị ký thành bản mới.
+  fs.writeFileSync(path.join(dist, 'RELEASE_TAG'), `${tag}\n`);
   console.log(`✔ dist/: ${lines.length} bản build của ${tag} từ CI, mã băm khớp — tiếp: AIVIN_RELEASE_KEY_FILE=<khoá> npm run sign:release`);
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

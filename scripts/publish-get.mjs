@@ -18,7 +18,7 @@ import { writeRollout } from './rollout-get.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const rolloutAt = args.indexOf('--rollout');
-const positional = args.filter((a, i) => !a.startsWith('--') && i !== rolloutAt + 1);
+const positional = args.filter((a, i) => !a.startsWith('--') && (rolloutAt < 0 || i !== rolloutAt + 1));
 const site = path.resolve(positional[0] || path.join(root, 'deploy', 'get', 'site'));
 const dist = path.join(root, 'dist');
 const version = `v${JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version}`;
@@ -40,12 +40,20 @@ const versionDir = path.join(site, version);
 if (fs.existsSync(versionDir) && !force) {
   throw new Error(`${version} đã đăng (${versionDir}) — thư mục phiên bản là bất biến; nâng version trong package.json hoặc thêm --force.`);
 }
-fs.mkdirSync(versionDir, { recursive: true });
-for (const file of [...assets, 'SHA256SUMS', 'SHA256SUMS.sig']) fs.copyFileSync(path.join(dist, file), path.join(versionDir, file));
-for (const file of ['install.ps1', 'install.sh']) {
-  fs.copyFileSync(path.join(root, 'scripts', file), path.join(versionDir, file));
-  fs.copyFileSync(path.join(root, 'scripts', file), path.join(site, file));
+// Chép vào thư mục tạm rồi đổi tên nguyên khối: chép hỏng giữa chừng không để lại thư mục phiên bản dở (lần chạy lại sẽ bị chặn vì "đã đăng").
+const stagingDir = `${versionDir}.tmp-${process.pid}`;
+fs.rmSync(stagingDir, { recursive: true, force: true });
+fs.mkdirSync(stagingDir, { recursive: true });
+try {
+  for (const file of [...assets, 'SHA256SUMS', 'SHA256SUMS.sig']) fs.copyFileSync(path.join(dist, file), path.join(stagingDir, file));
+  for (const file of ['install.ps1', 'install.sh']) fs.copyFileSync(path.join(root, 'scripts', file), path.join(stagingDir, file));
+  fs.rmSync(versionDir, { recursive: true, force: true });
+  fs.renameSync(stagingDir, versionDir);
+} catch (e) {
+  fs.rmSync(stagingDir, { recursive: true, force: true });
+  throw e;
 }
+for (const file of ['install.ps1', 'install.sh']) fs.copyFileSync(path.join(root, 'scripts', file), path.join(site, file));
 
 const page = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
