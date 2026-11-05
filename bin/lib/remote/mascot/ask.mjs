@@ -131,7 +131,7 @@ const MAX_PENDING = 20;
  * một lần `fields` (+ `text` = giá trị khi chỉ một trường — BE cũ chưa nhận `fields` vẫn hiểu). BE từ chối → hỏi lại từ trường đầu.
  */
 export function createMascotChat({
-  socket, send, lang, timers = { setTimeout, clearTimeout }, now = Date.now, onAlert = () => {}, onPending = () => {}, micBusy = () => false,
+  socket, send, lang, timers = { setTimeout, clearTimeout }, now = Date.now, onAlert = () => {}, onPending = () => {}, micBusy = () => false, onWorkDir = () => {},
   serverUrl = '', notifyFreq = 1, fetchImage = (url) => fetchMascotImage(url, { serverUrl }), renderDiagramImage = (source) => renderDiagram(source), openToolWindow = openWebview,
 }) {
   let currentLang = lang || 'vi';
@@ -155,7 +155,17 @@ export function createMascotChat({
   /** Tệp thả vào bot, chờ đi kèm câu kế tiếp. */
   const files = [];
   /** Tệp đang chờ → cửa sổ: số tệp (thùng trong tay bot + huy hiệu) + chip từng tệp trên dòng nhập (icon / màu theo loại, nút × để bỏ). */
-  const syncFiles = () => send({ t: AskCommand.FILES, n: files.length, files: files.map((f) => fileChip(f)) });
+  const syncFiles = () => send({ t: AskCommand.FILES, n: files.length, files: [...(workDir ? [workDirChip()] : []), ...files.map((f) => fileChip(f))] });
+  /**
+   * Thư mục làm việc ("Làm việc ở đây với AIVIN Bot"): đi kèm MỌI câu (`working_dir`, BE đưa vào ngữ cảnh của agent, không hiện trong chat) tới khi
+   * chủ máy bấm × trên chip. Không tính vào `n` — `n` là số tệp chờ gửi (nút gửi không có chữ, thùng trong tay bot).
+   */
+  let workDir = null;
+  const workDirChip = () => {
+    const chip = fileChip(workDir, { dir: () => true });
+    return { ...chip, name: t(MascotText.ASK_WORKDIR_CHIP, { name: chip.name || workDir }), pinned: true, detach_tip: t(MascotText.ASK_WORKDIR_DETACH) };
+  };
+  const workContext = () => (workDir ? { working_dir: workDir } : {});
   /** Cửa sổ chủ máy đang dùng khi hỏi (mascot/index.mjs `userWindow`) của lượt / cuộc nói chuyện gần nhất, hoặc null. */
   let target = null;
   const context = () => (target ? { context: { window: target } } : {});
@@ -411,7 +421,7 @@ export function createMascotChat({
     let ack;
     try {
       // `stream`: xin chữ chạy của câu trả lời (`delta`); `links` / `blocks`: hiện được nút mở link, bảng, thẻ, ảnh — BE cũ bỏ qua các trường này.
-      ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT, { text, request_id: current, stream: true, links: true, blocks: true, ...context(), ...extra });
+      ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT, { text, request_id: current, stream: true, links: true, blocks: true, ...context(), ...workContext(), ...extra });
       if (ack?.session_id) { currentSessionId = ack.session_id; noteDeviceSession(ack.session_id); }
     } catch (e) {
       finish();
@@ -438,7 +448,7 @@ export function createMascotChat({
     if (!s?.connected) return row(ChatRole.ERROR, t(MascotText.ASK_OFFLINE));
     try {
       const ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT, {
-        text, request_id: `ask-par-${randomUUID()}`, parallel: true, links: true, blocks: true, ...(window ? { context: { window } } : context()),
+        text, request_id: `ask-par-${randomUUID()}`, parallel: true, links: true, blocks: true, ...(window ? { context: { window } } : context()), ...workContext(),
       });
       if (!ack?.ok) return row(ChatRole.ERROR, errorText(ack?.error));
       if (ack.session_id) noteDeviceSession(ack.session_id);
@@ -458,9 +468,26 @@ export function createMascotChat({
   /** Bấm × trên chip: bỏ tệp đó khỏi lượt kế tiếp. */
   function detach(file) {
     const at = files.indexOf(file);
-    if (at < 0) return;
+    if (at < 0) {
+      if (file === workDir) setWorkDir(null);
+      return;
+    }
     files.splice(at, 1);
     syncFiles();
+  }
+
+  /** Đặt / bỏ thư mục làm việc. `quiet`: khôi phục lúc daemon khởi động — không báo, không lưu lại. */
+  function setWorkDir(dir, { quiet = false } = {}) {
+    workDir = dir || null;
+    syncFiles();
+    if (quiet) return;
+    onWorkDir(workDir);
+    send({ t: AskCommand.STATUS, text: workDir ? t(MascotText.ASK_WORKDIR_SET, { path: workDir }) : t(MascotText.ASK_WORKDIR_CLEARED) });
+  }
+
+  /** Thư mục được chọn không dùng được (ngoài quyền và chủ máy không đồng ý, ổ mạng, không còn tồn tại). */
+  function workDirDenied(dir) {
+    send({ t: AskCommand.STATUS, text: t(MascotText.ASK_WORKDIR_DENIED, { path: dir }) });
   }
 
   /** Câu hỏi mới như chủ máy gõ (luôn vào phiên riêng của máy, kể cả khi đang có câu hỏi chờ). */
@@ -945,7 +972,7 @@ export function createMascotChat({
 
   return {
     openTool,
-    ask, reply, choose, attach, detach, cancel, newChat, onChatEvent, onNotify, syncInbox, checkQuestions, setServerFeatures, busy: () => !!current || !!call, hasPending: () => queue.length > 0, userWindow: () => target,
+    ask, reply, choose, attach, detach, setWorkDir, workDirDenied, workDir: () => workDir, cancel, newChat, onChatEvent, onNotify, syncInbox, checkQuestions, setServerFeatures, busy: () => !!current || !!call, hasPending: () => queue.length > 0, userWindow: () => target,
     voiceStart, voiceAudio, voiceInterrupt, voiceStop, voiceMicLost, voiceDisconnected, onVoiceEvent, setVoiceSupported, inCall: () => !!call,
     setNotifyFreq: (val) => { const v = Number(val); if (Number.isInteger(v) && v >= 0 && v <= 2) currentNotifyFreq = v; },
     setLang: (l) => { if (l) currentLang = l; },

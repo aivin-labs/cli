@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import { NotifyKind, REMOTE_CONFIG_DIR, ToolGroup } from '../constants.mjs';
 import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
@@ -43,8 +43,56 @@ export const MASCOT_HIDE_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-hide');
 export const MASCOT_VOICE_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-voice');
 /** Phím tắt cửa sổ linh vật đang giữ thật (`{ chat, voice }`, tổ hợp đầu tiên còn trống) — khay đọc để hiện cạnh mục menu; cửa sổ đóng thì xoá. */
 export const MASCOT_HOTKEYS_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-hotkeys.json');
+/**
+ * "Gửi cho AIVIN Bot" (chuột phải tệp / Send to, Aivin.exe --share; `aivin share`): mỗi yêu cầu một tệp `<mốc>-<pid>.txt`, mỗi dòng một đường
+ * dẫn — Explorer chạy một tiến trình cho mỗi tệp được chọn, nên không ghi chung một tệp. Daemon đọc xong xoá, đính vào ô hỏi như kéo thả.
+ */
+export const MASCOT_ATTACH_DIR = path.join(REMOTE_CONFIG_DIR, 'mascot-attach');
+/** Yêu cầu cũ hơn chừng này (daemon không chạy lúc đó) thì bỏ — không bật ô hỏi với tệp gửi từ hôm qua. Đủ cho khay mở daemon từ đầu. */
+const ATTACH_REQUEST_GRACE_MS = 2 * 60_000;
 const SHOW_POLL_MS = 250;
 const SHOW_REQUEST_GRACE_MS = 30_000;
+
+/** Ghi yêu cầu đính tệp cho daemon đang chạy (hoặc sắp chạy). */
+export function requestMascotAttach(paths, dir = MASCOT_ATTACH_DIR) {
+  const list = (paths || []).filter((p) => typeof p === 'string' && p).map((p) => path.resolve(p));
+  if (!list.length) return;
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${Date.now()}-${process.pid}-${randomBytes(4).toString('hex')}.txt`);
+  fs.writeFileSync(`${file}.tmp`, list.join('\r\n'));
+  fs.renameSync(`${file}.tmp`, file);
+}
+
+/** Đọc + xoá mọi yêu cầu có đuôi `ext`; trả các dòng còn trong hạn (theo thứ tự gửi, không trùng). */
+function takeRequests(dir, ext, now) {
+  let names;
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith(ext)).sort(); } catch { return []; }
+  const lines = [];
+  for (const name of names) {
+    const file = path.join(dir, name);
+    try {
+      const fresh = now - fs.statSync(file).mtimeMs <= ATTACH_REQUEST_GRACE_MS;
+      const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+      fs.rmSync(file, { force: true });
+      if (!fresh) continue;
+      for (const line of text.split(/\r?\n/)) {
+        const p = line.trim();
+        if (p && !lines.includes(p)) lines.push(p);
+      }
+    } catch { /* đang ghi dở / vừa bị xoá — lần quét sau */ }
+  }
+  return lines;
+}
+
+/** Các đường dẫn "Gửi cho AIVIN Bot" đang chờ. */
+export function takeAttachRequests(dir = MASCOT_ATTACH_DIR, now = Date.now()) {
+  return takeRequests(dir, '.txt', now);
+}
+
+/** "Làm việc ở đây với AIVIN Bot" (Aivin.exe --workdir, cùng thư mục yêu cầu, đuôi `.workdir`): chọn nhiều lần thì lần sau cùng thắng. */
+export function takeWorkFolderRequest(dir = MASCOT_ATTACH_DIR, now = Date.now()) {
+  return takeRequests(dir, '.workdir', now).at(-1) || null;
+}
 
 /** Ghi yêu cầu hiện linh vật cho daemon đang chạy (hoặc sắp chạy). */
 export function requestMascotShow(file = MASCOT_SHOW_FILE) {
@@ -89,9 +137,11 @@ function normalizeMascotSettings(data) {
   const pos = Number.isFinite(data.x) && Number.isFinite(data.y) ? { x: data.x, y: data.y } : {};
   const freq = Number.isInteger(data.notify_freq) && data.notify_freq >= 0 && data.notify_freq <= 2 ? { notify_freq: data.notify_freq } : {};
   // `aivin remote mascot hotkey …` (cli.mjs): tổ hợp chủ máy đặt / 'off'; trước đây bị bỏ khi đọc → lượt lưu vị trí kế tiếp xoá mất.
+  // Thư mục làm việc của ô hỏi ("Làm việc ở đây với AIVIN Bot"): giữ qua các lần khởi động lại, tới khi chủ máy bấm × trên chip.
+  const workDir = typeof data.work_dir === 'string' && data.work_dir ? { work_dir: data.work_dir } : {};
   const hotkey = typeof data.hotkey === 'string' && data.hotkey ? { hotkey: data.hotkey } : {};
   const chatHotkey = typeof data.chat_hotkey === 'string' && data.chat_hotkey ? { chat_hotkey: data.chat_hotkey } : {};
-  return { enabled: data.enabled !== false, ...freq, ...hotkey, ...chatHotkey, ...pos };
+  return { enabled: data.enabled !== false, ...freq, ...workDir, ...hotkey, ...chatHotkey, ...pos };
 }
 
 export function loadMascotSettings(file = MASCOT_SETTINGS_FILE) {
@@ -172,8 +222,9 @@ export function userWindow(w) {
  */
 export function createMascot({
   enabled = true, platform = process.platform, env = process.env, lang: preferredLang, onPause = () => {}, onResume = () => {}, say = () => {},
-  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onOpenTool = () => {}, onDrop = () => {}, onDetach = () => {}, onNotifyFreq = () => {},
-  spawnImpl = spawn, dir = MASCOT_DIR, settingsFile = MASCOT_SETTINGS_FILE, showFile = MASCOT_SHOW_FILE, hideFile = MASCOT_HIDE_FILE, voiceFile = MASCOT_VOICE_FILE, hotkeysFile = MASCOT_HOTKEYS_FILE, now = Date.now, timers = { setTimeout, clearTimeout },
+  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onOpenTool = () => {}, onDrop = () => {}, onWorkFolder = () => {}, onDetach = () => {}, onNotifyFreq = () => {},
+  spawnImpl = spawn, dir = MASCOT_DIR, settingsFile = MASCOT_SETTINGS_FILE, showFile = MASCOT_SHOW_FILE, hideFile = MASCOT_HIDE_FILE, voiceFile = MASCOT_VOICE_FILE, hotkeysFile = MASCOT_HOTKEYS_FILE,
+  attachDir = MASCOT_ATTACH_DIR, now = Date.now, timers = { setTimeout, clearTimeout },
   thinkMs = THINK_MS, resultMs = RESULT_MS, mainThrottleMs = MAIN_THROTTLE_MS, restartDelaysMs = RESTART_DELAYS_MS, awayWaveMs = AWAY_WAVE_MS,
 } = {}) {
   if (!enabled || platform !== 'win32') return NOOP;
@@ -254,7 +305,7 @@ export function createMascot({
       if (lastChoices) write(lastChoices);
       write(lastPin);
     }
-    if (lastFiles?.n) write(lastFiles);
+    if (lastFiles?.files?.length) write(lastFiles);
     if (commandOnReady) { write({ t: commandOnReady }); commandOnReady = null; }
   };
 
@@ -382,6 +433,16 @@ export function createMascot({
       fs.rmSync(voiceFile, { force: true });
       if (voiceAt > voiceSeenAt) wake(HostCommand.VOICE_TOGGLE);
     } catch {}
+    const shared = takeAttachRequests(attachDir, now());
+    if (shared.length) {
+      onDrop(shared);
+      wake();
+    }
+    const workFolder = takeWorkFolderRequest(attachDir, now());
+    if (workFolder) {
+      onWorkFolder(workFolder);
+      wake();
+    }
   }, SHOW_POLL_MS);
   showWatch.unref?.();
 

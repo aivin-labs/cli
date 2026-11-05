@@ -59,7 +59,8 @@ import { DeviceAccess } from './lib/remote/constants.mjs';
 import { configureProxy } from './lib/remote/netProxy.mjs';
 import { DAEMON_RUNNING } from './lib/remote/daemonLock.mjs';
 import { runPolicyCommand } from './lib/remote/policyCommand.mjs';
-import { loadMascotSettings, saveMascotSettings } from './lib/remote/mascot/index.mjs';
+import { loadMascotSettings, requestMascotAttach, saveMascotSettings } from './lib/remote/mascot/index.mjs';
+import { forgetWorkFolder } from './lib/remote/workFolder.mjs';
 import { MascotText, mascotLang, mascotText } from './lib/remote/mascot/strings.mjs';
 import { DESKTOP_WEBRTC_WORKER_ARG, runDesktopWebRtcWorker } from './lib/remote/desktop/webrtcWorker.mjs';
 import { DemoScope, UiResult, showMascotDemo, showMascotUi } from './lib/remote/mascot/ui.mjs';
@@ -1081,7 +1082,11 @@ program
         console.log(chalk.green(`✅ Đã cài Aivin vào máy: ${where}.`));
         console.log(chalk.gray(`   Ứng dụng: ${res.exe}`));
         console.log(chalk.gray(`   Khởi động cùng máy: ${res.autostart ? 'bật' : 'tắt'} (đổi ở menu Aivin hoặc ${startupWhere})`));
-        if (res.openWith?.registered) console.log(chalk.gray('   Mở tệp: chuột phải tệp → "Mở bằng AIVIN Bot", hoặc Open with → AIVIN Bot → Always để mở mặc định'));
+        if (res.openWith?.registered) {
+          console.log(chalk.gray('   Mở tệp: chuột phải tệp → "Mở bằng AIVIN Bot", hoặc Open with → AIVIN Bot → Always để mở mặc định'));
+          console.log(chalk.gray('   Hỏi bot về tệp: chuột phải tệp / thư mục → "Gửi cho AIVIN Bot" (hoặc Send to → AIVIN Bot)'));
+          console.log(chalk.gray('   Chọn thư mục làm việc: chuột phải vào chỗ trống trong thư mục → "Làm việc ở đây với AIVIN Bot"'));
+        }
         else if (res.openWith?.error) console.log(chalk.yellow(`   ⚠️  Chưa thêm được "Mở bằng AIVIN Bot": ${res.openWith.error}`));
         if (process.platform === 'linux' && !desktopAppStatus().tray) {
           console.log(chalk.yellow('   ⚠️  Máy chưa có AppIndicator cho python3 nên không có biểu tượng khay — Aivin vẫn chạy nền. Cài: sudo apt install gir1.2-ayatanaappindicator3-0.1 (Ubuntu / Debian)'));
@@ -1142,6 +1147,19 @@ program
         process.exitCode = 1;
       }
     }
+  });
+
+program
+  .command('share <paths...>')
+  .description('Attach files / folders to the AIVIN Bot chat box on this computer (like dropping them on the mascot; needs `aivin remote start` running). Windows: right-click → "Share with AIVIN Bot" does the same.')
+  .action((paths) => {
+    const missing = paths.filter((p) => !fs.existsSync(p));
+    if (missing.length) {
+      console.error(chalk.red('❌'), `Không tìm thấy: ${missing.join(', ')}`);
+      process.exit(1);
+    }
+    requestMascotAttach(paths);
+    console.log(chalk.green(`✅ Đã gửi ${paths.length} mục cho AIVIN Bot — gõ câu hỏi trong ô hỏi của bot.`));
   });
 
 program
@@ -1261,6 +1279,20 @@ remoteCommand
       console.log(chalk.green(`✅ Đã ghép máy "${creds.name}" (${creds.device_id})`));
       console.log(chalk.gray(`   Thư mục được phép: ${creds.roots.join(' | ')}`));
       console.log(chalk.gray('   Chạy `aivin remote start` để bắt đầu nhận việc.'));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('forget-folder <path>')
+  .description('Take back a folder you allowed from "Work here with AIVIN Bot" (the running listener restarts with the shorter list)')
+  .action((dir) => {
+    try {
+      const { removed, stopped } = forgetWorkFolder(dir);
+      if (!removed) return console.log(chalk.yellow(`Thư mục này không nằm trong danh sách đã đồng ý thêm: ${path.resolve(dir)}`));
+      console.log(chalk.green(`✅ Đã thu lại quyền với thư mục: ${path.resolve(dir)}`));
+      if (stopped) console.log(chalk.gray('   Đã dừng phiên nhận việc — khay mở lại với danh sách mới (chạy trong terminal thì chạy lại `aivin remote start`).'));
     } catch (error) {
       remoteFail(error);
     }

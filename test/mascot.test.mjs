@@ -7,7 +7,7 @@ import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
-const { createMascot, loadMascotSettings, HostCommand, HostEvent, MascotState, LogStatus } = await import('../bin/lib/remote/mascot/index.mjs');
+const { createMascot, loadMascotSettings, requestMascotAttach, saveMascotSettings, takeAttachRequests, takeWorkFolderRequest, HostCommand, HostEvent, MascotState, LogStatus } = await import('../bin/lib/remote/mascot/index.mjs');
 const { describeStep, argsPreview, targetOf } = await import('../bin/lib/remote/mascot/labels.mjs');
 const { MascotText, SUPPORTED_LANGS, mascotLang, mascotText } = await import('../bin/lib/remote/mascot/strings.mjs');
 const { MASCOT_PS1, MASCOT_XAML } = await import('../bin/lib/remote/mascot/hostSource.mjs');
@@ -130,6 +130,58 @@ test('Quick voice từ khay: yêu cầu mới bật linh vật rồi bấm mic m
   assert.equal(child.sent.filter((c) => c.t === HostCommand.VOICE_TOGGLE).length, 1);
   assert.equal(child.sent.filter((c) => c.t === HostCommand.OPEN_ASK).length, 0);
   m.close();
+});
+
+test('"Gửi cho AIVIN Bot": mỗi yêu cầu một tệp, gom lại không trùng, yêu cầu quá hạn bị bỏ, đọc xong xoá (05/11/2026)', () => {
+  const dir = path.join(tmp(), 'attach');
+  requestMascotAttach(['a.docx', 'b.pdf'], dir);
+  requestMascotAttach([path.resolve('b.pdf'), 'c.xlsx'], dir);
+  fs.writeFileSync(path.join(dir, '1-1.txt'), 'C:\\cu.docx');
+  const old = new Date(Date.now() - 3600_000);
+  fs.utimesSync(path.join(dir, '1-1.txt'), old, old);
+  fs.writeFileSync(path.join(dir, '2-2.txt.tmp'), 'C:\\dang-ghi.docx');
+  assert.deepEqual(takeAttachRequests(dir), ['a.docx', 'b.pdf', 'c.xlsx'].map((p) => path.resolve(p)));
+  assert.deepEqual(fs.readdirSync(dir), ['2-2.txt.tmp']);
+  assert.deepEqual(takeAttachRequests(dir), []);
+  assert.deepEqual(takeAttachRequests(path.join(dir, 'khong-co')), []);
+});
+
+test('"Gửi cho AIVIN Bot": linh vật đang tắt vẫn bật lên, tệp vào onDrop, mở ô hỏi (05/11/2026)', async () => {
+  const host = fakeHost();
+  const dir = tmp();
+  const attachDir = path.join(dir, 'attach');
+  const settingsFile = path.join(dir, 'm.json');
+  fs.writeFileSync(settingsFile, JSON.stringify({ enabled: false }));
+  const dropped = [];
+  const m = createMascot({
+    platform: 'win32', spawnImpl: host.spawnImpl, settingsFile, dir, showFile: path.join(dir, 'show'), hideFile: path.join(dir, 'hide'), voiceFile: path.join(dir, 'voice'),
+    hotkeysFile: path.join(dir, 'keys'), attachDir, onDrop: (files) => dropped.push(files),
+  });
+  requestMascotAttach(['x.docx'], attachDir);
+  await sleep(400);
+  assert.deepEqual(dropped, [[path.resolve('x.docx')]]);
+  assert.equal(host.spawned.length, 1);
+  const child = host.spawned[0];
+  child.stdout.write(`${JSON.stringify({ t: HostEvent.READY })}\n`);
+  await tick();
+  assert.equal(child.sent.filter((c) => c.t === HostCommand.OPEN_ASK).length, 1);
+  m.close();
+});
+
+test('"Làm việc ở đây": lần chọn sau cùng thắng, không lẫn với yêu cầu gửi tệp, work_dir không mất khi lưu cài đặt khác (05/11/2026)', () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, '1.workdir'), 'C:\\a');
+  fs.writeFileSync(path.join(dir, '2.workdir'), 'C:\\b');
+  fs.writeFileSync(path.join(dir, '3.txt'), 'C:\\tep.docx');
+  assert.equal(takeWorkFolderRequest(dir), 'C:\\b');
+  assert.deepEqual(fs.readdirSync(dir), ['3.txt']);
+  assert.equal(takeWorkFolderRequest(dir), null);
+  const settings = path.join(dir, 'm.json');
+  saveMascotSettings({ work_dir: 'C:\\a' }, settings);
+  saveMascotSettings({ x: 1, y: 2 }, settings);
+  assert.equal(loadMascotSettings(settings).work_dir, 'C:\\a');
+  saveMascotSettings({ work_dir: null }, settings);
+  assert.equal(loadMascotSettings(settings).work_dir, undefined);
 });
 
 test('phím tắt đang giữ: cửa sổ báo → ghi tệp cho khay, cửa sổ đóng → xoá (02/11/2026)', async () => {

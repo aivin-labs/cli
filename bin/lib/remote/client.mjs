@@ -21,9 +21,11 @@ import { createScheduler } from './scheduler.mjs';
 import { acquireDaemonLock, lockHolder } from './daemonLock.mjs';
 import { randomUUID } from 'crypto';
 import { DeviceToolError, fullAccessRoots, isRemotePaused, setRemotePaused } from './sandbox.mjs';
-import { createMascot, HostEvent as MascotHostEvent, loadMascotSettings } from './mascot/index.mjs';
+import { createMascot, HostEvent as MascotHostEvent, loadMascotSettings, saveMascotSettings } from './mascot/index.mjs';
 import { createMascotChat } from './mascot/ask.mjs';
 import { mascotLang } from './mascot/strings.mjs';
+import { refreshDesktopIntegration } from './desktop/index.mjs';
+import { WORK_FOLDER_CONFIRM_SEC, WorkFolderStatus, isAllowedWorkFolder, resolveWorkFolder, withExtraRoots, workFolderConfirmText } from './workFolder.mjs';
 import { showOSNotification } from './notify.mjs';
 import { createMeetingManager, watchMeetingRequests } from './meeting/index.mjs';
 import { createMediaHost, mediaSupported } from './meeting/recorder.mjs';
@@ -206,7 +208,7 @@ export async function startRemoteClient(options = {}) {
   // Nhiều người dùng: mỗi thành viên toàn quyền trong vùng của mình (thư mục nhà + thư mục chung) — gốc thật đặt theo từng lời gọi.
   const fullAccess = multiUser || (!rootsGiven && (!!options.fullAccess || (!options.code && saved?.access === DeviceAccess.FULL)));
   const roots = multiUser ? [HOME_BASE, SHARED_DIR] : fullAccess ? fullAccessRoots()
-    : rootsGiven ? [path.resolve(options.dir)] : (saved?.access !== DeviceAccess.FULL && saved?.roots?.length ? saved.roots : [process.cwd()]);
+    : withExtraRoots(rootsGiven ? [path.resolve(options.dir)] : (saved?.access !== DeviceAccess.FULL && saved?.roots?.length ? saved.roots : [process.cwd()]), saved?.extra_roots);
   // Dò dự án + chỉ mục tệp chỉ trong thư mục nhà khi toàn quyền — quét cả ổ C: là hàng trăm nghìn tệp hệ thống vô ích.
   const scanRoots = multiUser ? [] : fullAccess ? [os.homedir()] : roots;
   const quiet = !!options.quiet;
@@ -358,6 +360,30 @@ export async function startRemoteClient(options = {}) {
   const confirmer = multiUser ? null : createLocalConfirmer();
   // Nhiều người dùng: thêm trần song song theo từng thành viên — một người không chiếm hết chỗ của cả tổ chức.
   const scheduler = createScheduler(multiUser ? { scopeLimits: DEFAULT_SCOPE_LIMITS } : undefined);
+  const earlyDrops = [];
+  let earlyWorkDir = null;
+  let announceProfile = null;
+  const applyWorkDir = (dir) => { if (mascotChat) mascotChat.setWorkDir(dir); else earlyWorkDir = dir; };
+  /** Chủ máy đồng ý mở thêm thư mục: có hiệu lực ngay (công cụ đọc env.roots lúc gọi), báo BE hồ sơ mới, lưu cho các lần chạy sau. */
+  const grantRoot = (dir) => {
+    roots.push(dir);
+    profile.roots.push(dir);
+    creds.roots = profile.roots;
+    creds.extra_roots = [...new Set([...(creds.extra_roots || []), dir])];
+    saveDeviceCredentials(creds);
+    logActivity({ type: 'folder_allowed', path: dir, by: 'owner_confirm' });
+    say(chalk.cyan(`   Đã cho phép thêm thư mục: ${dir}`));
+    void announceProfile?.();
+  };
+  const chooseWorkFolder = async (dir) => {
+    const res = await resolveWorkFolder(dir, {
+      roots,
+      confirm: async (folder) => (await confirmer.ask({ ...workFolderConfirmText(folder, mascotLang(process.env, process.platform, creds?.lang)), timeoutSec: WORK_FOLDER_CONFIRM_SEC })) === ConfirmResult.ALLOW,
+    });
+    if (res.status === WorkFolderStatus.DENIED) return void mascotChat?.workDirDenied(res.path);
+    if (res.status === WorkFolderStatus.NEEDS_ROOT) grantRoot(res.path);
+    applyWorkDir(res.path);
+  };
   // Linh vật trên màn hình (mascot/): việc chính đang làm + nhật ký chi tiết; nút tạm dừng = công tắc ngắt. Máy tính tổ chức: không có.
   const mascot = createMascot({
     enabled: !multiUser && options.mascot !== false && process.env.AIVIN_MASCOT !== '0', lang: creds?.lang,
@@ -373,7 +399,10 @@ export async function startRemoteClient(options = {}) {
     onOpenTool: (msg) => { void mascotChat?.openTool(msg); },
     onNotifyFreq: (val) => { mascotChat?.setNotifyFreq(val); },
     // Thả tệp vào bot → đi kèm câu gõ kế tiếp.
-    onDrop: (files) => mascotChat?.attach(files),
+    // "Gửi cho AIVIN Bot" từ Explorer có thể tới trước khi ô hỏi dựng xong (daemon vừa được khay mở) → giữ lại, dựng xong thì đính.
+    onDrop: (files) => (mascotChat ? mascotChat.attach(files) : earlyDrops.push(...files)),
+    // "Làm việc ở đây với AIVIN Bot": thư mục ngoài quyền thì hỏi chủ máy trước (workFolder.mjs).
+    onWorkFolder: (dir) => { void chooseWorkFolder(dir).catch((e) => say(chalk.yellow(`⚠️  Không đặt được thư mục làm việc: ${e?.message || e}`))); },
     // Bấm × trên chip tệp trong ô hỏi → bỏ tệp đó.
     onDetach: (file) => mascotChat?.detach(file),
     // Nói chuyện trực tiếp: mic / loa ở cửa sổ, phiên thoại realtime trên BE (mascot/ask.mjs).
@@ -387,6 +416,18 @@ export async function startRemoteClient(options = {}) {
     },
   });
   if (isRemotePaused()) mascot.paused(true);
+  // Máy cài ứng dụng Aivin rồi chỉ tự cập nhật: bắt kịp Aivin.exe + "Mở bằng / Gửi cho AIVIN Bot" của bản này (biên dịch vài giây → chạy sau).
+  if (!multiUser && process.platform === 'win32') {
+    const refresh = setTimeout(() => {
+      try {
+        const done = refreshDesktopIntegration({ lang: mascotLang() });
+        if (done.length) say(chalk.gray(`   Ứng dụng Aivin trên máy: đã cập nhật ${done.join(', ')}`));
+      } catch (e) {
+        say(chalk.yellow(`⚠️  Chưa cập nhật được ứng dụng Aivin trên máy (Mở bằng / Gửi cho AIVIN Bot): ${String(e?.message || e).trim()}`));
+      }
+    }, 10_000);
+    refresh.unref?.();
+  }
   const desktopCast = createDesktopCastManager();
   // Công cụ GUI ghi của AI đang chạy → thao tác từ xa của người bị bỏ (và AI chờ người thôi thao tác trước khi bấm, xem handleCall).
   let aiGuiBusy = 0;
@@ -815,6 +856,8 @@ export async function startRemoteClient(options = {}) {
     }
   };
 
+  // Chưa nối thì thôi: lần chào khi nối mang theo hồ sơ mới.
+  announceProfile = () => (socket.connected ? announce() : undefined);
   socket.on('connect', guarded('connect', async () => { await announce(); flushUnsent(); }));
   let serverKicks = 0;
   socket.on('disconnect', guarded('disconnect', (reason) => {
@@ -887,7 +930,13 @@ export async function startRemoteClient(options = {}) {
       micBusy: () => !!meetings?.status()?.recording,
       serverUrl: creds?.server_url || serverUrl,
       notifyFreq: loadMascotSettings().notify_freq ?? 1,
+      onWorkDir: (dir) => { try { saveMascotSettings({ work_dir: dir }); } catch { /* lần chạy sau không nhớ thư mục này */ } },
     });
+    if (earlyDrops.length) mascotChat.attach(earlyDrops.splice(0));
+    // Thư mục làm việc lần trước: chỉ khôi phục khi còn tồn tại và còn trong quyền (quyền có thể đã bị thu lại).
+    const savedWorkDir = loadMascotSettings().work_dir;
+    if (savedWorkDir && isAllowedWorkFolder(savedWorkDir, roots)) mascotChat.setWorkDir(savedWorkDir, { quiet: true });
+    if (earlyWorkDir) mascotChat.setWorkDir(earlyWorkDir);
     socket.on(DeviceEvent.CHAT_EVENT, guarded(DeviceEvent.CHAT_EVENT, (payload) => mascotChat.onChatEvent(payload)));
     // Báo chủ động: việc của chủ máy (web, chạy nền, automation…) xong / lỗi / cần trả lời.
     socket.on(DeviceEvent.NOTIFY, guarded(DeviceEvent.NOTIFY, (payload) => mascotChat.onNotify(payload)));

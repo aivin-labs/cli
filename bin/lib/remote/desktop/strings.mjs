@@ -33,6 +33,8 @@ export const TRAY_STRINGS = Object.freeze({
     pairCancel: 'Huỷ',
     shortcut: 'Aivin — cho các agent Aivin làm việc trên máy tính này',
     openWith: 'Mở bằng AIVIN Bot',
+    share: 'Gửi cho AIVIN Bot',
+    workHere: 'Làm việc ở đây với AIVIN Bot',
     fileType: 'Tài liệu mở bằng AIVIN Bot',
   },
   en: {
@@ -68,6 +70,8 @@ export const TRAY_STRINGS = Object.freeze({
     pairCancel: 'Cancel',
     shortcut: 'Aivin — lets your Aivin agents work on this computer',
     openWith: 'Open with AIVIN Bot',
+    share: 'Share with AIVIN Bot',
+    workHere: 'Work here with AIVIN Bot',
     fileType: 'Document opened with AIVIN Bot',
   },
 });

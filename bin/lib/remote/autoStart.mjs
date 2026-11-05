@@ -12,6 +12,7 @@ import {
   startMenuShortcutPath, startupState, uninstallDesktop,
 } from './desktop/index.mjs';
 import { fileAssociationsRegistered } from './desktop/fileAssociation.mjs';
+import { clearWorkFolderState } from './workFolder.mjs';
 import { installMacDesktop, isMacDesktopInstalled, macAgentPath, macAppPath, macStartupState, setMacStartup, uninstallMacDesktop } from './desktop/mac.mjs';
 import {
   hasLinuxDesktopSession, installLinuxDesktop, isLinuxDesktopInstalled, linuxAppEntryPath, linuxAutostartPath, linuxStartupState, linuxTrayAvailable,
@@ -428,7 +429,11 @@ export function installDesktopApp({ autostart = true, launch = true } = {}) {
 
 /** `aivin desktop uninstall`: gỡ ứng dụng + mục khởi động (tiến trình daemon nó giữ cũng dừng). */
 export function uninstallDesktopApp() {
-  if (process.platform === 'win32') return uninstallDesktop();
+  if (process.platform === 'win32') {
+    const res = uninstallDesktop();
+    clearWorkFolderState();
+    return res;
+  }
   const desktop = POSIX_DESKTOP[process.platform];
   if (!desktop) return { removed: true };
   const res = desktop.uninstall();

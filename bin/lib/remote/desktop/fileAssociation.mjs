@@ -1,3 +1,5 @@
+import fs from 'fs';
+import { createHash } from 'crypto';
 import { execFileSync, spawn } from 'child_process';
 import { trayStrings } from './strings.mjs';
 
@@ -29,6 +31,28 @@ const regDelete = (args) => { try { reg(['delete', ...args, '/f']); } catch { /*
 
 export function openCommand(exe) {
   return `"${exe}" --open "%1"`;
+}
+
+/**
+ * "Gửi cho AIVIN Bot": mục chuột phải trên MỌI tệp (`*`) và thư mục → đính vào ô hỏi của linh vật (mascot/index.mjs, MASCOT_ATTACH_DIR).
+ * MultiSelectModel=Player: vẫn hiện khi chọn hơn 15 mục (mặc định Explorer ẩn); Explorer chạy một lần cho mỗi mục, Aivin.exe gom lại.
+ */
+const SHARE_VERB = 'AivinShare';
+const SHARE_TARGETS = Object.freeze(['*', 'Directory']);
+
+export function shareCommand(exe) {
+  return `"${exe}" --share "%1"`;
+}
+
+/**
+ * "Làm việc ở đây với AIVIN Bot": chuột phải vào chỗ trống trong thư mục (`Directory\Background`) hoặc lên chính thư mục → đặt thư mục làm việc
+ * của ô hỏi (mascot/ask.mjs). `%V` = thư mục đang mở (nền không có `%1`).
+ */
+const WORK_HERE_VERB = 'AivinWorkHere';
+const WORK_HERE_TARGETS = Object.freeze(['Directory\\Background', 'Directory']);
+
+export function workHereCommand(exe) {
+  return `"${exe}" --workdir "%V"`;
 }
 
 /** Đuôi nên đề xuất làm mặc định: lưu lại không mất định dạng. Office để người dùng / IT tự chọn thêm (bản xuất dựng từ HTML). */
@@ -65,13 +89,50 @@ export function associationRegCommands({ exe, lang = 'en', extensions = OPEN_WIT
       ['add', `${capabilities}\\FileAssociations`, '/v', `.${ext}`, '/d', OPEN_WITH_PROGID, '/f'],
     );
   }
+  for (const target of SHARE_TARGETS) {
+    const verb = `${CLASSES}\\${target}\\shell\\${SHARE_VERB}`;
+    cmds.push(
+      ['add', verb, '/v', 'MUIVerb', '/d', s.share, '/f'],
+      ['add', verb, '/v', 'Icon', '/d', `"${exe}",0`, '/f'],
+      ['add', verb, '/v', 'MultiSelectModel', '/d', 'Player', '/f'],
+      ['add', `${verb}\\command`, '/ve', '/d', shareCommand(exe), '/f'],
+    );
+  }
+  for (const target of WORK_HERE_TARGETS) {
+    const verb = `${CLASSES}\\${target}\\shell\\${WORK_HERE_VERB}`;
+    cmds.push(
+      ['add', verb, '/v', 'MUIVerb', '/d', s.workHere, '/f'],
+      ['add', verb, '/v', 'Icon', '/d', `"${exe}",0`, '/f'],
+      ['add', `${verb}\\command`, '/ve', '/d', workHereCommand(exe), '/f'],
+    );
+  }
   return cmds;
+}
+
+/** Dấu của bộ khoá đang ghi — đổi (thêm đuôi / mục mới, đổi ngôn ngữ, đổi chỗ Aivin.exe) thì daemon ghi lại (ensureFileAssociations). */
+export function associationStamp({ exe, lang = 'en', extensions = OPEN_WITH_EXTENSIONS }) {
+  return createHash('sha256').update(JSON.stringify(associationRegCommands({ exe, lang, extensions }))).digest('hex');
 }
 
 export function registerFileAssociations({ exe, lang = 'en', extensions = OPEN_WITH_EXTENSIONS } = {}) {
   if (process.platform !== 'win32') return { registered: false };
   for (const args of associationRegCommands({ exe, lang, extensions })) reg(args);
   return { registered: true, extensions: [...extensions] };
+}
+
+/**
+ * Máy cài Aivin trước khi có mục chuột phải (hoặc trước khi thêm mục mới) và chỉ tự cập nhật — không ai chạy lại `aivin desktop install`:
+ * daemon gọi hàm này lúc khởi động, ghi lại khi dấu khác hoặc khoá bị xoá. Trả true khi vừa ghi.
+ */
+export function ensureFileAssociations({ exe, lang = 'en', stampFile }) {
+  if (process.platform !== 'win32') return false;
+  const stamp = associationStamp({ exe, lang });
+  let saved = null;
+  try { saved = fs.readFileSync(stampFile, 'utf8').trim(); } catch { /* chưa ghi lần nào */ }
+  if (saved === stamp && fileAssociationsRegistered()) return false;
+  registerFileAssociations({ exe, lang });
+  fs.writeFileSync(stampFile, stamp);
+  return true;
 }
 
 export function unregisterFileAssociations({ extensions = OPEN_WITH_EXTENSIONS, root = HKCU_SOFTWARE } = {}) {
@@ -83,6 +144,8 @@ export function unregisterFileAssociations({ extensions = OPEN_WITH_EXTENSIONS, 
     regDelete([`${CLASSES}\\.${ext}\\OpenWithProgids`, '/v', OPEN_WITH_PROGID]);
     regDelete([`${CLASSES}\\SystemFileAssociations\\.${ext}\\shell\\${VERB}`]);
   }
+  for (const target of SHARE_TARGETS) regDelete([`${CLASSES}\\${target}\\shell\\${SHARE_VERB}`]);
+  for (const target of WORK_HERE_TARGETS) regDelete([`${CLASSES}\\${target}\\shell\\${WORK_HERE_VERB}`]);
   regDelete([`${CLASSES}\\${OPEN_WITH_PROGID}`]);
 }
 

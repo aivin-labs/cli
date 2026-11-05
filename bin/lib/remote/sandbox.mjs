@@ -181,7 +181,7 @@ export function agentEnv(env = process.env) {
   return { ...scrubEnv(env), [AGENT_CALL_ENV]: '1' };
 }
 
-const HUMAN_ONLY_REMOTE_COMMANDS = new Set(['start', 'pair', 'unpair', 'pause', 'resume', 'enable', 'disable', 'reset-id', 'do']);
+const HUMAN_ONLY_REMOTE_COMMANDS = new Set(['start', 'pair', 'unpair', 'pause', 'resume', 'enable', 'disable', 'reset-id', 'do', 'forget-folder']);
 const HUMAN_ONLY_COMMANDS = new Set(['do', 'login', 'logout']);
 
 /** Lệnh chỉ người ngồi trước máy được chạy. `parent` / `name`: lệnh cha + lệnh con của CLI. */
@@ -211,7 +211,7 @@ const CATASTROPHIC_COMMANDS = [
 const AIVIN_DIR_SEGMENT = /(?:^|[\\/\s'"`~=:(;,|&])\.aivin(?:-release)?(?=[\\/\s'"`);,|&]|$)/i;
 
 /** Agent gọi chính CLI Aivin để đổi việc ghép máy / luật / giao việc mới. Khớp chuỗi — `assertHumanCommand` là chốt thứ hai trong tiến trình CLI. */
-const AIVIN_SELF_COMMAND = /\baivin(\.exe)?["']?\s+(remote\s+(pair|start|unpair|pause|resume|enable|disable|reset-id|do)\b|do\b|login\b|logout\b)/i;
+const AIVIN_SELF_COMMAND = /\baivin(\.exe)?["']?\s+(remote\s+(pair|start|unpair|pause|resume|enable|disable|reset-id|do|forget-folder)\b|do\b|login\b|logout\b)/i;
 
 function mentionsProtectedDir(command) {
   if (AIVIN_DIR_SEGMENT.test(command)) return true;

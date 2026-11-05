@@ -43,10 +43,15 @@ namespace AivinDesktop {
       // "Mở bằng AIVIN Bot" (Explorer / Open with): chuyển cho aivin open, không đụng tới khay đang chạy.
       int openAt = Array.IndexOf(args, "--open");
       if (openAt >= 0) return OpenFiles(args, openAt + 1);
+      string id = ((uint)Home.ToLowerInvariant().GetHashCode()).ToString("x8");
+      // "Gửi cho AIVIN Bot" (chuột phải / Send to): ghi yêu cầu cho daemon rồi mở Aivin (khay đang chạy thì báo nó, chưa thì mở khay).
+      int shareAt = Array.IndexOf(args, "--share");
+      if (shareAt >= 0) return SendRequest(args, shareAt + 1, id, ".txt");
+      int workAt = Array.IndexOf(args, "--workdir");
+      if (workAt >= 0) return SendRequest(args, workAt + 1, id, ".workdir");
       bool autostart = Array.IndexOf(args, "--autostart") >= 0;
       bool installed = Array.IndexOf(args, "--installed") >= 0;
       bool quit = Array.IndexOf(args, "--quit") >= 0;
-      string id = ((uint)Home.ToLowerInvariant().GetHashCode()).ToString("x8");
       bool created;
       using (Mutex mutex = new Mutex(true, "Local\\AivinTray-" + id, out created)) {
         if (!created) {
@@ -90,6 +95,37 @@ namespace AivinDesktop {
       psi.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
       psi.EnvironmentVariables["AIVIN_OPEN_UI"] = "toast";
       try { Process.Start(psi); return 0; } catch { return 1; }
+    }
+
+    /**
+     * "Gửi cho AIVIN Bot" (đuôi .txt) / "Làm việc ở đây với AIVIN Bot" (đuôi .workdir): mỗi lần gọi một tệp yêu cầu riêng trong mascot-attach
+     * (mỗi dòng một đường dẫn; ghi .tmp rồi đổi tên để daemon không đọc dở) — Explorer chạy một Aivin.exe cho mỗi mục được chọn.
+     * Daemon (mascot/index.mjs) đọc, xoá, rồi mở ô hỏi.
+     */
+    static int SendRequest(string[] args, int from, string id, string ext) {
+      List<string> paths = new List<string>();
+      for (int i = from; i < args.Length; i++) {
+        // Gốc ổ: Explorer đưa "C:\" trong ngoặc kép, dấu \" bị hiểu là ngoặc thoát → nhận được C:" (và GetFullPath("C:") là thư mục hiện tại của ổ).
+        string p = args[i].Trim().Trim('"');
+        if (p.Length == 0) continue;
+        if (p.Length == 2 && p[1] == ':') p += "\\";
+        try { p = Path.GetFullPath(p); } catch { }
+        paths.Add(p);
+      }
+      if (paths.Count == 0) return 1;
+      try {
+        string dir = Path.Combine(Home, "mascot-attach");
+        Directory.CreateDirectory(dir);
+        string name = DateTime.UtcNow.Ticks.ToString(CultureInfo.InvariantCulture) + "-" + Process.GetCurrentProcess().Id + ext;
+        string file = Path.Combine(dir, name);
+        File.WriteAllText(file + ".tmp", string.Join("\r\n", paths.ToArray()), new UTF8Encoding(false));
+        File.Move(file + ".tmp", file);
+      } catch { return 1; }
+      bool running = false;
+      try { using (Mutex m = Mutex.OpenExisting("Local\\AivinTray-" + id)) running = true; } catch { }
+      if (running) Signal("Local\\AivinTrayOpen-" + id);
+      else try { Process.Start(Application.ExecutablePath); } catch { }
+      return 0;
     }
 
     static void Signal(string name) {

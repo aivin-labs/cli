@@ -443,6 +443,8 @@ function AttachChips($chips) {
     if (-not $c -or -not $c.path) { continue }
     $ink = [string]$c.ink; if (-not $ink) { $ink = '#64748B' }
     $chip = New-Object Windows.Controls.Border; $chip.CornerRadius = '8'; $chip.Padding = '6,2,2,2'; $chip.Margin = '4,0,0,4'; $chip.ToolTip = [string]$c.path
+    # The working folder's chip stays after a question goes out and is not a waiting file (ask_files).
+    if ($c.pinned) { $chip.Tag = 'pinned' }
     $chip.Background = Brush $(if ($c.bg) { [string]$c.bg } else { '#F8FAFC' })
     # Hairline in the type's colour (ink at ~20 %): keeps the very light chip readable on the white box.
     $chip.BorderThickness = '1'; $chip.BorderBrush = Brush ('#33' + $ink.TrimStart('#'))
@@ -451,7 +453,7 @@ function AttachChips($chips) {
     $tb = New-Object Windows.Controls.TextBlock; $tb.Text = [string]$c.name; $tb.FontSize = 12; $tb.Foreground = Brush $ink; $tb.MaxWidth = 140
     $tb.TextTrimming = 'CharacterEllipsis'; $tb.VerticalAlignment = 'Center'; [void]$row.Children.Add($tb)
     $x = New-Object Windows.Controls.Button; $x.Style = $w.FindResource('IconBtn'); $x.Width = 18; $x.Height = 18; $x.Margin = '3,0,0,0'
-    $x.Background = Brush '#00000000'; $x.BorderThickness = '0'; $x.Tag = Brush '#1F000000'; $x.ToolTip = $T.ask_detach
+    $x.Background = Brush '#00000000'; $x.BorderThickness = '0'; $x.Tag = Brush '#1F000000'; $x.ToolTip = $(if ($c.detach_tip) { [string]$c.detach_tip } else { $T.ask_detach })
     $x.Content = LucideIcon '${DETACH_ICON_PATH}' 10 $ink; $x.CommandParameter = [string]$c.path
     $x.Add_Click({ param($s) Send @{ t = 'detach'; path = [string]$s.CommandParameter } })
     [void]$row.Children.Add($x); $chip.Child = $row; [void]$bar.Children.Add($chip)
@@ -590,7 +592,7 @@ function Handle($m) {
     'ask_status' { AskStatus $m.text; return }
     'ask_choices' { ChoiceButtons $m.options $m.multiple; return }
     # Files waiting for the next question: chips above the input; then on to the bot's tray (no return).
-    'ask_files' { $chips = @($m.files | Where-Object { $_ }); $more = $chips.Count -gt (E 'AttachBar').Children.Count; $script:files = [int]$m.n; AttachChips $chips; SyncAction; if ($more) { PeekAsk; HideAskLater ${ASK_IDLE_MS} } }
+    'ask_files' { $chips = @($m.files | Where-Object { $_ }); $more = @($chips | Where-Object { -not $_.pinned }).Count -gt @((E 'AttachBar').Children | Where-Object { $_.Tag -ne 'pinned' }).Count; $script:files = [int]$m.n; AttachChips $chips; SyncAction; if ($more) { PeekAsk; HideAskLater ${ASK_IDLE_MS} } }
     'ask_pin' {
       $script:askPinned = [bool]$m.on
       if ($script:askPinned) { $script:userHidden = $false; ApplyVisibility; AskHide 'Panel'; PeekAsk; (E 'ChatScroll').ScrollToEnd() }

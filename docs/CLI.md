@@ -1289,8 +1289,23 @@ aivin desktop                         # status
   `HKCU\Software` is written (no admin). Windows doesn't let apps make themselves the default, so to open those files with a double-click
   either pick Open with → AIVIN Bot → "Always", or run `aivin desktop defaults` to go straight to AIVIN Bot's page in Settings → Default
   apps. For a whole company, `aivin desktop defaults --export-xml <file> [--all]` writes a file IT can push with the Group Policy "Set a
-  default associations configuration file" or Intune (`md txt csv` by default, `--all` adds Office formats). Installed before this
-  version? Run `aivin desktop install` again.
+  default associations configuration file" or Intune (`md txt csv` by default, `--all` adds Office formats).
+- **Share with AIVIN Bot** (Windows): right-click any file or folder (one or many) → "Share with AIVIN Bot", or Send to → AIVIN Bot.
+  The items are attached to the bot's chat box on screen, the same as dropping them on the mascot (see [`aivin share`](#aivin-share-paths)).
+- **Work here with AIVIN Bot** (Windows): right-click the empty space inside a folder, or the folder itself. The folder becomes the bot's
+  working folder: a chip above the chat box shows it, every question you type goes out with it, and it stays across restarts until you
+  click × on the chip. If the folder is outside the folders Aivin may use, a dialog on this computer asks first; once you allow it, Aivin can
+  read, write and run commands there. Take that back with `aivin remote forget-folder <path>`. Network folders can't be used. Live voice
+  conversations don't use the working folder.
+- Machines that installed Aivin earlier and only auto-update get all these menu items without reinstalling: each time `aivin remote start`
+  starts, it rebuilds `Aivin.exe` if its code changed, rewrites the registry entries if they changed or were removed, and adds the
+  Send to shortcut if it's missing.
+
+## `aivin share <paths...>`
+
+Attaches files or folders to the AIVIN Bot chat box on this computer, the same as dropping them on the mascot. Type your question and
+they go with it (up to 10 items). This needs `aivin remote start` running, and requests older than 2 minutes are dropped. On Windows,
+right-click → "Share with AIVIN Bot" does the same thing and also starts the tray app if it isn't running.
 
 ## `aivin open <files...>`
 

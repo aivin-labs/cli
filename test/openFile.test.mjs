@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import { appWindowCommand, driveOpenUrl, fileSha256, indexKey, openText, readOpenIndex, writeOpenIndex, OpenFileError, OpenFileFailure } from '../bin/lib/openFile.mjs';
-import { DEFAULT_APPS_URI, associationRegCommands, defaultAssociationsXml, openCommand, unregisterFileAssociations, OPEN_WITH_PROGID } from '../bin/lib/remote/desktop/fileAssociation.mjs';
+import { DEFAULT_APPS_URI, associationRegCommands, associationStamp, defaultAssociationsXml, openCommand, shareCommand, workHereCommand, unregisterFileAssociations, OPEN_WITH_PROGID } from '../bin/lib/remote/desktop/fileAssociation.mjs';
 import { launcherSource } from '../bin/lib/remote/desktop/index.mjs';
 
 test('driveOpenUrl dùng deep-link open_file của FE, bỏ / thừa ở cuối web url', () => {
@@ -59,6 +59,42 @@ test('Aivin.exe nhận --open trước khi giữ mutex khay', () => {
   assert.match(src, /AIVIN_OPEN_UI/);
 });
 
+test('"Gửi cho AIVIN Bot": chuột phải trên mọi tệp + thư mục, chọn nhiều vẫn hiện, Aivin.exe nhận --share trước mutex (05/11/2026)', () => {
+  const exe = 'C:\\A\\Aivin.exe';
+  const flat = associationRegCommands({ exe, lang: 'vi', extensions: [] }).map((c) => c.join(' '));
+  assert.equal(shareCommand(exe), `"${exe}" --share "%1"`);
+  for (const target of ['*', 'Directory']) {
+    const verb = `Classes\\${target}\\shell\\AivinShare`;
+    assert.ok(flat.some((l) => l.includes(verb) && l.includes('MUIVerb') && l.includes('Gửi cho AIVIN Bot')), target);
+    assert.ok(flat.some((l) => l.includes(verb) && l.includes('MultiSelectModel') && l.includes('Player')), target);
+    assert.ok(flat.some((l) => l.includes(`${verb}\\command`) && l.includes(shareCommand(exe))), target);
+  }
+  const src = launcherSource('C:\\h');
+  assert.ok(src.indexOf('"--share"') > 0 && src.indexOf('"--share"') < src.indexOf('new Mutex'));
+  assert.match(src, /"mascot-attach"/);
+});
+
+test('"Làm việc ở đây với AIVIN Bot": có trong menu nền thư mục và trên thư mục, dùng %V, xử lý gốc ổ (05/11/2026)', () => {
+  const exe = 'C:\\A\\Aivin.exe';
+  const flat = associationRegCommands({ exe, lang: 'vi', extensions: [] }).map((c) => c.join(' '));
+  assert.equal(workHereCommand(exe), `"${exe}" --workdir "%V"`);
+  for (const target of ['Directory\\Background', 'Directory']) {
+    const verb = `Classes\\${target}\\shell\\AivinWorkHere`;
+    assert.ok(flat.some((l) => l.includes(verb) && l.includes('Làm việc ở đây với AIVIN Bot')), target);
+    assert.ok(flat.some((l) => l.includes(`${verb}\\command`) && l.includes(workHereCommand(exe))), target);
+  }
+  const src = launcherSource('C:\\h');
+  assert.ok(src.indexOf('"--workdir"') > 0 && src.indexOf('"--workdir"') < src.indexOf('new Mutex'));
+  assert.match(src, /p\[1\] == ':'/);
+});
+
+test('dấu bộ khoá đổi khi đổi ngôn ngữ / chỗ Aivin.exe → daemon biết phải ghi lại', () => {
+  const a = associationStamp({ exe: 'C:\\A.exe', lang: 'vi' });
+  assert.equal(a, associationStamp({ exe: 'C:\\A.exe', lang: 'vi' }));
+  assert.notEqual(a, associationStamp({ exe: 'C:\\A.exe', lang: 'en' }));
+  assert.notEqual(a, associationStamp({ exe: 'C:\\B.exe', lang: 'vi' }));
+});
+
 test('cửa sổ riêng chỉ dùng trình duyệt mặc định Chromium; Firefox / chưa rõ → null để mở tab thường', () => {
   const resolve = (b) => ({ id: b.id, exe: `C:\\${b.id}.exe` });
   assert.deepEqual(appWindowCommand('https://a/drive?x=1', { defaultId: 'chrome', resolve }), { exe: 'C:\\chrome.exe', args: ['--app=https://a/drive?x=1'] });
@@ -84,7 +120,9 @@ test('registry thật trên khoá thử: lệnh đọc ra đúng nguyên văn d�
     for (const args of associationRegCommands({ exe, lang: 'vi', extensions: ['md'], root })) execFileSync('reg', args, { stdio: 'ignore', windowsHide: true });
     assert.ok(query(`${root}\\Classes\\${OPEN_WITH_PROGID}\\shell\\open\\command`, '/ve').includes('--open "%1"'));
     assert.ok(query(`${root}\\Classes\\.md\\OpenWithProgids`).includes(OPEN_WITH_PROGID));
+    assert.ok(query(`${root}\\Classes\\*\\shell\\AivinShare\\command`, '/ve').includes('--share "%1"'));
     unregisterFileAssociations({ extensions: ['md'], root });
+    assert.throws(() => query(`${root}\\Classes\\*\\shell\\AivinShare`));
     assert.throws(() => query(`${root}\\Classes\\${OPEN_WITH_PROGID}`));
     assert.throws(() => query(`${root}\\AivinLabs`));
   } finally {
