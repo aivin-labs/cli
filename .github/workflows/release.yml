@@ -52,8 +52,9 @@ jobs:
           [ "$PKG" = "$TAG" ] || { echo "Tag $TAG does not match package.json $PKG"; exit 1; }
       - run: npm test
 
+  # Builds run in parallel with the test matrix (they don't need its output) - only `release` waits for both, so a failing test
+  # still publishes nothing. Saves the ~1 min the builds used to queue behind the slowest (Windows) test job.
   build-linux-windows:
-    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +75,6 @@ jobs:
           path: dist/*.gz
 
   build-macos:
-    needs: test
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
           path: dist/*.gz
 
   release:
-    needs: [build-linux-windows, build-macos]
+    needs: [test, build-linux-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

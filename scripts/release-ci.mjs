@@ -3,10 +3,10 @@ import { execFileSync } from 'child_process';
 /** Phần chờ CI của `release-publish.mjs`, tách riêng để test được không cần phát hành thật. */
 
 export const CI_TIMEOUT_MS = 20 * 60_000;
-export const CI_POLL_MS = 15_000;
+export const CI_POLL_MS = 5_000;
 const CI_REPORT_EVERY_MS = 30_000;
 /** `gh` lỗi liền chừng này lần (~2 phút) thì dừng, báo lý do thật: hết phiên đăng nhập, sai repo... chờ tiếp cũng vô ích. */
-const CI_MAX_GH_FAILURES = 8;
+const CI_MAX_GH_FAILURES = 24;
 const MAX_SUMMARY_FAILURES = 5;
 const MAX_LINES_PER_FAILURE = 24;
 const TAIL_LINES = 30;
@@ -92,7 +92,7 @@ export async function waitForCiBuild(tag, {
   let ghFailures = 0;
   let lastLine = '';
   let lastReportAt = -Infinity;
-  log(`Dang cho CI build ${tag} (thuong ~3 phut)...`);
+  log(`Dang cho CI build ${tag} (thuong ~2 phut)...`);
   while (now() - startedAt < timeoutMs) {
     let run = null;
     let line;
