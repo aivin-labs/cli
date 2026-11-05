@@ -146,6 +146,15 @@ test('"Gửi cho AIVIN Bot": mỗi yêu cầu một tệp, gom lại không trù
   assert.deepEqual(takeAttachRequests(path.join(dir, 'khong-co')), []);
 });
 
+test('"Gửi cho AIVIN Bot": nhiều yêu cầu trong cùng một mili giây vẫn giữ thứ tự gửi (CI v1.0.26 đỏ ngẫu nhiên)', (t) => {
+  const sameMs = Date.now();
+  t.mock.method(Date, 'now', () => sameMs);
+  const dir = path.join(tmp(), 'attach');
+  const names = Array.from({ length: 30 }, (_, i) => `f${i}.docx`);
+  for (const name of names) requestMascotAttach([name], dir);
+  assert.deepEqual(takeAttachRequests(dir), names.map((p) => path.resolve(p)));
+});
+
 test('"Gửi cho AIVIN Bot": linh vật đang tắt vẫn bật lên, tệp vào onDrop, mở ô hỏi (05/11/2026)', async () => {
   const host = fakeHost();
   const dir = tmp();

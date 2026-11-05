@@ -53,12 +53,15 @@ const ATTACH_REQUEST_GRACE_MS = 2 * 60_000;
 const SHOW_POLL_MS = 250;
 const SHOW_REQUEST_GRACE_MS = 30_000;
 
-/** Ghi yêu cầu đính tệp cho daemon đang chạy (hoặc sắp chạy). */
+let attachRequestSeq = 0;
+
+/** Ghi yêu cầu đính tệp cho daemon đang chạy (hoặc sắp chạy). Số thứ tự giữ đúng thứ tự gửi khi trùng mili giây (nơi đọc xếp theo tên tệp). */
 export function requestMascotAttach(paths, dir = MASCOT_ATTACH_DIR) {
   const list = (paths || []).filter((p) => typeof p === 'string' && p).map((p) => path.resolve(p));
   if (!list.length) return;
   fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `${Date.now()}-${process.pid}-${randomBytes(4).toString('hex')}.txt`);
+  const seq = String(++attachRequestSeq).padStart(6, '0');
+  const file = path.join(dir, `${Date.now()}-${process.pid}-${seq}-${randomBytes(4).toString('hex')}.txt`);
   fs.writeFileSync(`${file}.tmp`, list.join('\r\n'));
   fs.renameSync(`${file}.tmp`, file);
 }
