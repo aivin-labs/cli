@@ -301,7 +301,7 @@ function TypingDots {
 # Link buttons under a bubble (the answer's "open this page" buttons, "view on Aivin"): a click opens the browser, nothing goes to the agent.
 function LinkCard($text, $url, $iconPath = '${LINK_ICON_PATH}') {
   $dock = New-Object Windows.Controls.DockPanel; $dock.MaxWidth = ${CHOICE_ROW_WIDTH}
-  $icon = LucideIcon $(if ($iconPath) { $iconPath } else { '${LINK_ICON_PATH}' }) 13 '${ICON_INKS[2]}'; $icon.Margin = '8,3,0,0'; $icon.VerticalAlignment = 'Top'; [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$dock.Children.Add($icon)
+  $icon = LucideIcon $(if ($iconPath) { $iconPath } else { '${LINK_ICON_PATH}' }) 13 '${ICON_INKS[2]}'; $icon.Margin = '8,2,0,0'; $icon.VerticalAlignment = 'Top'; [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$dock.Children.Add($icon)
   $tb = New-Object Windows.Controls.TextBlock; $tb.TextWrapping = 'Wrap'; $tb.Foreground = Brush '${CHOICE_INK}'; SetText $tb $text; [void]$dock.Children.Add($tb)
   $btn = New-Object Windows.Controls.Button; $btn.Style = $w.FindResource('Btn'); $btn.Content = $dock; $btn.CommandParameter = [string]$url; $btn.ToolTip = [string]$url
   $btn.FontSize = 13; $btn.FontWeight = 'Normal'; $btn.Padding = '10,6,10,6'; $btn.Margin = '0,0,0,3'; $btn.HorizontalAlignment = 'Left'
@@ -381,8 +381,9 @@ function ChatRow($m) {
 # unticks, a confirm button sends the ticked ones), the text, the option's icon at the end when it has one we can draw.
 # Soft look: each card filled with a light pastel (cycling the ask box's glow colors), no border, dark-grey text; hover deepens it.
 # Icon at the end of an option: the daemon looks up the Lucide name (the set Aivin's web uses) and sends its outline; an emoji is drawn as is.
+# Top margin 2 centres it on the first line of text (17 high), so it stays level with the tick mark.
 function ChoiceIcon($o, $ink) {
-  if ($o.icon_path) { $i = LucideIcon $o.icon_path 14 $ink; $i.Margin = '8,3,0,0'; $i.VerticalAlignment = 'Top'; return $i }
+  if ($o.icon_path) { $i = LucideIcon $o.icon_path 14 $ink; $i.Margin = '8,2,0,0'; $i.VerticalAlignment = 'Top'; return $i }
   if (-not $o.icon) { return $null }
   $tb = New-Object Windows.Controls.TextBlock; $tb.FontSize = 13; $tb.Margin = '8,1,0,0'; $tb.VerticalAlignment = 'Top'; SetText $tb $o.icon; $tb
 }

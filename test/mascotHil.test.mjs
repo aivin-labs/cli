@@ -161,6 +161,8 @@ test('nút lựa chọn / nút link vừa ô hỏi cả khi có thanh cuộn: ic
   const ps = hostScript();
   assert.ok(ps.includes(`$row.Width = ${CHOICE_ROW_WIDTH}`));
   assert.ok(ps.includes(`$dock.MaxWidth = ${CHOICE_ROW_WIDTH}`));
+  // Icon ngang tâm dòng chữ đầu (cao 17): lề trên 3 từng làm icon lệch xuống 1,5 px.
+  assert.match(ps, /LucideIcon \$o\.icon_path 14 \$ink; \$i\.Margin = '8,2,0,0'/);
 });
 
 test('cửa sổ có hàng nút lựa chọn + lệnh ask_choices, bấm nút gửi sự kiện choose', () => {
