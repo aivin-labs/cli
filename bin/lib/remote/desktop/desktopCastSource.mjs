@@ -114,10 +114,15 @@ namespace AivinDesktopCast {
   static class Out {
     static readonly object gate = new object();
     static readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+    // stdin/stdout là ống (không console): Console.In/Out mặc định theo bảng mã OEM (437…) còn Node đọc/ghi UTF-8 — 06/11/2026 gõ
+    // "tôi đang gõ tiếng Việt" từ xa ra "t├┤i ─æang g├╡ ti├ß║┐ng". Mở luồng chuẩn với UTF-8 (không BOM) khai rõ ràng.
+    static readonly UTF8Encoding utf8 = new UTF8Encoding(false);
+    static readonly StreamWriter stdout = new StreamWriter(Console.OpenStandardOutput(), utf8);
+    public static readonly StreamReader Stdin = new StreamReader(Console.OpenStandardInput(), utf8);
 
     public static void Send(Dictionary<string, object> msg) {
       string line = json.Serialize(msg);
-      lock (gate) { Console.Out.WriteLine(line); Console.Out.Flush(); }
+      lock (gate) { stdout.WriteLine(line); stdout.Flush(); }
     }
 
     public static Dictionary<string, object> Parse(string text) {
@@ -509,7 +514,7 @@ namespace AivinDesktopCast {
     static void ReadInputLoop() {
       try {
         string line;
-        while (running && (line = Console.In.ReadLine()) != null) {
+        while (running && (line = Out.Stdin.ReadLine()) != null) {
           line = line.Trim();
           if (string.IsNullOrEmpty(line)) continue;
           if (line == "stop") {
@@ -900,6 +905,7 @@ if ($dll -and (Test-Path -LiteralPath $dll)) {
   Add-Type -TypeDefinition ([IO.File]::ReadAllText($src)) -ReferencedAssemblies $refs -OutputAssembly $dll -OutputType Library
   Add-Type -Path $dll
 }
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
 try {
   [AivinDesktopCast.CastHost]::Run($env:AIVIN_CAST_ARGS)
 } catch {

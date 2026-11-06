@@ -1,12 +1,12 @@
 # Aivin mascot
 
 <p align="center">
-  <img src="media/aivin-mascot-live.gif" alt="The current live Aivin mascot showing chat, file drag and attached-file states" width="480" />
+  <img src="media/aivin-mascot-live.gif" alt="The live Aivin mascot ask box showing a conversation and the mascot" width="720" />
 </p>
 
 The Aivin mascot is the floating Windows interface for Aivin Remote. It shows what the agent is doing, accepts typed or spoken questions, and gives access to recent activity without opening the web app.
 
-The animation above is rendered from the current WPF visual tree. It demonstrates the real chat box, the file-drag target and the tray badge after two files have been attached.
+The animation above is an enlarged capture of the real WPF ask box and mascot, cropped to remove excess space. It shows the live conversation and the mascot's file attachment states.
 
 ## How it connects to Aivin
 

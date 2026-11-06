@@ -7,6 +7,7 @@ import { DEVICE_API_PREFIX, DEVICE_CREDENTIALS_FILE, DEVICE_ID_FILE, REMOTE_CONF
 import { parseApiKeyClient } from '../auth.mjs';
 import { TokenStoreKind, forgetToken, openToken, preferredTokenStore, sealToken } from './tokenStore.mjs';
 import { writeFileAtomic } from './atomicFile.mjs';
+import { DEFAULT_SERVER_URL, readActiveServer, resolveServerUrl, serverKey, setActiveServer } from '../servers.mjs';
 
 /** Mã máy ổn định (~/.aivin/device-id.json), giữ qua các lần chạy. */
 export function getOrCreateDeviceId() {
@@ -25,7 +26,7 @@ export function resetDeviceId() {
   fs.mkdirSync(REMOTE_CONFIG_DIR, { recursive: true });
   const deviceId = `dev-${randomUUID()}`;
   fs.writeFileSync(DEVICE_ID_FILE, JSON.stringify({ deviceId, hostname: os.hostname(), createdAt: new Date().toISOString() }, null, 2) + '\n');
-  clearDeviceCredentials();
+  clearAllDeviceCredentials();
   return deviceId;
 }
 
@@ -33,155 +34,139 @@ export function resetDeviceId() {
  * Token đã giải theo nội dung tệp — giải DPAPI / Keychain tốn một tiến trình con (~0,5 s) mà tệp được đọc ở nhiều chỗ (mỗi lời gọi REST
  * lấy tenant từ token). Tệp đổi (ghép lại / xoay token / tiến trình khác ghi) → giải lại.
  */
-let opened = { raw: null, token: null };
+const opened = new Map();
 
-function readRecord() {
-  try {
-    const raw = fs.readFileSync(DEVICE_CREDENTIALS_FILE, 'utf8');
-    return { raw, data: JSON.parse(raw) };
-  } catch {
-    return null;
-  }
+function readStore() {
+  try { const raw = fs.readFileSync(DEVICE_CREDENTIALS_FILE, 'utf8'); return { raw, data: JSON.parse(raw) }; }
+  catch { return null; }
 }
-
-/** Ghi nguyên tử (02/11/2026 — trước đây ghi thẳng, máy tắt / daemon bị giết giữa lúc ghi là tệp cụt → mất ghép máy). */
-function writeRecord(record) {
-  const raw = JSON.stringify(record, null, 2) + '\n';
+function resolveCredentialServer(serverUrl) {
+  if (serverUrl) return resolveServerUrl(serverUrl);
+  const configured = process.env.AIVIN_BASE_URL || process.env.AIVIN_SERVER || readActiveServer();
+  if (configured) return resolveServerUrl(configured);
+  const store = readStore()?.data;
+  if (store?.device_id) return resolveServerUrl(store.server_url || DEFAULT_SERVER_URL);
+  const entries = Object.values(store?.servers || {});
+  if (entries.length === 1 && entries[0]?.server_url) return resolveServerUrl(entries[0].server_url);
+  return DEFAULT_SERVER_URL;
+}
+function readRecord(serverUrl) {
+  const url = resolveCredentialServer(serverUrl); const file = readStore();
+  if (!file?.data) return null;
+  if (file.data.servers && typeof file.data.servers === 'object') {
+    const data = file.data.servers[serverKey(url)];
+    return data ? { raw: file.raw, data, store: file.data, serverUrl: url } : null;
+  }
+  if (file.data.device_id && resolveServerUrl(file.data.server_url || DEFAULT_SERVER_URL) === url)
+    return { raw: file.raw, data: file.data, store: file.data, legacy: true, serverUrl: url };
+  return null;
+}
+function writeRecord(record, serverUrl) {
+  const url = resolveCredentialServer(serverUrl || record.server_url); const current = readStore()?.data;
+  let store;
+  if (current?.servers && typeof current.servers === 'object') store = { ...current, servers: { ...current.servers } };
+  else {
+    store = { version: 2, servers: {} };
+    if (current?.device_id) { const oldUrl = resolveServerUrl(current.server_url || DEFAULT_SERVER_URL); store.servers[serverKey(oldUrl)] = current; }
+  }
+  store.version = 2; store.servers[serverKey(url)] = record;
+  const raw = JSON.stringify(store, null, 2) + '\n';
   writeFileAtomic(DEVICE_CREDENTIALS_FILE, raw);
-  try { fs.chmodSync(DEVICE_CREDENTIALS_FILE, 0o600); } catch { /* Windows: quyền theo ACL hồ sơ người dùng */ }
+  try { fs.chmodSync(DEVICE_CREDENTIALS_FILE, 0o600); } catch { /* Windows ACL follows the user profile */ }
   return raw;
 }
-
-/**
- * Trường do TỆP làm chủ (02/11/2026) — bản trong bộ nhớ của người gọi có thể đã cũ (daemon nạp lúc khởi động), nên khi lưu luôn lấy theo
- * tệp trên đĩa, trừ khi đổi tường minh qua tham số:
- * - `previous_sealed`: token CŨ (cất vào kho bí mật như token chính) giữ tới khi máy chủ xác nhận token xoay vòng mới;
- * - `policy_sealed_at`: máy này đã từng có luật tại máy CÓ CHỮ KÝ (localPolicy.mjs) — xoá cả tệp luật lẫn tệp khoá không đưa được luật về
- *   mặc định một cách lặng lẽ.
- */
 const DISK_OWNED_FIELDS = ['previous_sealed', 'policy_sealed_at'];
-const PREVIOUS_SUFFIX = ':previous';
-
-function sealPrevious(token, deviceId) {
-  const account = `${deviceId}${PREVIOUS_SUFFIX}`;
+const SEAL_RETRY_MS = 24 * 3600_000;
+const tokenAccount = (deviceId, url) => `${deviceId}:${serverKey(url)}`;
+function sealPrevious(token, deviceId, url) {
+  const account = `${tokenAccount(deviceId, url)}:previous`;
   const { fallback_reason: _why, ...sealed } = sealToken(token, { account });
   return { ...sealed, account };
 }
+const openPrevious = (rec) => (rec && typeof rec === 'object' ? openToken({ ...rec, device_id: rec.account, token_account: rec.account }) : null);
+const forgetPrevious = (rec) => { if (rec && typeof rec === 'object') forgetToken({ ...rec, device_id: rec.account, token_account: rec.account }); };
+const clearOpened = (url) => opened.delete(serverKey(url));
 
-const openPrevious = (rec) => (rec && typeof rec === 'object' ? openToken({ ...rec, device_id: rec.account }) : null);
-const forgetPrevious = (rec) => { if (rec && typeof rec === 'object') forgetToken({ ...rec, device_id: rec.account }); };
-
-/** Cất vào kho bí mật hỏng gần đây → không thử lại mỗi lần đọc (mỗi lần thử là một tiến trình PowerShell). */
-const SEAL_RETRY_MS = 24 * 3600_000;
-
-/**
- * Thông tin ghép máy kèm `device_token` đã giải (tokenStore.mjs). Tệp cũ còn token chữ thường mà máy có kho bí mật → chuyển sang kho
- * (lần hỏng gần nhất trong `SEAL_RETRY_MS` thì thôi). Không giải được (tệp chép từ máy / tài khoản khác) → `null` = coi như chưa ghép.
- * `seal_failed: { at, reason }` trên kết quả: token đang nằm chữ thường vì kho bí mật hỏng — daemon in cảnh báo.
- */
-export function loadDeviceCredentials() {
-  const rec = readRecord();
+export function loadDeviceCredentials(serverUrl) {
+  const url = resolveCredentialServer(serverUrl); const key = serverKey(url); const rec = readRecord(url);
   if (!rec?.data) return null;
-  const { data, raw } = rec;
-  if (raw === opened.raw && opened.token) return { ...data, device_token: opened.token };
-  const token = openToken(data);
+  const { data, raw } = rec; const cached = opened.get(key);
+  if (cached?.raw === raw && cached.token) return { ...data, server_url: url, device_token: cached.token };
+  const token = openToken({ ...data, token_account: data.token_account || data.device_id });
   if (!token) return null;
-  opened = { raw, token };
+  opened.set(key, { raw, token });
   const retrySeal = !data.seal_failed || Date.now() - Number(data.seal_failed.at || 0) > SEAL_RETRY_MS;
   if (data.device_token && preferredTokenStore() !== TokenStoreKind.FILE && retrySeal) {
-    saveDeviceCredentials({ ...data, device_token: token });
-    return { ...readRecord()?.data, device_token: token };
+    saveDeviceCredentials({ ...data, server_url: url, device_token: token });
+    return { ...readRecord(url)?.data, server_url: url, device_token: token };
   }
-  return { ...data, device_token: token };
+  return { ...data, server_url: url, device_token: token };
 }
-
-/**
- * Ghi token (kho bí mật của hệ điều hành; hỏng → tệp thường kèm `seal_failed` có lý do để báo người dùng, không lặng lẽ). Trả lý do hỏng
- * (`null` khi cất được hoặc máy vốn không có kho).
- */
 export function saveDeviceCredentials(creds, { previousToken } = {}) {
+  const url = resolveCredentialServer(creds.server_url); const key = serverKey(url); const account = tokenAccount(creds.device_id, url);
   const { device_token: token, token_store: _s, token_enc: _e, seal_failed: _f, ...rest } = creds;
-  for (const f of DISK_OWNED_FIELDS) delete rest[f];
-  const disk = readRecord()?.data || {};
-  // Cùng mã máy → giữ trường của tệp; ghép máy khác thì token cũ không còn nghĩa.
-  const kept = {};
+  for (const f of DISK_OWNED_FIELDS) delete rest[f]; delete rest.token_account;
+  const disk = readRecord(url)?.data || {}; const kept = {};
   if (disk.device_id === creds.device_id && disk.previous_sealed) kept.previous_sealed = disk.previous_sealed;
-  if (disk.policy_sealed_at) kept.policy_sealed_at = disk.policy_sealed_at;
+  if (disk.device_id === creds.device_id && disk.policy_sealed_at) kept.policy_sealed_at = disk.policy_sealed_at;
   if (previousToken !== undefined) {
     if (kept.previous_sealed) forgetPrevious(kept.previous_sealed);
     delete kept.previous_sealed;
-    if (previousToken) kept.previous_sealed = sealPrevious(previousToken, creds.device_id);
+    if (previousToken) kept.previous_sealed = sealPrevious(previousToken, creds.device_id, url);
   }
-  const sealed = sealToken(token, { account: creds.device_id });
-  const { fallback_reason: reason, ...stored } = sealed;
-  const raw = writeRecord({ ...rest, ...stored, ...kept, ...(reason ? { seal_failed: { at: Date.now(), reason } } : {}) });
-  opened = { raw, token };
-  return reason || null;
+  const sealed = sealToken(token, { account }); const { fallback_reason: reason, ...stored } = sealed;
+  const raw = writeRecord({ ...rest, server_url: url, token_account: account, ...stored, ...kept, ...(reason ? { seal_failed: { at: Date.now(), reason } } : {}) }, url);
+  opened.set(key, { raw, token }); return reason || null;
 }
-
-/**
- * Xoay vòng token (02/11/2026): token cũ giữ trong `previous_sealed` tới khi máy chủ xác nhận token mới. Trước đây ack ROTATED lỡ mất mà máy
- * chủ không chốt được token mới → lần nối sau `DEVICE_UNAUTHORIZED` → xoá sạch ghép máy dù token cũ vẫn còn hiệu lực.
- */
-export function pendingPreviousToken() {
-  return openPrevious(readRecord()?.data?.previous_sealed);
-}
-
-/** Máy chủ đã nhận token mới (ack ROTATED đúng / chào thành công bằng token mới) → bỏ token cũ. Trả true khi có bỏ. */
-export function confirmTokenRotation(currentToken) {
-  if (!readRecord()?.data?.previous_sealed) return false;
-  const creds = loadDeviceCredentials();
+export function pendingPreviousToken(serverUrl) { return openPrevious(readRecord(serverUrl)?.data?.previous_sealed); }
+export function confirmTokenRotation(currentToken, serverUrl) {
+  if (!readRecord(serverUrl)?.data?.previous_sealed) return false;
+  const creds = loadDeviceCredentials(serverUrl);
   if (!creds || (currentToken && creds.device_token !== currentToken)) return false;
-  saveDeviceCredentials(creds, { previousToken: null });
-  return true;
+  saveDeviceCredentials(creds, { previousToken: null }); return true;
 }
-
-/**
- * Token `failedToken` bị máy chủ từ chối mà còn token cũ chưa bỏ (xoay vòng chưa chốt) → quay về token cũ, trả nó; không có → null (người
- * gọi mới được xoá ghép máy).
- */
-export function revertTokenRotation(failedToken) {
-  const creds = loadDeviceCredentials();
+export function revertTokenRotation(failedToken, serverUrl) {
+  const creds = loadDeviceCredentials(serverUrl);
   if (!creds || (failedToken && creds.device_token !== failedToken)) return null;
-  const previous = pendingPreviousToken();
+  const previous = pendingPreviousToken(serverUrl);
   if (!previous || previous === creds.device_token) return null;
   saveDeviceCredentials({ ...creds, device_token: previous }, { previousToken: null });
-  return readStoredTokenFresh() === previous ? previous : null;
+  return readStoredTokenFresh(serverUrl) === previous ? previous : null;
 }
-
-/** Dấu bền "máy đã từng có luật tại máy có chữ ký" (xem DISK_OWNED_FIELDS) — chỉ ghi khi đã ghép máy (có tệp thông tin ghép). */
-export function notePolicySealed() {
-  const rec = readRecord();
+export function notePolicySealed(serverUrl) {
+  const url = resolveCredentialServer(serverUrl); const rec = readRecord(url);
   if (!rec?.data || rec.data.policy_sealed_at) return;
   try {
-    const raw = writeRecord({ ...rec.data, policy_sealed_at: new Date().toISOString() });
-    if (opened.raw === rec.raw) opened = { raw, token: opened.token };
-  } catch { /* không ghi được: daemon vẫn nhớ trong bộ nhớ */ }
+    const raw = writeRecord({ ...rec.data, policy_sealed_at: new Date().toISOString() }, url);
+    const cached = opened.get(serverKey(url)); if (cached?.raw === rec.raw) opened.set(serverKey(url), { raw, token: cached.token });
+  } catch { /* daemon still remembers it in memory */ }
 }
-
-export function policySealedNoted() {
-  return !!readRecord()?.data?.policy_sealed_at;
+export function policySealedNoted(serverUrl) { return !!readRecord(serverUrl)?.data?.policy_sealed_at; }
+export function readStoredTokenFresh(serverUrl) {
+  const data = readRecord(serverUrl)?.data;
+  return data ? openToken({ ...data, token_account: data.token_account || data.device_id }) : null;
 }
-
-/** Đọc lại token từ tệp + kho bí mật thật (không qua bộ nhớ đệm) — kiểm sau khi ghi token mới. */
-export function readStoredTokenFresh() {
-  const data = readRecord()?.data;
-  return data ? openToken(data) : null;
+export function clearDeviceCredentials(onlyToken, serverUrl) {
+  const url = resolveCredentialServer(serverUrl); const rec = readRecord(url);
+  if (onlyToken && loadDeviceCredentials(url)?.device_token !== onlyToken) return false;
+  if (rec?.data) {
+    forgetToken({ ...rec.data, token_account: rec.data.token_account || rec.data.device_id }); forgetPrevious(rec.data.previous_sealed);
+    const store = rec.store?.servers ? { ...rec.store, servers: { ...rec.store.servers } } : { version: 2, servers: {} };
+    delete store.servers[serverKey(url)];
+    if (Object.keys(store.servers).length) {
+      const raw = JSON.stringify(store, null, 2) + '\n'; writeFileAtomic(DEVICE_CREDENTIALS_FILE, raw);
+      try { fs.chmodSync(DEVICE_CREDENTIALS_FILE, 0o600); } catch { /* Windows ACL follows the user profile */ }
+    } else { try { fs.unlinkSync(DEVICE_CREDENTIALS_FILE); } catch { /* already clear */ } }
+  }
+  clearOpened(url); return true;
 }
-
-/**
- * Xoá token đã lưu. `onlyToken`: chỉ xoá khi tệp còn đúng token đó — daemon cũ (token vừa hết hiệu lực vì máy được ghép lại, vd chạy
- * lại bộ cài trong lúc bản cũ còn nhận việc) không được xoá token MỚI mà daemon mới vừa ghi (chạy thật 26/10/2026: lần khởi động sau mất
- * kết nối).
- */
-export function clearDeviceCredentials(onlyToken) {
-  if (onlyToken && loadDeviceCredentials()?.device_token !== onlyToken) return false;
-  forgetToken(readRecord()?.data);
-  try { fs.unlinkSync(DEVICE_CREDENTIALS_FILE); } catch { /* không có thì thôi */ }
-  opened = { raw: null, token: null };
-  return true;
+export function clearAllDeviceCredentials() {
+  const store = readStore()?.data;
+  const records = store?.servers ? Object.values(store.servers) : store?.device_id ? [store] : [];
+  for (const rec of records) { forgetToken({ ...rec, token_account: rec.token_account || rec.device_id }); forgetPrevious(rec.previous_sealed); }
+  try { fs.unlinkSync(DEVICE_CREDENTIALS_FILE); } catch { /* already clear */ }
+  opened.clear(); return true;
 }
-
 /**
  * Máy tính tổ chức: BE cấp token thiết bị lúc tạo container và đặt vào env (`AIVIN_DEVICE_TOKEN` / `AIVIN_DEVICE_ID` / `AIVIN_SERVER`) — không
  * ghép máy, không ghi tệp token. Thiếu biến → `null`.
@@ -189,7 +174,7 @@ export function clearDeviceCredentials(onlyToken) {
 export function credentialsFromEnv(env = process.env) {
   const token = String(env.AIVIN_DEVICE_TOKEN || '').trim();
   const deviceId = String(env.AIVIN_DEVICE_ID || '').trim();
-  const serverUrl = String(env.AIVIN_SERVER || '').trim().replace(/\/+$/, '');
+  const serverUrl = String(env.AIVIN_SERVER || '').trim() ? resolveServerUrl(String(env.AIVIN_SERVER).trim()) : '';
   if (!token || !deviceId || !serverUrl) return null;
   return { device_token: token, device_id: deviceId, name: String(env.AIVIN_DEVICE_NAME || deviceId), server_url: serverUrl };
 }
@@ -262,6 +247,7 @@ function savePairResult(res, { serverUrl, deviceId, roots, name }) {
     lang: data.user_lang || data.lang || undefined,
   };
   saveDeviceCredentials(creds);
+  setActiveServer(serverUrl);
   return creds;
 }
 

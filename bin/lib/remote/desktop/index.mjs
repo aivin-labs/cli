@@ -149,7 +149,7 @@ export function unregisterStartup() {
 
 // --- Biên dịch Aivin.exe + lối tắt Start menu ------------------------------------------------------------------------------------
 
-const SETUP_PS1 = `param([string]$Src, [string]$Ico, [string]$Out, [string]$Lnk, [string]$Target, [string]$Desc, [string]$LnkArgs)
+const SETUP_PS1 = `param([string]$Src, [string]$Ico, [string]$Out, [string]$Lnk, [string]$Target, [string]$Desc, [string]$LnkArgs, [string]$DesktopLnkName, [string]$RemoveDesktopLnkName)
 $ErrorActionPreference = 'Stop'
 if ($Src) {
   $p = New-Object System.CodeDom.Compiler.CompilerParameters
@@ -160,9 +160,9 @@ if ($Src) {
   $r = (New-Object Microsoft.CSharp.CSharpCodeProvider).CompileAssemblyFromSource($p, [IO.File]::ReadAllText($Src, [Text.Encoding]::UTF8))
   if ($r.Errors.HasErrors) { $r.Errors | Where-Object { -not $_.IsWarning } | ForEach-Object { [Console]::Error.WriteLine($_.ToString()) }; exit 1 }
 }
-if ($Lnk) {
-  New-Item -ItemType Directory -Force -Path (Split-Path $Lnk) | Out-Null
-  $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Lnk)
+function New-AivinShortcut($Path) {
+  New-Item -ItemType Directory -Force -Path (Split-Path $Path) | Out-Null
+  $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Path)
   $s.TargetPath = $Target
   if ($LnkArgs) { $s.Arguments = $LnkArgs }
   $s.IconLocation = "$Target,0"
@@ -170,6 +170,11 @@ if ($Lnk) {
   $s.Description = $Desc
   $s.Save()
 }
+if ($Lnk) { New-AivinShortcut $Lnk }
+$shell = New-Object -ComObject WScript.Shell
+$desktopPath = $shell.SpecialFolders.Item('Desktop')
+if ($DesktopLnkName) { New-AivinShortcut (Join-Path $desktopPath $DesktopLnkName) }
+if ($RemoveDesktopLnkName) { Remove-Item -LiteralPath (Join-Path $desktopPath $RemoveDesktopLnkName) -Force -ErrorAction SilentlyContinue }
 `;
 
 function runSetup(params, dir) {
@@ -228,6 +233,16 @@ export function ensureLauncher({ exe = launcherExePath(), home = REMOTE_CONFIG_D
 export function ensureStartMenuShortcut({ exe = launcherExePath(), lnk = startMenuShortcutPath(), lang = 'en', dir = DESKTOP_DIR } = {}) {
   runSetup({ Lnk: lnk, Target: exe, Desc: trayStrings(lang).shortcut }, dir);
   return lnk;
+}
+
+export function desktopShortcutName() {
+  return `${DISPLAY_NAME}.lnk`;
+}
+
+export function ensureDesktopShortcut({ exe = launcherExePath(), lang = 'en', dir = DESKTOP_DIR } = {}) {
+  const name = desktopShortcutName();
+  runSetup({ DesktopLnkName: name, Target: exe, Desc: trayStrings(lang).shortcut }, dir);
+  return name;
 }
 
 /** Lối tắt trong "Send to" (chuột phải → Send to → AIVIN Bot): Aivin.exe --share <các tệp> — một lần cho cả nhóm tệp đã chọn. */
@@ -329,12 +344,13 @@ export function installDesktop({ argv, rollback = null, lang = 'en', autostart =
   const lnk = startMenuShortcutPath();
   for (const p of legacyStartMenuShortcutPaths()) fs.rmSync(p, { force: true });
   if (built || !fs.existsSync(lnk)) ensureStartMenuShortcut({ exe, lnk, lang });
+  const desktopShortcut = ensureDesktopShortcut({ exe, lang });
   if (autostart) registerStartup(exe);
   const openWith = registerOpenWith(exe, lang);
   if (launch && built) quitRunningTray({ exe });
   else if (launch) restartListener();
   if (launch) launchTray({ exe, mode: launchMode });
-  return { exe, shortcut: lnk, built, autostart: startupState().enabled, openWith };
+  return { exe, shortcut: lnk, desktopShortcut, built, autostart: startupState().enabled, openWith };
 }
 
 /** "Mở bằng / Gửi cho AIVIN Bot" (fileAssociation.mjs) + lối tắt Send to — lỗi registry không làm hỏng cả bước cài. */
@@ -361,6 +377,7 @@ export function uninstallDesktop({ wait = sleepSync } = {}) {
   unregisterFileAssociations();
   unregisterUninstallEntry();
   fs.rmSync(startMenuShortcutPath(), { force: true });
+  try { runSetup({ RemoveDesktopLnkName: desktopShortcutName() }, DESKTOP_DIR); } catch { /* shortcut may already be gone or desktop unavailable */ }
   fs.rmSync(sendToShortcutPath(), { force: true });
   for (const p of legacyStartMenuShortcutPaths()) fs.rmSync(p, { force: true });
   for (let i = 0; i < 20 && fs.existsSync(exe); i++) {

@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import readline from 'readline/promises';
 import { io } from 'socket.io-client';
 import { DEFAULT_AIVIN_BASE_URL } from '../context.mjs';
+import { readActiveServer, resolveServerUrl as normalizeServerUrl, setActiveServer } from '../servers.mjs';
 import { logActivity } from './activityLog.mjs';
 import { DEFAULT_SCOPE_LIMITS, DEVICE_NAMESPACE, CastState, DeviceAccess, DeviceErrorCode, DeviceEvent, HoldPhase, MAX_RESULT_BYTES, PROTOCOL_VERSION, REMOTE_IDEM_FILE, REMOTE_OUTBOX_FILE, ServerFeature, ToolGroup } from './constants.mjs';
 import { CallState, createCallLedger } from './callLedger.mjs';
@@ -126,10 +127,13 @@ function boundedResult(outcome) {
  * thì dùng `--server` (hoặc `--repair`).
  */
 export function resolveServerUrl(options, saved, env = process.env) {
-  const url = options.server || options.serverUrl
-    || (options.code ? undefined : (options.repair ? undefined : saved?.server_url) || env.AIVIN_BASE_URL)
+  const explicit = options.server || options.serverUrl;
+  const url = explicit || (options.code ? DEFAULT_AIVIN_BASE_URL : null)
+    || readActiveServer()
+    || (options.repair ? undefined : saved?.server_url)
+    || env.AIVIN_BASE_URL || env.AIVIN_SERVER
     || DEFAULT_AIVIN_BASE_URL;
-  return String(url).replace(/\/+$/, '');
+  return normalizeServerUrl(url);
 }
 
 /**
@@ -155,11 +159,13 @@ async function confirmServerChange(saved, serverUrl) {
  * không thì ghép mới bằng API key đang đăng nhập.
  */
 async function ensurePaired({ serverUrl, apiKey, code, roots, rootsGiven, name, repair, profile }) {
-  let creds = loadDeviceCredentials();
-  await confirmServerChange(creds, serverUrl);
+  const current = loadDeviceCredentials();
+  await confirmServerChange(current, serverUrl);
+  setActiveServer(serverUrl);
+  let creds = loadDeviceCredentials(serverUrl);
   if (code) {
     creds = await pairDeviceWithCode({ serverUrl, code, roots, name, profile });
-  } else if (!creds || creds.server_url !== serverUrl || repair) {
+  } else if (!creds || repair) {
     creds = await pairDevice({ serverUrl, apiKey, roots, name, profile });
   } else if (rootsGiven && JSON.stringify(roots) !== JSON.stringify(creds.roots)) {
     creds.roots = roots;
@@ -182,6 +188,7 @@ export async function pairWithCodeOnly(options) {
   const access = fullAccess ? DeviceAccess.FULL : DeviceAccess.FOLDERS;
   const profile = { ...buildDeviceProfile(fullAccess ? [os.homedir()] : roots), roots, access };
   const creds = await pairDeviceWithCode({ serverUrl, code: options.code, roots, name: options.name, profile });
+  setActiveServer(serverUrl);
   saveDeviceCredentials({ ...creds, access });
   const stale = lockHolder();
   if (stale) try { process.kill(stale); } catch { /* vừa tự thoát */ }
@@ -199,8 +206,9 @@ export async function startRemoteClient(options = {}) {
   const envCreds = multiUser ? credentialsFromEnv() : null;
   if (multiUser && !envCreds) throw new Error('--multi-user cần AIVIN_DEVICE_TOKEN, AIVIN_DEVICE_ID và AIVIN_SERVER (máy tính tổ chức do Aivin cấp).');
   if (multiUser && process.platform === 'win32') throw new Error('--multi-user chỉ chạy trên Linux (container máy tính tổ chức).');
-  const saved = envCreds || loadDeviceCredentials();
-  const serverUrl = resolveServerUrl(options, saved);
+  const savedHint = envCreds || loadDeviceCredentials();
+  const serverUrl = resolveServerUrl(options, savedHint);
+  const saved = envCreds || loadDeviceCredentials(serverUrl);
   // Trước mọi lời gọi mạng (ghép máy cũng đi qua proxy).
   const proxy = configureProxy({ explicit: options.proxy });
   const apiKey = options.apiKey ?? process.env.API_KEY;
@@ -666,7 +674,7 @@ export async function startRemoteClient(options = {}) {
       const fallback = saveDeviceCredentials({ ...creds, device_token: token }, { previousToken: previous });
       if (fallback) say(chalk.yellow(`   ⚠️  Kho bí mật của máy lỗi (${fallback}) — token mới nằm trong tệp thường`));
       // Đọc lại thật từ tệp + kho bí mật (không qua bộ nhớ đệm): ghi hỏng mà vẫn báo BE là lần khởi động sau máy bị khoá ngoài.
-      if (readStoredTokenFresh() !== token) throw new Error('saved token does not read back');
+      if (readStoredTokenFresh(serverUrl) !== token) throw new Error('saved token does not read back');
     } catch (e) {
       try { saveDeviceCredentials({ ...creds, device_token: previous }, { previousToken: null }); } catch { /* giữ nguyên tệp */ }
       say(chalk.yellow(`   ⚠️  Không lưu được token mới (${e.message}) — tiếp tục dùng token cũ`));
@@ -676,7 +684,7 @@ export async function startRemoteClient(options = {}) {
     socket.auth = { ...socket.auth, device_token: token };
     // Gửi kèm chính token mới: BE chỉ chốt khi băm của nó đúng token đang chờ (chứng minh máy này nhận được token đó).
     const ack = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.ROTATED, { token }).catch(() => null);
-    if (ack?.ok === true) settleRotation(token);
+    if (ack?.ok === true) settleRotation(token, serverUrl);
     logActivity({ type: 'token_rotated', deviceId: creds.device_id, confirmed: ack?.ok === true });
     say(chalk.gray(ack?.ok
       ? '   🔑 Đã đổi token máy định kỳ (token cũ hết hiệu lực)'
@@ -711,7 +719,7 @@ export async function startRemoteClient(options = {}) {
         cancelGating(orphaned);
         ledger.drop(orphaned);
       }
-      if (!envCreds) settleRotation(creds.device_token); // chào được bằng token đang dùng → bỏ token cũ còn giữ (nếu có)
+      if (!envCreds) settleRotation(creds.device_token, serverUrl); // chào được bằng token đang dùng → bỏ token cũ còn giữ (nếu có)
       if (typeof hello?.rotate_token === 'string' && !envCreds) await rotateToken(hello.rotate_token);
       // BE cần bản CLI tối thiểu (tính năng mới phía máy) → kiểm cập nhật ngay thay vì chờ tới lượt.
       if (hello?.cli) updater?.setServerHints(hello.cli);
@@ -903,7 +911,7 @@ export async function startRemoteClient(options = {}) {
     if (err?.message === 'DEVICE_UNAUTHORIZED') {
       // Token xoay vòng chưa được chốt → thử lại bằng token cũ trước khi xoá ghép máy (02/11/2026).
       if (!envCreds && fallBackToPreviousToken({ creds, socket, isStopped: () => stopped })) return void say(chalk.yellow('   ⚠️  Máy chủ chưa nhận token mới — nối lại bằng token cũ'));
-      const replaced = !clearDeviceCredentials(creds.device_token);
+      const replaced = !clearDeviceCredentials(creds.device_token, serverUrl);
       console.log(chalk.red(replaced
         ? '❌ Máy này vừa được ghép lại bởi một cửa sổ khác — cửa sổ này dừng, cửa sổ mới tiếp tục nhận việc.'
         : '❌ Token của máy không còn hiệu lực (đã thu hồi hoặc ghép lại ở nơi khác). Chạy `aivin remote start` để ghép lại.'));
@@ -918,7 +926,7 @@ export async function startRemoteClient(options = {}) {
     stopForGood();
   }));
   socket.on(DeviceEvent.REVOKED, guarded(DeviceEvent.REVOKED, () => {
-    clearDeviceCredentials(creds.device_token);
+    clearDeviceCredentials(creds.device_token, serverUrl);
     console.log(chalk.red('❌ Máy này đã bị thu hồi quyền điều khiển từ xa.'));
     stopForGood();
   }));
@@ -1076,8 +1084,9 @@ export async function startRemoteClient(options = {}) {
  * socket, bắt tay thử sẽ đá daemon đang chạy ra.
  */
 export async function testRemoteConnection(options = {}) {
-  const creds = loadDeviceCredentials();
-  const serverUrl = resolveServerUrl(options, creds);
+  const savedHint = loadDeviceCredentials();
+  const serverUrl = resolveServerUrl(options, savedHint);
+  const creds = loadDeviceCredentials(serverUrl);
   const apiKey = options.apiKey ?? process.env.API_KEY;
   const report = { serverUrl, paired: !!creds, deviceId: creds?.device_id, httpOk: false, latencyMs: null, online: null, error: null };
   const startedAt = Date.now();

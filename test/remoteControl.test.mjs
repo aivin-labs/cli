@@ -75,14 +75,14 @@ test('khoá một tiến trình nhận việc: cửa sổ thứ hai bị từ ch
 
 test('daemon cũ chỉ xoá token của chính nó — không xoá token mới vừa ghép bởi cửa sổ khác', async () => {
   const { saveDeviceCredentials, loadDeviceCredentials, clearDeviceCredentials } = await import('../bin/lib/remote/credentials.mjs');
-  saveDeviceCredentials({ server_url: 'http://x', device_id: 'dev-test-1', device_token: 'wes-dk-new', roots: [] });
+  saveDeviceCredentials({ server_url: 'http://localhost:3333', device_id: 'dev-test-1', device_token: 'wes-dk-new', roots: [] });
   assert.equal(clearDeviceCredentials('wes-dk-old'), false);
   assert.equal(loadDeviceCredentials()?.device_token, 'wes-dk-new');
   assert.equal(clearDeviceCredentials('wes-dk-new'), true);
   assert.equal(loadDeviceCredentials(), null);
 });
 
-test('chọn máy chủ: --server > mã kết nối (mặc định) > máy đã ghép > đăng nhập CLI > mặc định', () => {
+test('chọn máy chủ: --server > server đang chọn > máy đã ghép khi không có server chọn > mặc định', () => {
   const saved = { server_url: 'https://saved.example' };
   const env = { AIVIN_BASE_URL: 'https://login.example', API_KEY: 'k' };
   assert.equal(remote.resolveServerUrl({ server: 'https://x.example/', code: 'A' }, saved, env), 'https://x.example');

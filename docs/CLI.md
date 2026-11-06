@@ -995,6 +995,20 @@ aivin login --api-key <key>
 
 Skips login entirely - just saves the given key to `~/.aivin/credentials`.
 
+## `aivin server`
+
+Choose which Aivin server this machine uses. The choice is stored in `~/.aivin/server.json`; CLI API login contexts and remote-device pairing tokens remain separate for each server.
+
+```bash
+aivin server                 # show the active server
+aivin server cloud           # production API (https://api.aivin.cloud)
+aivin server vn               # Vietnam API (https://api.aivin.vn)
+aivin server local            # localhost:3001
+aivin server local:3247       # localhost on a custom port
+aivin server https://host     # self-hosted server
+```
+
+Aivin-owned `*.aivin.cloud` and `*.aivin.vn` hosts resolve to their API host, while explicit API hosts are retained. Only localhost accepts HTTP. The tray menu also has Cloud, VN, and Local choices. Switching servers with a running daemon asks before stopping its current work; the tray then reconnects using that server?s saved pairing, or asks to pair if none exists. Pairing codes are server-specific, so include `--server` when a code was created on a non-default server.
 ## `aivin whoami`
 
 Shows which account is currently active on this machine - reads `~/.aivin/credentials` straight
@@ -1241,7 +1255,7 @@ Preview all eight mascot animations locally without pairing or starting the list
 aivin ui --demo
 ```
 
-Current live-interface capture showing chat, file drag and attached files: [media/aivin-mascot-live.gif](media/aivin-mascot-live.gif)
+Current live-interface capture of the real ask box, mascot, chat and attached-file states: [media/aivin-mascot-live.gif](media/aivin-mascot-live.gif)
 
 ## `aivin desktop`
 
@@ -1253,8 +1267,18 @@ the computer).
 ```bash
 aivin desktop install                 # app + search entry + start with the computer (on by default)
 aivin desktop install --no-autostart  # same, without starting with the computer
+aivin desktop install --open-platform # Windows: open the platform app window after install
 aivin desktop uninstall               # closes the app (and the listener it runs), removes all of it - `aivin` itself stays
 aivin desktop                         # status
+```
+
+On Windows, `install.ps1` asks how Aivin should start. The recommended choice (default: press Enter) creates Desktop and Start
+shortcuts, starts Aivin in the background with Windows, and opens the platform app window after setup. The other choices keep
+Aivin in the background without opening the platform, or open the platform once without enabling startup. Set
+`AIVIN_OPEN_PLATFORM=0` or `AIVIN_NO_AUTOSTART=1` to override the prompt for scripted installs. For example:
+
+```powershell
+$env:AIVIN_OPEN_PLATFORM='0'; irm https://get.aivin.vn/install.ps1 | iex
 ```
 
 | | Windows | macOS | Linux |
@@ -1557,8 +1581,8 @@ machine picks it up automatically - there's no per-project credential to manage.
 
 | Variable            | Used by                                          | Default                     | When you'd touch it                                          |
 | -------------------- | -------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------- |
-| `SDK_ENDPOINT`  | SDK calls, `aivin start`                   | `sdk.aivin.cloud:443`      | Point `main()`'s SDK calls at a local/dev/staging backend instead of production. Staging: `beta-sdk.aivin.vn:50052` (dedicated Cloudflare Tunnel TLS port - production goes through a load balancer on the standard 443 port instead, a different setup). |
-| `AIVIN_BASE_URL`     | `deploy`, `test`, `plugin make/convert/trigger`, `login --basic` | `https://api.aivin.cloud`    | Only for a self-hosted or staging instance. Staging: `https://beta-api.aivin.vn`. |
+| `SDK_ENDPOINT`  | SDK calls, `aivin start`                   | `sdk.aivin.cloud:443`      | Point `main()`'s SDK calls at a local/dev/staging backend instead of production. Staging: `sdk.aivin.vn:50052` (dedicated Cloudflare Tunnel TLS port - production goes through a load balancer on the standard 443 port instead, a different setup). |
+| `AIVIN_BASE_URL`     | `deploy`, `test`, `plugin make/convert/trigger`, `login --basic` | `https://api.aivin.cloud`    | Only for a self-hosted or staging instance. Staging: `https://api.aivin.vn`. |
 | `AIVIN_WEB_URL`      | `login` (browser flow)                             | `https://brain.aivin.cloud`  | Only for a self-hosted or staging instance.                   |
 | `LOCAL_TEST_PORT`    | `aivin start`                                       | `4001`                       | Only if `4001` is already taken on your machine.              |
 | `LOCAL_TEST_HOST`    | `aivin start`                                       | `127.0.0.1`                  | Loopback-only by default (`/invoke` has no auth) - only widen this if you deliberately want another device on your network to reach it. See [sdk repo's SECURITY.md](https://github.com/aivin-labs/AIVIN-SDK/blob/main/docs/SECURITY.md). |

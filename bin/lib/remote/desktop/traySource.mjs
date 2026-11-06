@@ -15,6 +15,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -54,10 +55,12 @@ namespace AivinDesktop {
       bool installed = Array.IndexOf(args, "--installed") >= 0;
       bool quit = Array.IndexOf(args, "--quit") >= 0;
       bool created;
+      using (EventWaitHandle platformLaunch = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\AivinTrayPlatform-" + id)) {
       using (Mutex mutex = new Mutex(true, "Local\\AivinTray-" + id, out created)) {
         if (!created) {
-          // Đã có một bản chạy: mở Start menu / Aivin.exe lần nữa = mở Aivin; --quit = bảo bản đó thoát.
+          // Double-click Aivin.exe / Start menu mở platform; lệnh nội bộ vẫn chỉ đánh thức linh vật.
           if (quit) Signal("Local\\AivinTrayQuit-" + id);
+          else if (args.Length == 0) platformLaunch.Set();
           else if (!autostart && !installed) Signal("Local\\AivinTrayOpen-" + id);
           return 0;
         }
@@ -67,6 +70,7 @@ namespace AivinDesktop {
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new TrayApp(id, !autostart && !installed, installed));
         GC.KeepAlive(mutex);
+      }
       }
       // Sau khi nhả mutex: mở trước đó thì bản mới gặp mutex, thoát im lặng.
       if (Relaunch) try { Process.Start(Application.ExecutablePath, "--autostart"); } catch { }
@@ -323,6 +327,7 @@ namespace AivinDesktop {
     const string ValueName = "Aivin";
 
     static readonly string CredsFile = Path.Combine(Program.Home, "device-credentials.json");
+    static readonly string ServerFile = Path.Combine(Program.Home, "server.json");
     static readonly string LockFile = Path.Combine(Program.Home, "remote-daemon.lock");
     static readonly string PausedFile = Path.Combine(Program.Home, "remote-paused");
     static readonly string ShowFile = Path.Combine(Program.Home, "mascot-show");
@@ -355,11 +360,12 @@ namespace AivinDesktop {
     Config cfg;
     NotifyIcon tray;
     Icon colorIcon, greyIcon, shownIcon;
-    ToolStripMenuItem status, updateItem, open, quickChat, quickVoice, pause, startup, mascot, terminal, quit;
+    ToolStripMenuItem status, updateItem, open, quickChat, quickVoice, pause, startup, mascot, terminal, quit, serverMenu, serverCloud, serverVn, serverLocal;
     ToolStripSeparator quickSeparator;
     System.Windows.Forms.Timer timer;
     Control invoker;
     EventWaitHandle openEvent, quitEvent;
+    EventWaitHandle platformEvent;
     Process child;
     DateTime childStarted;
     DateTime nextStart = DateTime.MinValue;
@@ -398,6 +404,11 @@ namespace AivinDesktop {
       mascot = Item(cfg.T("mascot"), delegate { ToggleMascot(); });
       pause = Item("", delegate { TogglePause(); });
       terminal = Item(cfg.T("terminal"), delegate { OpenTerminal(); });
+      serverMenu = Item(cfg.T("server"), delegate { });
+      serverCloud = Item(cfg.T("serverCloud"), delegate { ChangeServer("https://api.aivin.cloud"); });
+      serverVn = Item(cfg.T("serverVn"), delegate { ChangeServer("https://api.aivin.vn"); });
+      serverLocal = Item(cfg.T("serverLocal"), delegate { ChangeServer("http://localhost:3001"); });
+      serverMenu.DropDownItems.AddRange(new ToolStripItem[] { serverCloud, serverVn, serverLocal });
       startup = Item(cfg.T("startup"), delegate { SetStartup(!StartupEnabled()); Refresh(); });
       updateItem = Item("", delegate { CheckOrApplyUpdate(); });
 
@@ -416,6 +427,7 @@ namespace AivinDesktop {
         new ToolStripSeparator(),
         mascot,
         pause,
+        serverMenu,
         new ToolStripSeparator(),
         startup,
         updateItem,
@@ -435,19 +447,21 @@ namespace AivinDesktop {
 
       openEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\AivinTrayOpen-" + id);
       quitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\AivinTrayQuit-" + id);
+      platformEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\AivinTrayPlatform-" + id);
       ThreadPool.RegisterWaitForSingleObject(openEvent, delegate { UI(OpenAivin); }, null, -1, false);
       ThreadPool.RegisterWaitForSingleObject(quitEvent, delegate { UI(Quit); }, null, -1, false);
+      ThreadPool.RegisterWaitForSingleObject(platformEvent, delegate { UI(OpenPlatform); }, null, -1, false);
 
       timer = new System.Windows.Forms.Timer();
       timer.Interval = 2000;
       timer.Tick += delegate { Tick(); };
       timer.Start();
 
-      wasPaired = File.Exists(CredsFile);
+      wasPaired = HasPairedServer();
       Tick();
       if (interactive) {
         if (wasPaired) Balloon(cfg.T("firstRun"), ToolTipIcon.Info);
-        OpenAivin();
+        OpenPlatform();
       } else if (hint) {
         // Vừa cài: chỉ báo ở khay, không bật hộp nhập mã (bộ cài có thể đang ghép máy bằng mã ở cửa sổ của nó).
         Balloon(cfg.T(wasPaired ? "firstRun" : "connectHint"), ToolTipIcon.Info);
@@ -480,7 +494,7 @@ namespace AivinDesktop {
       if (quitting) return;
       if (child != null && child.HasExited) OnChildExit();
       if (SwapIfExeReplaced()) return;
-      bool paired = File.Exists(CredsFile);
+      bool paired = HasPairedServer();
       if (paired && !wasPaired) Balloon(cfg.T("connected"), ToolTipIcon.Info);
       wasPaired = paired;
       if (child == null && paired && DateTime.Now >= nextStart && LockHolder() == 0) StartChild(null);
@@ -515,6 +529,9 @@ namespace AivinDesktop {
       psi.UseShellExecute = false;
       psi.CreateNoWindow = true;
       psi.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+      psi.EnvironmentVariables.Remove("AIVIN_BASE_URL");
+      psi.EnvironmentVariables.Remove("API_KEY");
+      psi.EnvironmentVariables.Remove("SDK_ENDPOINT");
       psi.EnvironmentVariables["AIVIN_SUPERVISOR"] = "tray";
       psi.RedirectStandardOutput = true;
       psi.RedirectStandardError = true;
@@ -551,7 +568,7 @@ namespace AivinDesktop {
       child = null;
       bool wasPairing = pairing;
       pairing = false;
-      if (wasPairing && !File.Exists(CredsFile)) {
+      if (wasPairing && !HasPairedServer()) {
         Balloon(cfg.T("pairFailed"), ToolTipIcon.Warning);
         return;
       }
@@ -652,7 +669,7 @@ namespace AivinDesktop {
     }
 
     void Refresh() {
-      bool paired = File.Exists(CredsFile);
+      bool paired = HasPairedServer();
       bool paused = File.Exists(PausedFile);
       bool running = Running();
       string state = !paired ? cfg.T(pairing ? "connecting" : "notPaired")
@@ -697,6 +714,11 @@ namespace AivinDesktop {
         lastWhy = why;
         try { File.AppendAllText(StateFile, DateTime.Now.ToString("s") + " " + (want == colorIcon ? "color" : "grey") + " " + why + "\r\n"); } catch { }
       }
+      string selectedServer = CurrentServerUrl();
+      serverMenu.Text = cfg.T("server") + ": " + ServerName(selectedServer);
+      serverCloud.Checked = selectedServer == "https://api.aivin.cloud";
+      serverVn.Checked = selectedServer == "https://api.aivin.vn";
+      serverLocal.Checked = selectedServer == "http://localhost:3001";
       open.Text = cfg.T(paired ? "open" : "connect");
       pause.Text = cfg.T(paused ? "resume" : "pause");
       pause.Visible = paired;
@@ -785,10 +807,76 @@ namespace AivinDesktop {
       RequestMascot(ShowFile);
     }
 
+    /** Double-click Aivin.exe: show the mascot and the platform in a browser app window. */
+    void OpenPlatform() {
+      ThreadPool.QueueUserWorkItem(delegate { LaunchPlatformApp(); });
+      OpenAivin();
+    }
+
+    static string PlatformUrl() {
+      string api = CurrentServerUrl();
+      try {
+        ServicePointManager.SecurityProtocol = ServicePointManager.SecurityProtocol | SecurityProtocolType.Tls12;
+        using (WebClient client = new WebClient()) {
+          client.Encoding = Encoding.UTF8;
+          client.Headers[HttpRequestHeader.UserAgent] = "AIVIN Bot";
+          string json = client.DownloadString(api + "/setting/lang/default");
+          Match appUrl = Regex.Match(json, "\\\"app_url\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+          if (appUrl.Success) {
+            string value = Regex.Unescape(appUrl.Groups[1].Value);
+            Uri uri;
+            if (Uri.TryCreate(value, UriKind.Absolute, out uri) && uri.Scheme == Uri.UriSchemeHttps) return uri.ToString().TrimEnd('/');
+          }
+        }
+      } catch { }
+      return "https://brain.aivin.cloud";
+    }
+
+    static string BrowserPath(string browser) {
+      string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+      string pf = Environment.GetEnvironmentVariable("ProgramFiles") ?? "C:\\Program Files";
+      string pf86 = Environment.GetEnvironmentVariable("ProgramFiles(x86)") ?? "C:\\Program Files (x86)";
+      string[] candidates;
+      if (browser == "edge") candidates = new string[] {
+        Path.Combine(pf86, "Microsoft\\Edge\\Application\\msedge.exe"),
+        Path.Combine(pf, "Microsoft\\Edge\\Application\\msedge.exe"),
+        Path.Combine(local, "Microsoft\\Edge\\Application\\msedge.exe")
+      };
+      else candidates = new string[] {
+        Path.Combine(pf, "Google\\Chrome\\Application\\chrome.exe"),
+        Path.Combine(pf86, "Google\\Chrome\\Application\\chrome.exe"),
+        Path.Combine(local, "Google\\Chrome\\Application\\chrome.exe")
+      };
+      foreach (string candidate in candidates) if (File.Exists(candidate)) return candidate;
+      return null;
+    }
+
+    static void LaunchPlatformApp() {
+      string url = PlatformUrl();
+      try {
+        string progId = "";
+        using (RegistryKey key = Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice")) {
+          if (key != null) progId = Convert.ToString(key.GetValue("ProgId")) ?? "";
+        }
+        string browser = progId.IndexOf("edge", StringComparison.OrdinalIgnoreCase) >= 0 ? "edge" :
+          progId.IndexOf("chrome", StringComparison.OrdinalIgnoreCase) >= 0 ? "chrome" : "";
+        string exe = browser.Length > 0 ? BrowserPath(browser) : null;
+        // Unknown default browsers keep their own profile/session via the normal URL handler.
+        if (exe == null && progId.Length == 0) exe = BrowserPath("edge") ?? BrowserPath("chrome");
+        if (exe != null) {
+          ProcessStartInfo app = new ProcessStartInfo(exe, "--app=\"" + url + "\"");
+          app.UseShellExecute = false;
+          Process.Start(app);
+          return;
+        }
+      } catch { }
+      try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
+    }
+
     /** Gửi yêu cầu cho daemon qua tệp đánh dấu (mascot-show = mở ô hỏi, mascot-voice = nói chuyện); daemon đang dừng thì chạy lại để nó nhận. */
     void RequestMascot(string requestFile) {
       if (quitting) return;
-      if (!File.Exists(CredsFile)) { ShowPair(); return; }
+      if (!HasPairedServer()) { ShowPair(); return; }
       try {
         try { SetMascotEnabled(true); } catch { }
         long ms = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
@@ -801,6 +889,69 @@ namespace AivinDesktop {
         Tick();
       }
       Refresh();
+    }
+
+    static string CurrentServerUrl() {
+      try {
+        if (File.Exists(ServerFile)) {
+          Match selected = Regex.Match(File.ReadAllText(ServerFile), "\"server_url\"\\s*:\\s*\"([^\"]+)\"");
+          if (selected.Success) return selected.Groups[1].Value.TrimEnd('/');
+        }
+        if (File.Exists(CredsFile)) {
+          Match legacy = Regex.Match(File.ReadAllText(CredsFile), "\"server_url\"\\s*:\\s*\"([^\"]+)\"");
+          if (legacy.Success) return legacy.Groups[1].Value.TrimEnd('/');
+        }
+      } catch { }
+      return "https://api.aivin.cloud";
+    }
+
+    static bool HasPairedServer() {
+      try {
+        if (!File.Exists(CredsFile)) return false;
+        string url = CurrentServerUrl();
+        string json = File.ReadAllText(CredsFile);
+        foreach (Match m in Regex.Matches(json, "\"server_url\"\\s*:\\s*\"([^\"]+)\""))
+          if (string.Equals(m.Groups[1].Value.TrimEnd('/'), url, StringComparison.OrdinalIgnoreCase)) return true;
+      } catch { }
+      return false;
+    }
+
+    static string ServerName(string url) {
+      if (url == "https://api.aivin.cloud") return "Cloud";
+      if (url == "https://api.aivin.vn") return "VN";
+      if (url.StartsWith("http://localhost:", StringComparison.OrdinalIgnoreCase)) return "Local";
+      return url;
+    }
+
+    void ChangeServer(string url) {
+      string current = CurrentServerUrl();
+      if (string.Equals(current, url, StringComparison.OrdinalIgnoreCase)) return;
+      int holder = LockHolder();
+      if ((child != null || holder > 0) && MessageBox.Show(
+          cfg.T("serverConfirm").Replace("{server}", ServerName(url)), "AIVIN Bot",
+          MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+      try {
+        string tmp = ServerFile + ".tmp";
+        File.WriteAllText(tmp, "{\"server_url\":\"" + url + "\"}\r\n", new UTF8Encoding(false));
+        if (File.Exists(ServerFile)) File.Replace(tmp, ServerFile, null); else File.Move(tmp, ServerFile);
+      } catch (Exception e) {
+        Balloon("Could not change server: " + e.Message, ToolTipIcon.Error);
+        return;
+      }
+      try {
+        if (child != null) {
+          child.Kill();
+          child.WaitForExit(5000);
+          if (child.HasExited) OnChildExit();
+        } else if (holder > 0) {
+          using (Process p = Process.GetProcessById(holder)) p.Kill();
+        }
+      } catch { }
+      nextStart = DateTime.MinValue;
+      delay = FirstDelay;
+      Refresh();
+      if (!HasPairedServer()) ShowPair();
+      else Tick();
     }
 
     void OpenTerminal() {

@@ -51,30 +51,9 @@ Aivin is a modular, composable ecosystem for agentic software:
 
 The CLI brings the full power of **AIVIN Bot** directly into your terminal workflows:
 
-```mermaid
-flowchart TD
-    CLIUser(["Terminal / Developer"]) --> Command["aivin CLI Commands"]
-
-    subgraph BotActions["AIVIN Bot Actions"]
-        Command -->|"aivin do [agent] [mission]"| AgentTask["AI Staff Goal Execution"]
-        Command -->|"aivin plugin ask [mission]"| AutoMatch["Auto-Pick & Execute Best Plugin"]
-        Command -->|"aivin browser [mission]"| WebTask["Autonomous Web Navigation"]
-        Command -->|"aivin do job [description]"| AutoJob["Natural Language Scheduled Cron"]
-    end
-
-    subgraph RemoteSupervision["Supervised Local Execution"]
-        Command -->|"aivin remote start"| RemoteTunnel["Secure Outbound Tunnel"]
-        RemoteTunnel --> LocalBrowser["Isolated Browser Profile (~/.aivin)"]
-        RemoteTunnel --> DesktopMascot["Windows Interactive Floating Mascot"]
-        RemoteTunnel --> CDPFilter["CDP Safety Filter: Block Local Files & Executables"]
-    end
-
-    subgraph Extensibility["Zero-Code Tooling"]
-        Command -->|"aivin mcp <url>"| MCPProxy["Auto-Convert MCP Server to Plugin"]
-        Command -->|"aivin init <name>"| AIScaffold["AI-Generated Typed Plugin Project"]
-        Command -->|"aivin deploy"| Marketplace["Deploy to Organization / Marketplace"]
-    end
-```
+<p align="center">
+  <img src="docs/media/cli-capabilities.png" alt="Diagram of AIVIN CLI capabilities across AI agents and automation, supervised local execution, and the plugin ecosystem" width="1000" />
+</p>
 
 ### 1. Goal-Driven Staff Agents (`aivin do`)
 Dispatch an objective directly to an AI Staff agent. The agent breaks down the mission, queries relevant documents, invokes available plugins, and reports back:
@@ -104,31 +83,9 @@ aivin plugin ask "Convert the quarterly sales data in data.csv into an executive
 
 ## How the CLI Powers AIVIN Bot
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Dev as Developer
-    participant CLI as aivin CLI
-    participant Cloud as AIVIN Platform / Bot
-    participant Browser as Local Browser Window
-    participant Target as Target Web / SaaS
-
-    Dev->>CLI: aivin remote start --code <code>
-    CLI->>Cloud: Authenticate and establish outbound tunnel
-    Cloud-->>CLI: Machine connected to AIVIN Bot
-
-    Dev->>Cloud: Assign web mission via Chat or CLI
-    Cloud->>CLI: Route browser action to paired computer
-    CLI->>Browser: Launch isolated profile with existing user cookies
-    Browser->>Target: Navigate and execute steps
-    opt Requires 2FA or Human Checkpoint
-        CLI->>Dev: Native desktop notification / Mascot alert
-        Dev->>Browser: Complete 2FA prompt
-    end
-    Browser->>Target: Finalize download or update
-    CLI-->>Cloud: Mission complete & report progress
-    Cloud-->>Dev: Return finalized result
-```
+<p align="center">
+  <img src="docs/media/aivin-mission-flow.png" alt="Five-step AIVIN web mission flow, including optional human approval and result reporting" width="1000" />
+</p>
 
 ---
 
@@ -198,7 +155,7 @@ Have an existing project you want to wrap? `aivin plugin convert` converts it in
 ## Aivin Mascot on Windows
 
 <p align="center">
-  <img src="docs/media/aivin-mascot-live.gif" alt="The live Aivin mascot showing chat, file drag, and attached-file states" width="480" />
+  <img src="docs/media/aivin-mascot-live.gif" alt="The live Aivin mascot ask box showing a conversation and the mascot" width="704" />
 </p>
 
 When Aivin Remote is running on Windows, an interactive animated **Aivin Mascot** floats smoothly above your desktop windows:

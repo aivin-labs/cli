@@ -18,6 +18,7 @@
 #   AIVIN_INSTALL_DIR    install folder (default: %LOCALAPPDATA%\Aivin\bin)
 #   AIVIN_NO_MODIFY_PATH set to 1 to leave the user PATH untouched
 #   AIVIN_NO_AUTOSTART   set to 1 to not start Aivin with Windows (can be turned on later in the tray menu / Task Manager)
+#   AIVIN_OPEN_PLATFORM  set to 0 to keep the install in background-only mode; default opens the platform app window once after setup
 #   AIVIN_NO_DESKTOP     set to 1 to skip the system tray app, the Start menu entry and start-with-Windows (servers, CI)
 #
 # Keep this file ASCII-only: GitHub serves release assets as application/octet-stream and
@@ -30,9 +31,28 @@ function Write-Step($text) { Write-Host "  $text" -ForegroundColor Cyan }
 # user's PowerShell window; the outer try/catch below swallows this marker exception instead of dumping an error record.
 function Fail($text) { Write-Host "  $text" -ForegroundColor Red; throw [System.OperationCanceledException]::new($text) }
 
+function Select-InstallMode {
+    $mode = @{ Autostart = ($env:AIVIN_NO_AUTOSTART -ne '1'); OpenPlatform = ($env:AIVIN_OPEN_PLATFORM -ne '0') }
+    # Explicit environment settings and pairing-code installs are suitable for scripts/one-line setup.
+    if ($env:AIVIN_NO_DESKTOP -or $env:AIVIN_PAIR_CODE -or $null -ne $env:AIVIN_NO_AUTOSTART -or $null -ne $env:AIVIN_OPEN_PLATFORM) { return $mode }
+
+    $choices = [System.Management.Automation.Host.ChoiceDescription[]]@(
+        (New-Object -TypeName System.Management.Automation.Host.ChoiceDescription -ArgumentList '&1. Recommended - start with Windows and open AIVIN'),
+        (New-Object -TypeName System.Management.Automation.Host.ChoiceDescription -ArgumentList '&2. Background only - start with Windows, do not open platform'),
+        (New-Object -TypeName System.Management.Automation.Host.ChoiceDescription -ArgumentList '&3. Open AIVIN now, do not start with Windows')
+    )
+    try {
+        $selected = $Host.UI.PromptForChoice('AIVIN setup', 'Choose how AIVIN should start. Press Enter for the recommended setup.', $choices, 0)
+    } catch { $selected = 0 }
+    if ($selected -eq 1) { $mode.OpenPlatform = $false }
+    if ($selected -eq 2) { $mode.Autostart = $false }
+    return $mode
+}
+
 function Install-AivinCli {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'  # the Invoke-WebRequest progress bar slows downloads a lot on PowerShell 5
+    $mode = Select-InstallMode
 
     if ($env:AIVIN_DOWNLOAD_BASE) {
         $base = $env:AIVIN_DOWNLOAD_BASE.TrimEnd('/')
@@ -117,13 +137,13 @@ function Install-AivinCli {
 
     Write-Step "Installed aivin $installedVersion to $installDir"
 
-    # System tray app + Start menu entry ("Aivin") + start with Windows (on by default; listed in Task Manager -> Startup apps).
+    # System tray app + Desktop/Start shortcuts + start with Windows (on by default; listed in Task Manager -> Startup apps).
     $desktop = $false
     if (-not $env:AIVIN_NO_DESKTOP) {
         $desktopArgs = @('desktop', 'install')
-        if ($env:AIVIN_NO_AUTOSTART) { $desktopArgs += '--no-autostart' }
+        if (-not $mode.Autostart) { $desktopArgs += '--no-autostart' }
         try { & $target @desktopArgs | Out-Null; $desktop = ($LASTEXITCODE -eq 0) } catch { $desktop = $false }
-        if ($desktop) { Write-Step 'Aivin is in the system tray and the Start menu' }
+        if ($desktop) { Write-Step 'Aivin shortcuts are on the Desktop and Start menu; background startup is enabled' }
         else { Write-Host '  Could not set up the system tray app - aivin still works from the command line.' -ForegroundColor Yellow }
     }
 
@@ -147,6 +167,12 @@ function Install-AivinCli {
         Write-Host '  Next: create a code in Aivin (chat box -> Browser menu -> Add this computer), then' -ForegroundColor Gray
         if ($desktop) { Write-Host '    click the Aivin icon in the system tray and enter the code, or run:' -ForegroundColor Gray }
         Write-Host '    aivin remote start --code <code>' -ForegroundColor White
+    }
+
+    # Open platform + mascot after pairing/setup. Set AIVIN_OPEN_PLATFORM=0 for background-only setup.
+    if ($desktop -and $mode.OpenPlatform) {
+        $app = Join-Path $env:LOCALAPPDATA 'Aivin\Aivin.exe'
+        if (Test-Path $app) { Start-Process -FilePath $app }
     }
 }
 

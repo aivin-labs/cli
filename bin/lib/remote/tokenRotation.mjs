@@ -8,8 +8,8 @@ import { confirmTokenRotation, revertTokenRotation } from './credentials.mjs';
  */
 
 /** Chào thành công bằng `token` → token cũ (nếu còn giữ) hết cần. Không ném. */
-export function settleRotation(token) {
-  try { return confirmTokenRotation(token); } catch { return false; }
+export function settleRotation(token, serverUrl) {
+  try { return confirmTokenRotation(token, serverUrl); } catch { return false; }
 }
 
 /**
@@ -18,7 +18,7 @@ export function settleRotation(token) {
  */
 export function fallBackToPreviousToken({ creds, socket, isStopped = () => false, delayMs = 1000, revert = revertTokenRotation }) {
   let previous;
-  try { previous = revert(creds.device_token); } catch { previous = null; }
+  try { previous = revert(creds.device_token, creds.server_url); } catch { previous = null; }
   if (!previous) return false;
   creds.device_token = previous;
   socket.auth = { ...socket.auth, device_token: previous };

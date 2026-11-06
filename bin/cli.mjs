@@ -23,6 +23,7 @@ import { flattenManifestFile } from '@aivin-labs/sdk';
 import './lib/cancellation.mjs';
 
 import { DEFAULT_AIVIN_BASE_URL, GLOBAL_CREDENTIALS_PATH, fetchWebUrl, loadActiveContext, clearActiveContext } from './lib/context.mjs';
+import { resolveServerUrl as normalizeServerUrl, readActiveServer, setActiveServer, serverLabel } from './lib/servers.mjs';
 import { requireArg } from './lib/util.mjs';
 import { readStdin, createFromJSON, createInteractive, validatePluginConfig, validateMcpProxyConfig } from './lib/scaffold.mjs';
 import { buildDeploymentPayload, deployPlugin, incrementVersion } from './lib/deploy.mjs';
@@ -57,7 +58,7 @@ import {
 import { runMission, runBrowserMission } from './lib/mission.mjs';
 import { DeviceAccess } from './lib/remote/constants.mjs';
 import { configureProxy } from './lib/remote/netProxy.mjs';
-import { DAEMON_RUNNING } from './lib/remote/daemonLock.mjs';
+import { DAEMON_RUNNING, lockHolder } from './lib/remote/daemonLock.mjs';
 import { runPolicyCommand } from './lib/remote/policyCommand.mjs';
 import { loadMascotSettings, requestMascotAttach, saveMascotSettings } from './lib/remote/mascot/index.mjs';
 import { forgetWorkFolder } from './lib/remote/workFolder.mjs';
@@ -135,9 +136,12 @@ import {
 dotenv.config({ quiet: true });
 
 {
-  const activeContext = loadActiveContext();
+  const selectedServer = process.env.AIVIN_BASE_URL
+    ? normalizeServerUrl(process.env.AIVIN_BASE_URL)
+    : (readActiveServer() || loadDeviceCredentials()?.server_url || DEFAULT_AIVIN_BASE_URL);
+  process.env.AIVIN_BASE_URL = selectedServer;
+  const activeContext = loadActiveContext(selectedServer);
   if (activeContext) {
-    if (!process.env.AIVIN_BASE_URL) process.env.AIVIN_BASE_URL = activeContext.base_url;
     if (!process.env.API_KEY) process.env.API_KEY = activeContext.api_key;
     if (!process.env.SDK_ENDPOINT && activeContext.sdk_endpoint) process.env.SDK_ENDPOINT = activeContext.sdk_endpoint;
   }
@@ -827,8 +831,43 @@ mcpCommand
   });
 
 program
+  .command('server [target]')
+  .description('Show or switch the active Aivin server (cloud, vn, local, or a URL)')
+  .action(async (target) => {
+    try {
+      const current = normalizeServerUrl(process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
+      if (!target) {
+        console.log(`Máy chủ đang chọn: ${serverLabel(current)} (${current})`);
+        if (!loadActiveContext(current)) console.log(chalk.yellow('   Chưa đăng nhập CLI ở máy chủ này — chạy `aivin login` hoặc ghép máy bằng mã.'));
+        return;
+      }
+      const next = normalizeServerUrl(target);
+      if (next === current) return console.log(`Đang dùng ${serverLabel(next)} (${next}).`);
+      const holder = lockHolder();
+      if (holder) {
+        const { proceed } = await inquirer.prompt([{
+          type: 'confirm', name: 'proceed', default: false,
+          message: `Đổi sang ${serverLabel(next)} sẽ dừng daemon PID ${holder} và huỷ việc đang chạy. Tiếp tục?`,
+        }]);
+        if (!proceed) return console.log(chalk.gray('Đã huỷ; máy chủ hiện tại không đổi.'));
+      }
+      setActiveServer(next);
+      if (holder) {
+        try { process.kill(holder, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+      }
+      console.log(chalk.green(`✅ Đã chọn ${serverLabel(next)} (${next}).`));
+      if (loadActiveContext(next)) console.log(chalk.gray('   CLI sẽ dùng thông tin đăng nhập đã lưu riêng cho máy chủ này.'));
+      else console.log(chalk.yellow('   Chưa có đăng nhập cho máy chủ này; chạy `aivin login` nếu cần dùng API.'));
+      if (holder) console.log(chalk.gray('   Phiên nhận việc đã được dừng; khay sẽ mở lại bằng token ghép riêng của server mới. Nếu đang chạy trong terminal, hãy chạy lại `aivin remote start`.'));
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exitCode = 1;
+    }
+  });
+
+program
   .command('login')
-  .argument('[baseUrl]', 'Server to log into (REST API base) - defaults to production (api.aivin.cloud). Pass a staging/self-hosted host to switch the machine\'s active context to it, e.g. `aivin login beta-api.aivin.vn`.')
+  .argument('[baseUrl]', 'Server to log into (REST API base) - defaults to production (api.aivin.cloud). Pass a staging/self-hosted host to switch the machine\'s active context to it, e.g. `aivin login api.aivin.vn`.')
   .description('Log in and save an API key for plugin deployment (opens your browser by default)')
   .option('-k, --api-key <key>', 'Set API key directly (skip login entirely)')
   .option('--basic', 'Log in with email/password directly in the terminal instead of a browser')
@@ -836,9 +875,9 @@ program
   .option('--client <client>', 'Client/org id to use with --basic (default: "aivin.cloud")')
   .action(async (baseUrl, options) => {
     try {
-      // Bare hostname (no scheme) is the common case for a quick `aivin login beta-api.aivin.vn` -
+      // Bare hostname (no scheme) is the common case for a quick `aivin login api.aivin.vn` -
       // assume https, same as every other *.aivin.* endpoint in this file.
-      const resolvedBaseUrl = baseUrl ? (/^https?:\/\//.test(baseUrl) ? baseUrl : `https://${baseUrl}`) : DEFAULT_AIVIN_BASE_URL;
+      const resolvedBaseUrl = normalizeServerUrl(baseUrl || process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
       process.env.AIVIN_BASE_URL = resolvedBaseUrl;
 
       if (options.apiKey) {
@@ -913,7 +952,7 @@ program
   .action(() => {
     try {
       const apiKey = requireSavedApiKey();
-      const serverUrl = process.env.AIVIN_BASE_URL || DEFAULT_AIVIN_BASE_URL;
+      const serverUrl = normalizeServerUrl(process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
       const localClient = parseApiKeyClient(apiKey);
 
       // The effective API_KEY may come from a project's own .env instead of `~/.aivin/credentials`
@@ -957,7 +996,7 @@ keyCommand
       console.log(chalk.yellow('🔑 Key:'), chalk.cyan(plainKey));
       console.log(chalk.gray('   This is shown only once - store it somewhere safe.'));
       if (options.save) {
-        const serverUrl = process.env.AIVIN_BASE_URL || DEFAULT_AIVIN_BASE_URL;
+        const serverUrl = normalizeServerUrl(process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
         const identity = await tryFetchWhoami(serverUrl, plainKey);
         saveGlobalApiKey(plainKey, serverUrl, identity);
         console.log(chalk.green(`💾 Saved to ${GLOBAL_CREDENTIALS_PATH} - every project on this machine can use it now.`));
@@ -988,7 +1027,7 @@ keyCommand
   .description('List API keys on your account')
   .action(async () => {
     try {
-      const serverUrl = process.env.AIVIN_BASE_URL || 'https://api.aivin.cloud';
+      const serverUrl = normalizeServerUrl(process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
       const apiKey = requireSavedApiKey();
       await logAccountIdentity(serverUrl, apiKey);
       const items = await listRemoteApiKeys(serverUrl, apiKey);
@@ -1071,6 +1110,7 @@ program
   .description('Aivin as a desktop app: install (Windows: system tray + Start menu; macOS: menu bar + Aivin.app; Linux: app menu + tray) and start it with the computer | uninstall | defaults (Windows: pick AIVIN Bot as default for file types) | status (default)')
   .option('--no-autostart', "install: don't start Aivin with the computer (turn it on later from Aivin's menu or the system's startup settings)")
   .option('--no-launch', "install: don't open Aivin now")
+  .option('--open-platform', 'Windows install: also open the Aivin platform in an app window after installation')
   .option('--export-xml <file>', 'defaults (Windows): write a default-associations file for IT (Group Policy / Intune) instead of opening Settings')
   .option('--all', 'defaults --export-xml: include Office formats, not only md/txt/csv')
   .action((action = 'status', options) => {
@@ -1079,7 +1119,7 @@ program
     const where = { win32: 'khay hệ thống, tìm "Aivin" trong Start', darwin: 'thanh menu, tìm "Aivin" bằng Spotlight', linux: 'khay hệ thống, tìm "Aivin" trong menu ứng dụng' }[process.platform] || '';
     try {
       if (action === 'install') {
-        const res = installDesktopApp({ autostart: options.autostart !== false, launch: options.launch !== false });
+        const res = installDesktopApp({ autostart: options.autostart !== false, launch: options.launch !== false, openPlatform: options.openPlatform });
         console.log(chalk.green(`✅ Đã cài Aivin vào máy: ${where}.`));
         console.log(chalk.gray(`   Ứng dụng: ${res.exe}`));
         console.log(chalk.gray(`   Khởi động cùng máy: ${res.autostart ? 'bật' : 'tắt'} (đổi ở menu Aivin hoặc ${startupWhere})`));
@@ -1301,14 +1341,28 @@ remoteCommand
   .action(async (options) => {
     try {
       if (options.code) {
-        // Bộ cài (đã có khay): chỉ ghép — khay mở listener ngay khi thấy máy đã ghép.
+        // Bộ cài (đã có khay): chỉ ghép — khay thấy máy đã ghép là mở listener.
         const { creds, stopped } = await pairWithCodeOnly(options);
         console.log(chalk.green(`✅ Đã kết nối máy "${creds.name}" với tài khoản ${creds.account || 'Aivin của bạn'} — quay lại Aivin để chọn máy này.`));
         if (stopped) console.log(chalk.gray('   Đã dừng phiên nhận việc cũ — Aivin mở lại bằng kết nối mới.'));
         return;
       }
       const roots = [path.resolve(options.dir || process.cwd())];
-      const creds = await pairDevice({ serverUrl: missionServerUrl(), apiKey: process.env.API_KEY, roots, name: options.name, profile: buildDeviceProfile(roots) });
+      const serverUrl = normalizeServerUrl(options.server || missionServerUrl());
+      const currentCreds = loadDeviceCredentials();
+      if (options.server && currentCreds?.server_url && currentCreds.server_url !== serverUrl) {
+        const { proceed } = await inquirer.prompt([{
+          type: 'confirm', name: 'proceed', default: false,
+          message: `Chuyển ghép máy từ ${currentCreds.server_url} sang ${serverUrl}? Máy chủ mới sẽ có quyền điều khiển máy này.`,
+        }]);
+        if (!proceed) return console.log(chalk.gray('Đã huỷ.'));
+      }
+      const apiKey = options.server
+        ? (loadActiveContext(serverUrl)?.api_key || (process.env.AIVIN_BASE_URL === serverUrl ? process.env.API_KEY : undefined))
+        : process.env.API_KEY;
+      if (!apiKey) throw new Error(`Chưa đăng nhập tại ${serverUrl}; chạy ` + '`aivin login ${serverUrl}`' + ` trước, hoặc ghép bằng --code.`);
+      setActiveServer(serverUrl);
+      const creds = await pairDevice({ serverUrl, apiKey, roots, name: options.name, profile: buildDeviceProfile(roots) });
       console.log(chalk.green(`✅ Đã ghép máy "${creds.name}" (${creds.device_id})`));
       console.log(chalk.gray(`   Thư mục được phép: ${creds.roots.join(' | ')}`));
       console.log(chalk.gray('   Chạy `aivin remote start` để bắt đầu nhận việc.'));

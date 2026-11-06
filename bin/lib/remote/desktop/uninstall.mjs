@@ -5,7 +5,7 @@ import { spawn } from 'child_process';
 import { REMOTE_CONFIG_DIR } from '../constants.mjs';
 import { lockHolder } from '../daemonLock.mjs';
 import { disableAutoStart, uninstallDesktopApp } from '../autoStart.mjs';
-import { clearDeviceCredentials, loadDeviceCredentials, unpairDevice } from '../credentials.mjs';
+import { clearAllDeviceCredentials, loadDeviceCredentials, unpairDevice } from '../credentials.mjs';
 import { isStandaloneBinary } from '../../update/versions.mjs';
 import { launcherExePath } from './index.mjs';
 
