@@ -111,6 +111,8 @@ Self-contained standalone single-file binaries are available for every major ope
 irm https://get.aivin.vn/install.ps1 | iex
 ```
 
+Reinstalling selects the matching Aivin server from the download domain (`get.aivin.vn` → `api.aivin.vn`). To keep a previously selected server instead, run `$env:AIVIN_PRESERVE_SERVER='1'; irm https://get.aivin.vn/install.ps1 | iex`.
+
 ```bash
 # macOS (Intel / Apple Silicon) and Linux (x64 / arm64)
 curl -fsSL https://get.aivin.vn/install.sh | sh

@@ -12,7 +12,8 @@
 #          --dir <folder the agent may use> --version <e.g. v1.1.0>
 # Environment: AIVIN_DOWNLOAD_ROOT (versioned site: <root>/latest.txt + <root>/<version>/<asset>, default https://get.aivin.vn),
 #              AIVIN_DOWNLOAD_BASE (one folder holding every asset, e.g. a GitHub release - overrides the root),
-#              AIVIN_SERVER (server to use; a fresh install infers api.aivin.vn/cloud from get.aivin.vn/cloud),
+#              AIVIN_SERVER (server to use; otherwise every install infers api.aivin.vn/cloud from get.aivin.vn/cloud),
+#              AIVIN_PRESERVE_SERVER=1 (keep the existing server when reinstalling from another download domain),
 #              AIVIN_INSTALL_DIR (default: ~/.local/bin),
 #              AIVIN_NO_AUTOSTART=1 (don't start Aivin with the computer - can be turned on later in Aivin's menu),
 #              AIVIN_NO_DESKTOP=1 (no menu bar / tray app and no app menu entry; Linux without a graphical session never gets them).
@@ -73,11 +74,11 @@ else
   BASE="$ROOT/$VERSION"
 fi
 
-# Match the Aivin environment to the download host on fresh installs. Keep an existing selection
-# during upgrades unless AIVIN_SERVER explicitly asks to change it.
+# Match the Aivin environment to the download host on every install. AIVIN_PRESERVE_SERVER=1
+# keeps a deliberate existing selection during a reinstall.
 SERVER_CONFIG="${AIVIN_REMOTE_HOME:-$HOME/.aivin}/server.json"
 if [ -z "$SERVER" ] && [ -n "${AIVIN_SERVER:-}" ]; then SERVER="$AIVIN_SERVER"; SERVER_EXPLICIT=1; fi
-if [ -z "$SERVER" ]; then
+if [ -z "$SERVER" ] && [ -z "${AIVIN_DOWNLOAD_BASE:-}" ]; then
   case "${ROOT:-}" in
     https://get.aivin.vn|https://get.aivin.vn/*) SERVER=https://api.aivin.vn ;;
     https://get.aivin.cloud|https://get.aivin.cloud/*) SERVER=https://api.aivin.cloud ;;
@@ -128,8 +129,13 @@ INSTALLED_VERSION="$("$TARGET.new" --version 2>/dev/null)" || { rm -f "$TARGET.n
 mv -f "$TARGET.new" "$TARGET"
 
 say "Installed aivin $INSTALLED_VERSION to $INSTALL_DIR"
-if [ -n "$SERVER" ] && { [ -n "$SERVER_EXPLICIT" ] || [ ! -f "$SERVER_CONFIG" ]; }; then
-  "$TARGET" server "$SERVER" >/dev/null || fail "Could not select Aivin server $SERVER."
+if [ -n "$SERVER" ] && { [ -n "$SERVER_EXPLICIT" ] || [ "${AIVIN_PRESERVE_SERVER:-0}" != "1" ] || [ ! -f "$SERVER_CONFIG" ]; }; then
+  OLD_SERVER=""
+  if [ -f "$SERVER_CONFIG" ]; then OLD_SERVER="$(sed -n 's/.*"server_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SERVER_CONFIG" | head -n 1)"; fi
+  if [ -n "$OLD_SERVER" ] && [ "${OLD_SERVER%/}" != "${SERVER%/}" ]; then
+    say "Switching Aivin server from $OLD_SERVER to $SERVER; running remote work will stop and this computer may need to be paired again"
+  fi
+  "$TARGET" server "$SERVER" --force >/dev/null || fail "Could not select Aivin server $SERVER."
   say "Using Aivin server $SERVER"
 fi
 case ":$PATH:" in

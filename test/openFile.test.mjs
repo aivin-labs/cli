@@ -49,7 +49,7 @@ test('registry: ProgID trỏ Aivin.exe --open "%1", mỗi đuôi có Open with +
   assert.equal(openCommand(exe), `"${exe}" --open "%1"`);
   assert.ok(flat.some((l) => l.includes(`${OPEN_WITH_PROGID}\\shell\\open\\command`) && l.includes(openCommand(exe))));
   assert.ok(flat.some((l) => l.includes('.docx\\OpenWithProgids') && l.includes('REG_NONE')));
-  assert.ok(flat.some((l) => l.includes('SystemFileAssociations\\.docx\\shell\\AivinOpen') && l.includes('Mở bằng AIVIN Bot')));
+  assert.ok(flat.some((l) => l.includes('SystemFileAssociations\\.docx\\shell\\AivinOpen') && l.includes('Mở bằng AIVIN Office Suite')));
   assert.ok(cmds.every((c) => c[1].startsWith('HKCU\\')), 'chỉ ghi HKCU, không cần admin');
 });
 
@@ -140,7 +140,7 @@ test('Default apps: có Capabilities + RegisteredApplications, link Settings, XM
   const flat = associationRegCommands({ exe: 'C:\\A.exe', extensions: ['md'] }).map((c) => c.join(' '));
   assert.ok(flat.some((l) => l.includes('RegisteredApplications') && l.includes('Software\\AivinLabs\\AIVIN Bot\\Capabilities')));
   assert.ok(flat.some((l) => l.includes('Capabilities\\FileAssociations') && l.includes('.md') && l.includes(OPEN_WITH_PROGID)));
-  assert.equal(DEFAULT_APPS_URI, 'ms-settings:defaultapps?registeredAppUser=AIVIN%20Bot');
+  assert.equal(DEFAULT_APPS_URI, 'ms-settings:defaultapps?registeredAppUser=AIVIN%20Office%20Suite');
   const xml = defaultAssociationsXml();
   assert.match(xml, /Identifier="\.md" ProgId="Aivin\.OpenFile"/);
   assert.doesNotMatch(xml, /\.docx/);

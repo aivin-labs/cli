@@ -1008,6 +1008,8 @@ aivin server local:3247       # localhost on a custom port
 aivin server https://host     # self-hosted server
 ```
 
+`aivin server <target> --force` skips the confirmation before stopping a running remote connection. Installers use this when applying the environment selected by their download domain. Reinstalling from a different Aivin domain can require pairing the computer again on that server. Set `AIVIN_PRESERVE_SERVER=1` before reinstalling to keep the current server.
+
 Aivin-owned `*.aivin.cloud` and `*.aivin.vn` hosts resolve to their API host, while explicit API hosts are retained. Only localhost accepts HTTP. The tray menu also has Cloud, VN, and Local choices. Switching servers with a running daemon asks before stopping its current work; the tray then reconnects using that server?s saved pairing, or asks to pair if none exists. Pairing codes are server-specific, so include `--server` when a code was created on a non-default server.
 ## `aivin whoami`
 

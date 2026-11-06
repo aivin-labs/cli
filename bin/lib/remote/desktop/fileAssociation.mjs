@@ -16,7 +16,8 @@ export const OPEN_WITH_PROGID = 'Aivin.OpenFile';
 const VERB = 'AivinOpen';
 const HKCU_SOFTWARE = 'HKCU\\Software';
 const CAPABILITIES_PATH = 'AivinLabs\\AIVIN Bot\\Capabilities';
-const REGISTERED_APP_NAME = 'AIVIN Bot';
+const REGISTERED_APP_NAME = 'AIVIN Office Suite';
+const LEGACY_REGISTERED_APP_NAME = 'AIVIN Bot';
 
 /** Đuôi Drive nhận và mở được bằng trình soạn / trình xem (OfficeUploadExtensionHelper.ts phía be). */
 export const OPEN_WITH_EXTENSIONS = Object.freeze([
@@ -158,6 +159,7 @@ export function associationStamp({ exe, lang = 'en', extensions = OPEN_WITH_EXTE
 export function registerFileAssociations({ exe, lang = 'en', extensions = OPEN_WITH_EXTENSIONS } = {}) {
   if (process.platform !== 'win32') return { registered: false };
   for (const args of associationRegCommands({ exe, lang, extensions })) reg(args);
+  regDelete([`${HKCU_SOFTWARE}\\RegisteredApplications`, '/v', LEGACY_REGISTERED_APP_NAME]);
   return { registered: true, extensions: [...extensions] };
 }
 
@@ -180,6 +182,7 @@ export function unregisterFileAssociations({ extensions = OPEN_WITH_EXTENSIONS, 
   if (process.platform !== 'win32') return;
   const CLASSES = `${root}\\Classes`;
   regDelete([`${root}\\RegisteredApplications`, '/v', REGISTERED_APP_NAME]);
+  regDelete([`${root}\\RegisteredApplications`, '/v', LEGACY_REGISTERED_APP_NAME]);
   regDelete([`${root}\\AivinLabs`]);
   for (const ext of extensions) {
     regDelete([`${CLASSES}\\.${ext}\\OpenWithProgids`, '/v', OPEN_WITH_PROGID]);

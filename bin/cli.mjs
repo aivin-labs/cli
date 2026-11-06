@@ -833,8 +833,10 @@ mcpCommand
 program
   .command('server [target]')
   .description('Show or switch the active Aivin server (cloud, vn, local, or a URL)')
-  .action(async (target) => {
+  .option('--force', 'Switch servers without asking before stopping the current remote connection')
+  .action(async (target, command) => {
     try {
+      const options = command.opts();
       const current = normalizeServerUrl(process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
       if (!target) {
         console.log(`Máy chủ đang chọn: ${serverLabel(current)} (${current})`);
@@ -849,7 +851,7 @@ program
         return console.log(`Đang dùng ${serverLabel(next)} (${next}).`);
       }
       const holder = lockHolder();
-      if (holder) {
+      if (holder && !options.force) {
         const { proceed } = await inquirer.prompt([{
           type: 'confirm', name: 'proceed', default: false,
           message: `Đổi sang ${serverLabel(next)} sẽ dừng daemon PID ${holder} và huỷ việc đang chạy. Tiếp tục?`,

@@ -9,7 +9,8 @@
 #
 # Optional environment variables (`irm | iex` cannot pass arguments):
 #   AIVIN_PAIR_CODE      one-time pairing code from Aivin
-#   AIVIN_SERVER         Aivin server (default: inferred from get.aivin.vn -> api.aivin.vn on a fresh install)
+#   AIVIN_SERVER         Aivin server (default: inferred from get.aivin.vn -> api.aivin.vn on every install)
+#   AIVIN_PRESERVE_SERVER set to 1 to keep the currently selected server when reinstalling from another download domain
 #   AIVIN_FULL_ACCESS    set to 1 to let the agent work anywhere on this computer (otherwise one folder)
 #   AIVIN_DIR            folder the agent may work in (default: current folder; ignored with AIVIN_FULL_ACCESS)
 #   AIVIN_VERSION        release, e.g. v1.1.0 (default: the one in <root>/latest.txt)
@@ -138,19 +139,29 @@ function Install-AivinCli {
 
     Write-Step "Installed aivin $installedVersion to $installDir"
 
-    # The installer origin selects the matching Aivin environment on a fresh setup. Preserve a
-    # machine's existing choice during upgrades unless the caller explicitly selected a server.
+    # The selected installer/download domain is the source of truth on every install. This keeps
+    # the desktop app on the same environment as the installer (e.g. get.aivin.vn -> api.aivin.vn).
+    # Set AIVIN_PRESERVE_SERVER=1 to keep a deliberate existing choice during a reinstall.
     $remoteHome = if ($env:AIVIN_REMOTE_HOME) { $env:AIVIN_REMOTE_HOME } else { Join-Path $env:USERPROFILE '.aivin' }
     $serverConfig = Join-Path $remoteHome 'server.json'
     $inferredServer = $null
     try {
-        $downloadHost = ([Uri]$downloadRoot).Host.ToLowerInvariant()
-        if ($downloadHost -match '^get\.aivin\.(?<zone>cloud|vn)$') { $inferredServer = "https://api.aivin.$($Matches.zone)" }
+        if (-not $env:AIVIN_DOWNLOAD_BASE) {
+            $downloadHost = ([Uri]$downloadRoot).Host.ToLowerInvariant()
+            if ($downloadHost -match '^get\.aivin\.(?<zone>cloud|vn)$') { $inferredServer = "https://api.aivin.$($Matches.zone)" }
+        }
     } catch { }
     $serverTarget = if ($env:AIVIN_SERVER) { $env:AIVIN_SERVER } else { $inferredServer }
-    $configureServer = $serverTarget -and ($env:AIVIN_SERVER -or -not (Test-Path $serverConfig))
+    $configureServer = $serverTarget -and ($env:AIVIN_SERVER -or $env:AIVIN_PRESERVE_SERVER -ne '1' -or -not (Test-Path $serverConfig))
     if ($configureServer) {
-        & $target server $serverTarget | Out-Null
+        $oldServer = $null
+        if (Test-Path -LiteralPath $serverConfig) {
+            try { $oldServer = (Get-Content -Raw -LiteralPath $serverConfig | ConvertFrom-Json).server_url } catch { }
+        }
+        if ($oldServer -and $oldServer.TrimEnd('/') -ne $serverTarget.TrimEnd('/')) {
+            Write-Step "Switching Aivin server from $oldServer to $serverTarget; running remote work will stop and this computer may need to be paired again"
+        }
+        & $target server $serverTarget --force | Out-Null
         if ($LASTEXITCODE -ne 0) { Fail "Could not select Aivin server $serverTarget." }
         Write-Step "Using Aivin server $serverTarget"
     }

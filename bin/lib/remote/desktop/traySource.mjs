@@ -61,7 +61,10 @@ namespace AivinDesktop {
         if (!created) {
           // Double-click Aivin.exe / Start menu mở platform; lệnh nội bộ vẫn chỉ đánh thức linh vật.
           if (quit) Signal("Local\\AivinTrayQuit-" + id);
-          else if (openPlatform) TrayApp.OpenPlatformNow();
+          else if (openPlatform) {
+            TrayApp.OpenPlatformNow();
+            Signal("Local\\AivinTrayOpen-" + id);
+          }
           else if (args.Length == 0) platformLaunch.Set();
           else if (!autostart && !installed) Signal("Local\\AivinTrayOpen-" + id);
           return 0;
@@ -88,7 +91,11 @@ namespace AivinDesktop {
      */
     static int OpenFiles(string[] args, int from) {
       Config cfg = Config.Load(Path.Combine(Path.Combine(Home, "desktop"), "launch.cfg"));
-      if (string.IsNullOrEmpty(cfg.Exe) || from >= args.Length) return 1;
+      if (from >= args.Length) return 1;
+      if (string.IsNullOrEmpty(cfg.Exe)) {
+        MessageBox.Show("The launch configuration is missing. Run `aivin desktop install` to repair AIVIN Office Suite.", "AIVIN Office Suite", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return 1;
+      }
       StringBuilder line = new StringBuilder();
       foreach (string a in cfg.Args) {
         if (a == "remote") break;
@@ -101,7 +108,11 @@ namespace AivinDesktop {
       psi.CreateNoWindow = true;
       psi.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
       psi.EnvironmentVariables["AIVIN_OPEN_UI"] = "toast";
-      try { Process.Start(psi); return 0; } catch { return 1; }
+      try { Process.Start(psi); return 0; }
+      catch (Exception ex) {
+        MessageBox.Show("AIVIN Office Suite could not start the file handler.\n\n" + ex.Message, "AIVIN Office Suite", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return 1;
+      }
     }
 
     /**
@@ -883,11 +894,37 @@ namespace AivinDesktop {
         if (exe != null) {
           ProcessStartInfo app = new ProcessStartInfo(exe, "--app=\"" + url + "\" --start-maximized");
           app.UseShellExecute = false;
+          IntPtr before = GetForegroundWindow();
           Process.Start(app);
+          MaximizeLaunchedBrowser(exe, before);
           return;
         }
       } catch { }
       try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
+    }
+
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window, int command);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
+    static void MaximizeLaunchedBrowser(string exe, IntPtr previousWindow) {
+      string expectedProcess = Path.GetFileNameWithoutExtension(exe);
+      for (int i = 0; i < 30; i++) {
+        IntPtr window = GetForegroundWindow();
+        if (window != IntPtr.Zero && window != previousWindow) {
+          uint processId;
+          GetWindowThreadProcessId(window, out processId);
+          try {
+            using (Process owner = Process.GetProcessById((int)processId)) {
+              if (string.Equals(owner.ProcessName, expectedProcess, StringComparison.OrdinalIgnoreCase)) {
+                ShowWindowAsync(window, 3); // SW_MAXIMIZE
+                return;
+              }
+            }
+          } catch { }
+        }
+        Thread.Sleep(100);
+      }
     }
 
     internal static void OpenPlatformNow() { LaunchPlatformApp(); }
