@@ -314,7 +314,7 @@ test('lượt chat: sơ đồ dựng xong gửi lại đúng dòng; nút chỉ l
   });
   const first = assistantRows(sent).at(-1);
   assert.equal(first.blocks[0].file, undefined);
-  assert.deepEqual(first.links.map((l) => [l.text, l.url]), [['Gọi', 'tel:1900 1234'], ['Mail', 'mailto:a@x.vn'], ['Kết nối', 'https://beta.aivin.vn/?session_id=s1']]);
+  assert.deepEqual(first.links.map((l) => [l.text, l.url]), [['Gọi', 'tel:1900 1234'], ['Mail', 'mailto:a@x.vn'], ['Kết nối', 'https://app.aivin.vn/?session_id=s1']]);
   assert.equal(first.links[0].icon_path, lucidePath('phone'));
   assert.equal(first.links[1].icon_path, lucidePath('mail'));
   await tick(); await tick();
