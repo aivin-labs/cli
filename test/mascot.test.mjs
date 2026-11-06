@@ -107,7 +107,7 @@ test('tệp mascot-show cũ còn sót lại không bật lại linh vật đã t
   assert.equal(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).enabled, true);
 });
 
-test('Quick voice từ khay: yêu cầu mới bật linh vật rồi bấm mic một lần, xoá tệp; yêu cầu cũ chỉ bị dọn, không tự mở mic (02/11/2026)', async () => {
+test('Quick voice từ khay: yêu cầu mới bật linh vật rồi bắt đầu voice trực tiếp, xoá tệp; yêu cầu cũ chỉ bị dọn, không tự mở mic (02/11/2026)', async () => {
   const host = fakeHost();
   const dir = tmp();
   const voiceFile = path.join(dir, 'voice');
@@ -127,7 +127,7 @@ test('Quick voice từ khay: yêu cầu mới bật linh vật rồi bấm mic m
   const child = host.spawned[0];
   child.stdout.write(`${JSON.stringify({ t: HostEvent.READY })}\n`);
   await tick();
-  assert.equal(child.sent.filter((c) => c.t === HostCommand.VOICE_TOGGLE).length, 1);
+  assert.equal(child.sent.filter((c) => c.t === HostCommand.QUICK_VOICE).length, 1);
   assert.equal(child.sent.filter((c) => c.t === HostCommand.OPEN_ASK).length, 0);
   m.close();
 });

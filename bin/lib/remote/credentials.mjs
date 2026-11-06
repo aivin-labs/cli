@@ -40,6 +40,7 @@ function readStore() {
   try { const raw = fs.readFileSync(DEVICE_CREDENTIALS_FILE, 'utf8'); return { raw, data: JSON.parse(raw) }; }
   catch { return null; }
 }
+const isLegacyServerAlias = (source, target) => String(source || '').trim().replace(/\/+$/, '') !== target;
 function resolveCredentialServer(serverUrl) {
   if (serverUrl) return resolveServerUrl(serverUrl);
   const configured = process.env.AIVIN_BASE_URL || process.env.AIVIN_SERVER || readActiveServer();
@@ -54,15 +55,27 @@ function readRecord(serverUrl) {
   const url = resolveCredentialServer(serverUrl); const file = readStore();
   if (!file?.data) return null;
   if (file.data.servers && typeof file.data.servers === 'object') {
-    const data = file.data.servers[serverKey(url)];
-    return data ? { raw: file.raw, data, store: file.data, serverUrl: url } : null;
+    const key = serverKey(url);
+    const data = file.data.servers[key];
+    if (data) return { raw: file.raw, data, store: file.data, serverUrl: url };
+    // A pre-migration beta record is eligible once. loadDeviceCredentials moves it to
+    // legacy_servers before trying it at production, so a rejected token won't loop.
+    const alias = Object.entries(file.data.servers).find(([, record]) => {
+      if (!record?.server_url) return false;
+      try { return resolveServerUrl(record.server_url) === url && isLegacyServerAlias(record.server_url, url); } catch { return false; }
+    });
+    if (alias) return { raw: file.raw, data: alias[1], store: file.data, serverUrl: url, legacyAlias: true, sourceKey: alias[0] };
+    return null;
   }
   if (file.data.device_id && resolveServerUrl(file.data.server_url || DEFAULT_SERVER_URL) === url)
-    return { raw: file.raw, data: file.data, store: file.data, legacy: true, serverUrl: url };
+    return {
+      raw: file.raw, data: file.data, store: file.data, legacy: true, serverUrl: url,
+      ...(isLegacyServerAlias(file.data.server_url || DEFAULT_SERVER_URL, url) ? { legacyAlias: true, sourceKey: `legacy:${file.data.server_url || DEFAULT_SERVER_URL}` } : {}),
+    };
   return null;
 }
-function writeRecord(record, serverUrl) {
-  const url = resolveCredentialServer(serverUrl || record.server_url); const current = readStore()?.data;
+function writeRecord(record, serverUrl, currentOverride) {
+  const url = resolveCredentialServer(serverUrl || record.server_url); const current = currentOverride || readStore()?.data;
   let store;
   if (current?.servers && typeof current.servers === 'object') store = { ...current, servers: { ...current.servers } };
   else {
@@ -94,6 +107,20 @@ export function loadDeviceCredentials(serverUrl) {
   if (cached?.raw === raw && cached.token) return { ...data, server_url: url, device_token: cached.token };
   const token = openToken({ ...data, token_account: data.token_account || data.device_id });
   if (!token) return null;
+  if (rec.legacyAlias) {
+    const store = rec.store.servers
+      ? { ...rec.store, servers: { ...rec.store.servers }, legacy_servers: { ...(rec.store.legacy_servers || {}) } }
+      : { version: 2, servers: {}, legacy_servers: {} };
+    const oldRecord = rec.store.servers ? store.servers[rec.sourceKey] : rec.store;
+    if (rec.store.servers) delete store.servers[rec.sourceKey];
+    if (oldRecord) {
+      const { server_url: oldUrl, ...backup } = oldRecord;
+      store.legacy_servers[rec.sourceKey] = { ...backup, legacy_server_url: oldUrl || rec.data.server_url || DEFAULT_SERVER_URL };
+    }
+    const { previous_sealed: _previous, policy_sealed_at: _policy, ...migrated } = data;
+    saveDeviceCredentials({ ...migrated, server_url: url, device_token: token }, { storeOverride: store });
+    return { ...readRecord(url)?.data, server_url: url, device_token: token };
+  }
   opened.set(key, { raw, token });
   const retrySeal = !data.seal_failed || Date.now() - Number(data.seal_failed.at || 0) > SEAL_RETRY_MS;
   if (data.device_token && preferredTokenStore() !== TokenStoreKind.FILE && retrySeal) {
@@ -102,7 +129,35 @@ export function loadDeviceCredentials(serverUrl) {
   }
   return { ...data, server_url: url, device_token: token };
 }
-export function saveDeviceCredentials(creds, { previousToken } = {}) {
+
+/** Once production accepts the migrated token, discard its sealed beta backup. */
+export function confirmServerCredentialMigration(serverUrl) {
+  const url = resolveServerUrl(serverUrl);
+  const file = readStore();
+  if (!file?.data) return false;
+  const servers = { ...(file.data.servers || {}) };
+  const legacy = { ...(file.data.legacy_servers || {}) };
+  let removed = false;
+  for (const records of [servers, legacy]) {
+    for (const [key, record] of Object.entries(records)) {
+      try {
+        const sourceUrl = record?.legacy_server_url || record?.server_url;
+        if (sourceUrl && resolveServerUrl(sourceUrl) === url && isLegacyServerAlias(sourceUrl, url)) {
+          forgetToken({ ...record, token_account: record.token_account || record.device_id });
+          forgetPrevious(record.previous_sealed);
+          delete records[key];
+          removed = true;
+        }
+      } catch { /* leave malformed legacy entries for manual recovery */ }
+    }
+  }
+  if (!removed) return false;
+  const store = { ...file.data, servers, legacy_servers: legacy };
+  writeFileAtomic(DEVICE_CREDENTIALS_FILE, `${JSON.stringify(store, null, 2)}\n`);
+  try { fs.chmodSync(DEVICE_CREDENTIALS_FILE, 0o600); } catch { /* Windows ACL follows the user profile */ }
+  return true;
+}
+export function saveDeviceCredentials(creds, { previousToken, storeOverride } = {}) {
   const url = resolveCredentialServer(creds.server_url); const key = serverKey(url); const account = tokenAccount(creds.device_id, url);
   const { device_token: token, token_store: _s, token_enc: _e, seal_failed: _f, ...rest } = creds;
   for (const f of DISK_OWNED_FIELDS) delete rest[f]; delete rest.token_account;
@@ -115,7 +170,8 @@ export function saveDeviceCredentials(creds, { previousToken } = {}) {
     if (previousToken) kept.previous_sealed = sealPrevious(previousToken, creds.device_id, url);
   }
   const sealed = sealToken(token, { account }); const { fallback_reason: reason, ...stored } = sealed;
-  const raw = writeRecord({ ...rest, server_url: url, token_account: account, ...stored, ...kept, ...(reason ? { seal_failed: { at: Date.now(), reason } } : {}) }, url);
+  const record = { ...rest, server_url: url, token_account: account, ...stored, ...kept, ...(reason ? { seal_failed: { at: Date.now(), reason } } : {}) };
+  const raw = writeRecord(record, url, storeOverride);
   opened.set(key, { raw, token }); return reason || null;
 }
 export function pendingPreviousToken(serverUrl) { return openPrevious(readRecord(serverUrl)?.data?.previous_sealed); }
@@ -153,7 +209,7 @@ export function clearDeviceCredentials(onlyToken, serverUrl) {
     forgetToken({ ...rec.data, token_account: rec.data.token_account || rec.data.device_id }); forgetPrevious(rec.data.previous_sealed);
     const store = rec.store?.servers ? { ...rec.store, servers: { ...rec.store.servers } } : { version: 2, servers: {} };
     delete store.servers[serverKey(url)];
-    if (Object.keys(store.servers).length) {
+    if (Object.keys(store.servers).length || Object.keys(store.legacy_servers || {}).length) {
       const raw = JSON.stringify(store, null, 2) + '\n'; writeFileAtomic(DEVICE_CREDENTIALS_FILE, raw);
       try { fs.chmodSync(DEVICE_CREDENTIALS_FILE, 0o600); } catch { /* Windows ACL follows the user profile */ }
     } else { try { fs.unlinkSync(DEVICE_CREDENTIALS_FILE); } catch { /* already clear */ } }
@@ -162,7 +218,9 @@ export function clearDeviceCredentials(onlyToken, serverUrl) {
 }
 export function clearAllDeviceCredentials() {
   const store = readStore()?.data;
-  const records = store?.servers ? Object.values(store.servers) : store?.device_id ? [store] : [];
+  const records = store?.servers
+    ? [...Object.values(store.servers), ...Object.values(store.legacy_servers || {})]
+    : store?.device_id ? [store] : [];
   for (const rec of records) { forgetToken({ ...rec, token_account: rec.token_account || rec.device_id }); forgetPrevious(rec.previous_sealed); }
   try { fs.unlinkSync(DEVICE_CREDENTIALS_FILE); } catch { /* already clear */ }
   opened.clear(); return true;

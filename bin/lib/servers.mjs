@@ -25,6 +25,10 @@ export function resolveServerUrl(input, { fallback = DEFAULT_SERVER_URL } = {}) 
   try { url = new URL(candidate); } catch { throw new Error(`Máy chủ không hợp lệ: ${raw}`); }
   if (url.username || url.password) throw new Error('URL máy chủ không được chứa username hoặc password.');
   const host = url.hostname.toLowerCase();
+  // Migrate the retired Vietnam beta endpoint to production. The device credential migration
+  // below keeps the old sealed record until production accepts the token.
+  if (host === 'beta-api.aivin.vn') return 'https://api.aivin.vn';
+  if (host === 'beta-api.aivin.cloud') return 'https://api.aivin.cloud';
   const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
     throw new Error('Chỉ localhost mới được dùng HTTP; máy chủ khác phải dùng HTTPS.');
@@ -48,7 +52,12 @@ export function serverKey(serverUrl) {
 export function readActiveServer() {
   try {
     const value = JSON.parse(fs.readFileSync(SERVER_CONFIG_FILE, 'utf8'))?.server_url;
-    return value ? resolveServerUrl(value) : null;
+    if (!value) return null;
+    const normalized = resolveServerUrl(value);
+    if (String(value).trim().replace(/\/+$/, '') !== normalized) {
+      try { setActiveServer(normalized); } catch { /* old value is still readable */ }
+    }
+    return normalized;
   } catch { return null; }
 }
 

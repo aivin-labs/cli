@@ -14,7 +14,7 @@ import { configureProxy, proxyAgentFor } from './netProxy.mjs';
 import { createKeepAwake } from './keepAwake.mjs';
 import { createPolicyGuard, describeCall, evaluateLocalPolicy } from './localPolicy.mjs';
 import { ConfirmResult, createLocalConfirmer } from './localConfirm.mjs';
-import { clearDeviceCredentials, credentialsFromEnv, listDevices, loadDeviceCredentials, pairDevice, pairDeviceWithCode, readStoredTokenFresh, saveDeviceCredentials } from './credentials.mjs';
+import { clearDeviceCredentials, confirmServerCredentialMigration, credentialsFromEnv, listDevices, loadDeviceCredentials, pairDevice, pairDeviceWithCode, readStoredTokenFresh, saveDeviceCredentials } from './credentials.mjs';
 import { ensureMemoryLoaded, memoryStats, stopWatchingMemory, watchMemoryDir } from './deviceMemory.mjs';
 import { buildCatalog, buildDeviceProfile } from './deviceProfile.mjs';
 import { createFileIndex, indexRootsFor } from './fileIndexer.mjs';
@@ -884,7 +884,11 @@ export async function startRemoteClient(options = {}) {
 
   // Chưa nối thì thôi: lần chào khi nối mang theo hồ sơ mới.
   announceProfile = () => (socket.connected ? announce() : undefined);
-  socket.on('connect', guarded('connect', async () => { await announce(); flushUnsent(); }));
+  socket.on('connect', guarded('connect', async () => {
+    confirmServerCredentialMigration(serverUrl);
+    await announce();
+    flushUnsent();
+  }));
   let serverKicks = 0;
   socket.on('disconnect', guarded('disconnect', (reason) => {
     if (stopped) return;

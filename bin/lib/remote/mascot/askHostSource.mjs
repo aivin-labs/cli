@@ -617,6 +617,7 @@ function Handle($m) {
     # aivin ui: the user just asked for the mascot from a terminal -> show it and open the ask box ready to type.
     'open_ask' { $script:userHidden = $false; ApplyVisibility; if (-not $script:askFocused) { OpenAsk }; return }
     'voice_toggle' { $script:userHidden = $false; ApplyVisibility; VoiceToggle; return }
+    'quick_voice' { $script:userHidden = $false; ApplyVisibility; if (-not $script:voiceLive) { PeekAsk; StartVoice }; return }
     # Debug only (AIVIN_MASCOT_DEBUG): show the ask box WITHOUT taking keyboard focus, to look at it / screenshot it.
     'ask_preview' { if ($env:AIVIN_MASCOT_DEBUG) { PeekAsk }; return }
     # Debug/docs preview of the real file-drag UI, using the same tray, face and hint code as DragEnter without requiring Explorer.

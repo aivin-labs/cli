@@ -22,7 +22,7 @@ test('server aliases normalize safely and keep explicit API/self-hosted hosts', 
   assert.equal(servers.resolveServerUrl('vn'), 'https://api.aivin.vn');
   assert.equal(servers.resolveServerUrl('wes.aivin.vn'), 'https://api.aivin.vn');
   assert.equal(servers.resolveServerUrl('api.aivin.vn'), 'https://api.aivin.vn');
-  assert.equal(servers.resolveServerUrl('beta-api.aivin.vn'), 'https://beta-api.aivin.vn');
+  assert.equal(servers.resolveServerUrl('beta-api.aivin.vn'), 'https://api.aivin.vn');
   assert.equal(servers.resolveServerUrl('local'), 'http://localhost:3001');
   assert.equal(servers.resolveServerUrl('local:3247'), 'http://localhost:3247');
   assert.equal(servers.resolveServerUrl('https://self.example/base/'), 'https://self.example/base');

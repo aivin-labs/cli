@@ -389,6 +389,7 @@ namespace AivinDesktop {
     int delay = FirstDelay;
     int fast = 0;
     bool pairing = false;
+    bool rePairPromptPending = false;
     bool wasPaired;
     bool quitting = false;
     Form pairForm;
@@ -434,12 +435,12 @@ namespace AivinDesktop {
 
       menu.Items.AddRange(new ToolStripItem[] {
         open,
-        quickSeparator,
-        quickChat,
-        quickVoice,
-        new ToolStripSeparator(),
         mascot,
         pause,
+        quickSeparator,
+        quickVoice,
+        quickChat,
+        new ToolStripSeparator(),
         serverMenu,
         new ToolStripSeparator(),
         startup,
@@ -509,9 +510,14 @@ namespace AivinDesktop {
       if (SwapIfExeReplaced()) return;
       bool paired = HasPairedServer();
       if (paired && !wasPaired) Balloon(cfg.T("connected"), ToolTipIcon.Info);
+      if (!paired && wasPaired) rePairPromptPending = true;
       wasPaired = paired;
       if (child == null && paired && DateTime.Now >= nextStart && LockHolder() == 0) StartChild(null);
       Refresh();
+      if (rePairPromptPending && child == null && !pairing && pairForm == null && !tray.ContextMenuStrip.Visible) {
+        rePairPromptPending = false;
+        ShowPair();
+      }
     }
 
     /**
@@ -840,6 +846,7 @@ namespace AivinDesktop {
 
     static string PlatformUrl() {
       string api = CurrentServerUrl();
+      api = CanonicalServerUrl(api);
       try {
         ServicePointManager.SecurityProtocol = ServicePointManager.SecurityProtocol | SecurityProtocolType.Tls12;
         using (WebClient client = new WebClient()) {
@@ -854,8 +861,7 @@ namespace AivinDesktop {
           }
         }
       } catch { }
-      if (api == "https://api.aivin.vn") return "https://brain.aivin.vn";
-      if (api == "https://beta-api.aivin.vn") return "https://beta.aivin.vn";
+      if (api == "https://api.aivin.vn") return "https://app.aivin.vn";
       if (api == "https://api.aivin.cloud") return "https://brain.aivin.cloud";
       return "https://brain.aivin.cloud";
     }
@@ -951,14 +957,31 @@ namespace AivinDesktop {
       try {
         if (File.Exists(ServerFile)) {
           Match selected = Regex.Match(File.ReadAllText(ServerFile), "\"server_url\"\\s*:\\s*\"([^\"]+)\"");
-          if (selected.Success) return selected.Groups[1].Value.TrimEnd('/');
+          if (selected.Success) {
+            string saved = selected.Groups[1].Value.TrimEnd('/');
+            string canonical = CanonicalServerUrl(saved);
+            if (!string.Equals(saved, canonical, StringComparison.OrdinalIgnoreCase)) {
+              try {
+                string tmp = ServerFile + ".tmp";
+                File.WriteAllText(tmp, "{\"server_url\":\"" + canonical + "\"}\r\n", new UTF8Encoding(false));
+                if (File.Exists(ServerFile)) File.Replace(tmp, ServerFile, null); else File.Move(tmp, ServerFile);
+              } catch { }
+            }
+            return canonical;
+          }
         }
         if (File.Exists(CredsFile)) {
           Match legacy = Regex.Match(File.ReadAllText(CredsFile), "\"server_url\"\\s*:\\s*\"([^\"]+)\"");
-          if (legacy.Success) return legacy.Groups[1].Value.TrimEnd('/');
+          if (legacy.Success) return CanonicalServerUrl(legacy.Groups[1].Value.TrimEnd('/'));
         }
       } catch { }
       return "https://api.aivin.cloud";
+    }
+
+    static string CanonicalServerUrl(string url) {
+      if (string.Equals(url, "https://beta-api.aivin.vn", StringComparison.OrdinalIgnoreCase)) return "https://api.aivin.vn";
+      if (string.Equals(url, "https://beta-api.aivin.cloud", StringComparison.OrdinalIgnoreCase)) return "https://api.aivin.cloud";
+      return url;
     }
 
     static bool HasPairedServer() {
@@ -967,7 +990,7 @@ namespace AivinDesktop {
         string url = CurrentServerUrl();
         string json = File.ReadAllText(CredsFile);
         foreach (Match m in Regex.Matches(json, "\"server_url\"\\s*:\\s*\"([^\"]+)\""))
-          if (string.Equals(m.Groups[1].Value.TrimEnd('/'), url, StringComparison.OrdinalIgnoreCase)) return true;
+          if (string.Equals(CanonicalServerUrl(m.Groups[1].Value.TrimEnd('/')), url, StringComparison.OrdinalIgnoreCase)) return true;
       } catch { }
       return false;
     }

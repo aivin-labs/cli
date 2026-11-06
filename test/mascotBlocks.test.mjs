@@ -434,7 +434,7 @@ test('biểu mẫu: có/không thành nút; giá trị điền sẵn thành nút
 
 test('link phiên trên web: đúng tên miền web của máy chủ đang ghép', async () => {
   const { webUrlForSession } = await import('../bin/lib/remote/mascot/ask.mjs');
-  assert.equal(webUrlForSession('s1', 'https://beta-api.aivin.vn'), 'https://beta.aivin.vn/?session_id=s1');
+  assert.equal(webUrlForSession('s1', 'https://beta-api.aivin.vn'), 'https://app.aivin.vn/?session_id=s1');
   assert.equal(webUrlForSession('s1', 'https://api.aivin.cloud'), 'https://aivin.cloud/?session_id=s1');
   assert.equal(webUrlForSession('s 1', 'wss://demo-api.aivin.vn:8443'), 'https://demo.aivin.vn:8443/?session_id=s%201');
 });

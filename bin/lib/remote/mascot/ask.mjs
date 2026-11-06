@@ -96,14 +96,15 @@ export const FORM_SKIP_ID = '__skip__';
 /** Link mo tren trinh duyet khi chu may bam vao thong bao phien lam viec. */
 export function webUrlForSession(sessionId, serverUrl = '') {
   if (!sessionId) return null;
-  let base = 'https://beta.aivin.vn';
+  let base = 'https://app.aivin.vn';
   if (serverUrl) {
     try {
       const u = new URL(serverUrl);
-      // beta-api.aivin.vn → beta.aivin.vn, api.aivin.cloud → aivin.cloud.
-      const host = u.hostname.replace(/-api\./, '.').replace(/^api\./, '');
+      const host = ['api.aivin.vn', 'beta-api.aivin.vn'].includes(u.hostname.toLowerCase())
+        ? 'app.aivin.vn'
+        : u.hostname.replace(/-api\./, '.').replace(/^api\./, '');
       const proto = u.protocol === 'wss:' ? 'https:' : u.protocol === 'ws:' ? 'http:' : u.protocol;
-      base = `${proto}//${host}${u.port ? `:${u.port}` : ''}`;
+      base = `${proto}//${host}${u.port && host !== 'app.aivin.vn' ? `:${u.port}` : ''}`;
     } catch {}
   }
   return `${base}/?session_id=${encodeURIComponent(sessionId)}`;

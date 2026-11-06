@@ -34,12 +34,12 @@ export const MascotState = Object.freeze({
 });
 export const LogStatus = Object.freeze({ RUN: 'run', OK: 'ok', FAIL: 'fail', INFO: 'info', WARN: 'warn' });
 /** Lệnh gửi cửa sổ / sự kiện cửa sổ gửi về (một dòng JSON mỗi lệnh). */
-export const HostCommand = Object.freeze({ STATE: 'state', MAIN: 'main', LOG: 'log', GUI: 'gui', SHOW: 'show', QUIT: 'quit', OPEN_ASK: 'open_ask', VOICE_TOGGLE: 'voice_toggle', GESTURE: 'gesture', NOTIFY_FREQ: 'notify_freq' });
+export const HostCommand = Object.freeze({ STATE: 'state', MAIN: 'main', LOG: 'log', GUI: 'gui', SHOW: 'show', QUIT: 'quit', OPEN_ASK: 'open_ask', QUICK_VOICE: 'quick_voice', VOICE_TOGGLE: 'voice_toggle', GESTURE: 'gesture', NOTIFY_FREQ: 'notify_freq' });
 
 /** `aivin ui` (terminal khác) chạm tệp này → daemon đang chạy hiện linh vật + mở ô hỏi (mascot/ui.mjs). */
 export const MASCOT_SHOW_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-show');
 export const MASCOT_HIDE_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-hide');
-/** Mục "Quick voice" của khay chạm tệp này → daemon hiện linh vật + bấm mic. Xử lý xong xoá luôn: daemon khởi động lại không được tự mở mic. */
+/** Mục "Quick voice" của khay chạm tệp này → daemon hiện linh vật + bắt đầu voice. Xử lý xong xoá luôn: daemon khởi động lại không được tự mở mic. */
 export const MASCOT_VOICE_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-voice');
 /** Phím tắt cửa sổ linh vật đang giữ thật (`{ chat, voice }`, tổ hợp đầu tiên còn trống) — khay đọc để hiện cạnh mục menu; cửa sổ đóng thì xoá. */
 export const MASCOT_HOTKEYS_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-hotkeys.json');
@@ -392,7 +392,7 @@ export function createMascot({
 
   /**
    * `aivin ui` / khay: bật lại nếu đang tắt, hiện linh vật (kể cả đang "ẩn tới khi có việc"), rồi `command`: mở ô hỏi để gõ ngay (mặc định)
-   * hoặc bấm mic (Quick voice).
+   * hoặc bắt đầu voice (Quick voice).
    */
   function wake(command = HostCommand.OPEN_ASK) {
     if (closed) return;
@@ -434,7 +434,7 @@ export function createMascot({
     try {
       const voiceAt = fs.statSync(voiceFile).mtimeMs;
       fs.rmSync(voiceFile, { force: true });
-      if (voiceAt > voiceSeenAt) wake(HostCommand.VOICE_TOGGLE);
+      if (voiceAt > voiceSeenAt) wake(HostCommand.QUICK_VOICE);
     } catch {}
     const shared = takeAttachRequests(attachDir, now());
     if (shared.length) {
