@@ -230,8 +230,8 @@ export function ensureLauncher({ exe = launcherExePath(), home = REMOTE_CONFIG_D
   return { exe, built: true };
 }
 
-export function ensureStartMenuShortcut({ exe = launcherExePath(), lnk = startMenuShortcutPath(), lang = 'en', dir = DESKTOP_DIR } = {}) {
-  runSetup({ Lnk: lnk, Target: exe, Desc: trayStrings(lang).shortcut }, dir);
+export function ensureStartMenuShortcut({ exe = launcherExePath(), lnk = startMenuShortcutPath(), lang = 'en', args = '--platform', dir = DESKTOP_DIR } = {}) {
+  runSetup({ Lnk: lnk, Target: exe, LnkArgs: args, Desc: trayStrings(lang).shortcut }, dir);
   return lnk;
 }
 
@@ -239,9 +239,9 @@ export function desktopShortcutName() {
   return `${DISPLAY_NAME}.lnk`;
 }
 
-export function ensureDesktopShortcut({ exe = launcherExePath(), lang = 'en', dir = DESKTOP_DIR } = {}) {
+export function ensureDesktopShortcut({ exe = launcherExePath(), lang = 'en', args = '--platform', dir = DESKTOP_DIR } = {}) {
   const name = desktopShortcutName();
-  runSetup({ DesktopLnkName: name, Target: exe, Desc: trayStrings(lang).shortcut }, dir);
+  runSetup({ DesktopLnkName: name, Target: exe, LnkArgs: args, Desc: trayStrings(lang).shortcut }, dir);
   return name;
 }
 
@@ -277,6 +277,8 @@ export function refreshDesktopIntegration({ lang = 'en' } = {}) {
   const done = [];
   const { exe, built } = ensureLauncher();
   if (built) done.push('launcher');
+  if (built || !fs.existsSync(startMenuShortcutPath())) ensureStartMenuShortcut({ exe, lang, args: '--platform' });
+  if (built) ensureDesktopShortcut({ exe, lang, args: '--platform' });
   if (ensureFileAssociations({ exe, lang, stampFile: ASSOCIATION_STAMP_FILE })) done.push('associations');
   if (built || !fs.existsSync(sendToShortcutPath())) { ensureSendToShortcut({ exe, lang }); done.push('send_to'); }
   if (ensureUninstallEntry({ ...uninstallEntryOptions(exe), stampFile: UNINSTALL_STAMP_FILE })) done.push('uninstall_entry');
@@ -343,8 +345,8 @@ export function installDesktop({ argv, rollback = null, lang = 'en', autostart =
   const { exe, built } = ensureLauncher();
   const lnk = startMenuShortcutPath();
   for (const p of legacyStartMenuShortcutPaths()) fs.rmSync(p, { force: true });
-  if (built || !fs.existsSync(lnk)) ensureStartMenuShortcut({ exe, lnk, lang });
-  const desktopShortcut = ensureDesktopShortcut({ exe, lang });
+  ensureStartMenuShortcut({ exe, lnk, lang, args: '--platform' });
+  const desktopShortcut = ensureDesktopShortcut({ exe, lang, args: '--platform' });
   if (autostart) registerStartup(exe);
   const openWith = registerOpenWith(exe, lang);
   if (launch && built) quitRunningTray({ exe });

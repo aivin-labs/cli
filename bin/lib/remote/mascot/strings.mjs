@@ -282,7 +282,7 @@ const STRINGS = {
     [MascotText.UI_SHOWN]: "Linh vật Aivin đã hiện trên màn hình — gõ hoặc bấm mic để hỏi.",
     [MascotText.UI_STARTING]: "Đang bật Aivin trên máy này…",
     [MascotText.UI_STARTED]: "Đã bật Aivin chạy nền — linh vật hiện trong giây lát.",
-    [MascotText.UI_NOT_PAIRED]: "Máy này chưa kết nối Aivin. Lấy mã trong Aivin (ô chat → Trình duyệt → Thêm máy tính này) rồi chạy: aivin remote start --code <mã>",
+    [MascotText.UI_NOT_PAIRED]: "Máy này chưa kết nối Aivin. Bấm biểu tượng Aivin ở khay hệ thống rồi chọn ‘Đăng nhập để kết nối’.",
     [MascotText.UI_START_FAILED]: "Chưa bật được Aivin chạy nền — chạy: aivin remote start",
   },
   en: {
@@ -418,7 +418,7 @@ const STRINGS = {
     [MascotText.UI_SHOWN]: "The Aivin mascot is on screen — type or click the mic to ask.",
     [MascotText.UI_STARTING]: "Starting Aivin on this computer…",
     [MascotText.UI_STARTED]: "Aivin is running in the background — the mascot shows up in a moment.",
-    [MascotText.UI_NOT_PAIRED]: "This computer is not connected to Aivin yet. Get a code in Aivin (chat box → Browser → Add this computer), then run: aivin remote start --code <code>",
+    [MascotText.UI_NOT_PAIRED]: "This computer is not connected to Aivin. Click the Aivin system tray icon and choose ‘Sign in to connect’.",
     [MascotText.UI_START_FAILED]: "Could not start Aivin in the background — run: aivin remote start",
   },
 };

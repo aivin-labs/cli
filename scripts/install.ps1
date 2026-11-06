@@ -164,8 +164,12 @@ function Install-AivinCli {
         }
     } else {
         Write-Host ''
-        Write-Host '  Next: create a code in Aivin (chat box -> Browser menu -> Add this computer), then' -ForegroundColor Gray
-        if ($desktop) { Write-Host '    click the Aivin icon in the system tray and enter the code, or run:' -ForegroundColor Gray }
+        if ($desktop) {
+            Write-Host '  Next: click the Aivin icon in the system tray and choose "Sign in to connect".' -ForegroundColor Gray
+            Write-Host '  Or create a one-time code in Aivin Web and run:' -ForegroundColor Gray
+        } else {
+            Write-Host '  Next: create a one-time code in Aivin Web (chat box -> Browser menu -> Add this computer), then run:' -ForegroundColor Gray
+        }
         Write-Host '    aivin remote start --code <code>' -ForegroundColor White
     }
 

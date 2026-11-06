@@ -34,7 +34,7 @@ To show the mascot and open its ask box directly, run:
 aivin ui
 ```
 
-If the listener is not running, `aivin ui` starts it in the background. If the computer has not been paired, the command prints pairing instructions instead.
+If the listener is not running, `aivin ui` starts it in the background. If the computer has not been paired, click the Aivin system tray icon and choose **Sign in to connect**. Aivin opens the usual browser sign-in, links this computer, then starts the listener. The one-time pairing code remains available as a fallback from Aivin Web.
 
 ## Using the mascot
 

@@ -123,7 +123,7 @@ curl -fsSL https://get.aivin.vn/install.sh | sh
 | **Linux glibc x64 / arm64** | `aivin-linux-x64` / `aivin-linux-arm64` |
 | **Linux musl (Alpine)** | `aivin-linux-x64-musl` / `aivin-linux-arm64-musl` |
 
-In Aivin Web, clicking **Chat box → Browser menu → Add this computer** prints a one-liner with a one-time pairing code (`aivin remote start --code <code>`).
+On Windows, open Aivin from the system tray and choose **Sign in to connect** to link this computer through the usual browser login. You can also pair from Aivin Web with a one-time code (`aivin remote start --code <code>`).
 
 ---
 

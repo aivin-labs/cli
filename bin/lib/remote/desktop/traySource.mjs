@@ -53,6 +53,7 @@ namespace AivinDesktop {
       if (workAt >= 0) return SendRequest(args, workAt + 1, id, ".workdir");
       bool autostart = Array.IndexOf(args, "--autostart") >= 0;
       bool installed = Array.IndexOf(args, "--installed") >= 0;
+      bool openPlatform = Array.IndexOf(args, "--platform") >= 0;
       bool quit = Array.IndexOf(args, "--quit") >= 0;
       bool created;
       using (EventWaitHandle platformLaunch = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\AivinTrayPlatform-" + id)) {
@@ -60,6 +61,7 @@ namespace AivinDesktop {
         if (!created) {
           // Double-click Aivin.exe / Start menu mở platform; lệnh nội bộ vẫn chỉ đánh thức linh vật.
           if (quit) Signal("Local\\AivinTrayQuit-" + id);
+          else if (openPlatform) TrayApp.OpenPlatformNow();
           else if (args.Length == 0) platformLaunch.Set();
           else if (!autostart && !installed) Signal("Local\\AivinTrayOpen-" + id);
           return 0;
@@ -68,7 +70,7 @@ namespace AivinDesktop {
         try { SetProcessDPIAware(); } catch { }
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new TrayApp(id, !autostart && !installed, installed));
+        Application.Run(new TrayApp(id, !autostart && (!installed || openPlatform), installed));
         GC.KeepAlive(mutex);
       }
       }
@@ -873,6 +875,8 @@ namespace AivinDesktop {
       try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
     }
 
+    internal static void OpenPlatformNow() { LaunchPlatformApp(); }
+
     /** Gửi yêu cầu cho daemon qua tệp đánh dấu (mascot-show = mở ô hỏi, mascot-voice = nói chuyện); daemon đang dừng thì chạy lại để nó nhận. */
     void RequestMascot(string requestFile) {
       if (quitting) return;
@@ -990,6 +994,102 @@ namespace AivinDesktop {
     void ShowPair() {
       if (pairForm != null) { pairForm.Activate(); return; }
       Form f = new Form();
+      f.Text = cfg.T("connectTitle");
+      f.Icon = colorIcon;
+      f.Font = SystemFonts.MessageBoxFont;
+      f.AutoScaleDimensions = new SizeF(96F, 96F);
+      f.AutoScaleMode = AutoScaleMode.Dpi;
+      f.FormBorderStyle = FormBorderStyle.FixedDialog;
+      f.MaximizeBox = false;
+      f.MinimizeBox = false;
+      f.StartPosition = FormStartPosition.CenterScreen;
+      f.TopMost = true;
+      f.ClientSize = new Size(420, 194);
+      bool[] connectCancelled = new bool[] { false };
+      f.FormClosing += delegate { connectCancelled[0] = true; };
+      Label label = new Label();
+      label.Text = cfg.T("connectPrompt");
+      label.SetBounds(16, 16, 388, 52);
+      Label statusLabel = new Label();
+      statusLabel.SetBounds(16, 76, 388, 24);
+      statusLabel.ForeColor = Color.FromArgb(80, 90, 105);
+      Button signIn = new Button();
+      signIn.Text = cfg.T("connectSignIn");
+      signIn.SetBounds(16, 128, 190, 32);
+      signIn.BackColor = Color.FromArgb(33, 98, 230);
+      signIn.ForeColor = Color.White;
+      signIn.FlatStyle = FlatStyle.Flat;
+      Button code = new Button();
+      code.Text = cfg.T("connectCode");
+      code.SetBounds(212, 128, 128, 32);
+      Button cancel = new Button();
+      cancel.Text = cfg.T("pairCancel");
+      cancel.SetBounds(346, 128, 58, 32);
+      cancel.DialogResult = DialogResult.Cancel;
+      f.Controls.AddRange(new Control[] { label, statusLabel, signIn, code, cancel });
+      f.CancelButton = cancel;
+      pairForm = f;
+      signIn.Click += delegate {
+        signIn.Enabled = false;
+        code.Enabled = false;
+        statusLabel.Text = cfg.T("connectWorking");
+        ThreadPool.QueueUserWorkItem(delegate {
+          int loginResult = RunCliAndWait("login");
+          if (loginResult != 0) {
+            UI(delegate { if (!quitting && pairForm == f) { statusLabel.Text = cfg.T("connectFailed"); signIn.Enabled = code.Enabled = true; } });
+            return;
+          }
+          if (connectCancelled[0]) return;
+          UI(delegate { if (!quitting && pairForm == f) statusLabel.Text = cfg.T("connectPairing"); });
+          int pairResult = RunCliAndWait("remote pair");
+          UI(delegate {
+            if (quitting || pairForm != f) return;
+            if (pairResult == 0 && HasPairedServer()) {
+              statusLabel.Text = cfg.T("connectDone");
+              f.Close();
+            } else {
+              statusLabel.Text = cfg.T("connectFailed");
+              signIn.Enabled = code.Enabled = true;
+            }
+          });
+        });
+      };
+      code.Click += delegate { f.DialogResult = DialogResult.Retry; f.Close(); };
+      DialogResult r = f.ShowDialog();
+      pairForm = null;
+      f.Dispose();
+      if (r == DialogResult.Retry && !quitting) { ShowPairWithCode(); return; }
+    }
+
+    int RunCliAndWait(string command) {
+      try {
+        cfg = Config.Load(CfgFile);
+        if (string.IsNullOrEmpty(cfg.Exe)) return 1;
+        List<string> args = new List<string>();
+        foreach (string a in cfg.Args) { if (a == "remote") break; args.Add(a); }
+        foreach (string a in command.Split(' ')) args.Add(a);
+        StringBuilder line = new StringBuilder();
+        foreach (string a in args) { if (line.Length > 0) line.Append(' '); line.Append(Quote(a)); }
+        ProcessStartInfo psi = new ProcessStartInfo(cfg.Exe, line.ToString());
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        psi.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        psi.EnvironmentVariables.Remove("AIVIN_SUPERVISOR");
+        psi.RedirectStandardOutput = true;
+        psi.RedirectStandardError = true;
+        Process p = Process.Start(psi);
+        p.BeginOutputReadLine();
+        p.BeginErrorReadLine();
+        p.WaitForExit();
+        int result = p.ExitCode;
+        p.Dispose();
+        return result;
+      } catch { return 1; }
+    }
+
+    void ShowPairWithCode() {
+      if (pairForm != null) { pairForm.Activate(); return; }
+      Form f = new Form();
       f.Text = "AIVIN Bot";
       f.Icon = colorIcon;
       f.Font = SystemFonts.MessageBoxFont;
@@ -1020,12 +1120,12 @@ namespace AivinDesktop {
       f.CancelButton = cancel;
       pairForm = f;
       DialogResult r = f.ShowDialog();
-      string code = box.Text.Trim();
+      string pairingCode = box.Text.Trim();
       pairForm = null;
       f.Dispose();
-      if (r != DialogResult.OK || code.Length == 0 || quitting) return;
+      if (r != DialogResult.OK || pairingCode.Length == 0 || quitting) return;
       KillChild();
-      StartChild(code);
+      StartChild(pairingCode);
       Refresh();
     }
 
