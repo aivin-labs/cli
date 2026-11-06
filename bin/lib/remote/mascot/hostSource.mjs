@@ -563,7 +563,7 @@ $script:topTimer.Start()
 # change: the bot sits at the anchor inside it, the boxes (ask box, bubble, activity panel) are laid out around the bot (ArrangeBoxes).
 $wa = [Windows.SystemParameters]::WorkArea
 $script:cx = if ($cfg.x -ne $null) { [double]$cfg.x } else { $wa.Right - 76 }
-$script:cy = if ($cfg.y -ne $null) { [double]$cfg.y } else { $wa.Bottom - 70 }
+$script:cy = if ($cfg.y -ne $null) { [double]$cfg.y } else { [Windows.SystemParameters]::PrimaryScreenHeight - ${MASCOT_BOX.h - MASCOT_CENTER.y} }
 # Bot center inside the window (DIPs).
 $script:mx = ${WINDOW.w / 2}; $script:my = ${WINDOW.h - ROOT_MARGIN - (MASCOT_BOX.h - MASCOT_CENTER.y)}
 function DeviceScale {

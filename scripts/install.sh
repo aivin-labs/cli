@@ -12,16 +12,17 @@
 #          --dir <folder the agent may use> --version <e.g. v1.1.0>
 # Environment: AIVIN_DOWNLOAD_ROOT (versioned site: <root>/latest.txt + <root>/<version>/<asset>, default https://get.aivin.vn),
 #              AIVIN_DOWNLOAD_BASE (one folder holding every asset, e.g. a GitHub release - overrides the root),
+#              AIVIN_SERVER (server to use; a fresh install infers api.aivin.vn/cloud from get.aivin.vn/cloud),
 #              AIVIN_INSTALL_DIR (default: ~/.local/bin),
 #              AIVIN_NO_AUTOSTART=1 (don't start Aivin with the computer - can be turned on later in Aivin's menu),
 #              AIVIN_NO_DESKTOP=1 (no menu bar / tray app and no app menu entry; Linux without a graphical session never gets them).
 set -eu
 
-CODE=""; SERVER=""; DIR=""; FULL=""; VERSION="${AIVIN_VERSION:-}"
+CODE=""; SERVER=""; SERVER_EXPLICIT=""; DIR=""; FULL=""; VERSION="${AIVIN_VERSION:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --code) CODE="$2"; shift 2 ;;
-    --server) SERVER="$2"; shift 2 ;;
+    --server) SERVER="$2"; SERVER_EXPLICIT=1; shift 2 ;;
     --dir) DIR="$2"; shift 2 ;;
     --full-access) FULL=1; shift ;;
     --version) VERSION="$2"; shift 2 ;;
@@ -71,6 +72,17 @@ else
   fi
   BASE="$ROOT/$VERSION"
 fi
+
+# Match the Aivin environment to the download host on fresh installs. Keep an existing selection
+# during upgrades unless AIVIN_SERVER explicitly asks to change it.
+SERVER_CONFIG="${AIVIN_REMOTE_HOME:-$HOME/.aivin}/server.json"
+if [ -z "$SERVER" ] && [ -n "${AIVIN_SERVER:-}" ]; then SERVER="$AIVIN_SERVER"; SERVER_EXPLICIT=1; fi
+if [ -z "$SERVER" ]; then
+  case "${ROOT:-}" in
+    https://get.aivin.vn|https://get.aivin.vn/*) SERVER=https://api.aivin.vn ;;
+    https://get.aivin.cloud|https://get.aivin.cloud/*) SERVER=https://api.aivin.cloud ;;
+  esac
+fi
 INSTALL_DIR="${AIVIN_INSTALL_DIR:-$HOME/.local/bin}"
 TARGET="$INSTALL_DIR/aivin"
 
@@ -116,6 +128,10 @@ INSTALLED_VERSION="$("$TARGET.new" --version 2>/dev/null)" || { rm -f "$TARGET.n
 mv -f "$TARGET.new" "$TARGET"
 
 say "Installed aivin $INSTALLED_VERSION to $INSTALL_DIR"
+if [ -n "$SERVER" ] && { [ -n "$SERVER_EXPLICIT" ] || [ ! -f "$SERVER_CONFIG" ]; }; then
+  "$TARGET" server "$SERVER" >/dev/null || fail "Could not select Aivin server $SERVER."
+  say "Using Aivin server $SERVER"
+fi
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) echo "  $INSTALL_DIR is not on your PATH - add this line to ~/.zshrc or ~/.bashrc to type 'aivin' anywhere:"

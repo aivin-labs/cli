@@ -670,6 +670,14 @@ namespace AivinDesktop {
       });
     }
 
+    static int CompareVersions(string left, string right) {
+      string a = (left ?? "").Trim().TrimStart('v', 'V').Split('-')[0].Split('+')[0];
+      string b = (right ?? "").Trim().TrimStart('v', 'V').Split('-')[0].Split('+')[0];
+      Version av, bv;
+      if (Version.TryParse(a, out av) && Version.TryParse(b, out bv)) return av.CompareTo(bv);
+      return string.Compare(left, right, StringComparison.OrdinalIgnoreCase);
+    }
+
     void Refresh() {
       bool paired = HasPairedServer();
       bool paused = File.Exists(PausedFile);
@@ -700,9 +708,13 @@ namespace AivinDesktop {
       if (isUpdating) {
         updateItem.Text = cfg.T("updateUpdating");
         updateItem.Enabled = false;
-      } else if (!string.IsNullOrEmpty(siteLatest) && !siteLatest.TrimStart('v').Equals(ver.TrimStart('v'), StringComparison.OrdinalIgnoreCase)) {
+      } else if (!string.IsNullOrEmpty(siteLatest) && CompareVersions(siteLatest, ver) > 0) {
         updateItem.Text = "★  " + cfg.T("updateAvailable").Replace("{version}", siteLatest);
         updateItem.Font = new Font(updateItem.Font, FontStyle.Bold);
+        updateItem.Enabled = true;
+      } else if (!string.IsNullOrEmpty(siteLatest)) {
+        updateItem.Text = "✓  " + cfg.T("updateUpToDate") + " (" + ver + ")";
+        updateItem.Font = new Font(updateItem.Font, FontStyle.Regular);
         updateItem.Enabled = true;
       } else {
         updateItem.Text = cfg.T("updateCheckNow") + " (" + ver + ")";
@@ -831,6 +843,9 @@ namespace AivinDesktop {
           }
         }
       } catch { }
+      if (api == "https://api.aivin.vn") return "https://brain.aivin.vn";
+      if (api == "https://beta-api.aivin.vn") return "https://beta.aivin.vn";
+      if (api == "https://api.aivin.cloud") return "https://brain.aivin.cloud";
       return "https://brain.aivin.cloud";
     }
 
@@ -866,7 +881,7 @@ namespace AivinDesktop {
         // Unknown default browsers keep their own profile/session via the normal URL handler.
         if (exe == null && progId.Length == 0) exe = BrowserPath("edge") ?? BrowserPath("chrome");
         if (exe != null) {
-          ProcessStartInfo app = new ProcessStartInfo(exe, "--app=\"" + url + "\"");
+          ProcessStartInfo app = new ProcessStartInfo(exe, "--app=\"" + url + "\" --start-maximized");
           app.UseShellExecute = false;
           Process.Start(app);
           return;

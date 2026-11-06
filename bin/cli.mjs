@@ -842,7 +842,12 @@ program
         return;
       }
       const next = normalizeServerUrl(target);
-      if (next === current) return console.log(`Đang dùng ${serverLabel(next)} (${next}).`);
+      if (next === current) {
+        // An explicit selection should persist even when the value currently comes only from
+        // AIVIN_BASE_URL or the built-in default; desktop launchers read server.json themselves.
+        if (!readActiveServer()) setActiveServer(next);
+        return console.log(`Đang dùng ${serverLabel(next)} (${next}).`);
+      }
       const holder = lockHolder();
       if (holder) {
         const { proceed } = await inquirer.prompt([{

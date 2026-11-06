@@ -9,7 +9,7 @@
 #
 # Optional environment variables (`irm | iex` cannot pass arguments):
 #   AIVIN_PAIR_CODE      one-time pairing code from Aivin
-#   AIVIN_SERVER         Aivin server the code belongs to
+#   AIVIN_SERVER         Aivin server (default: inferred from get.aivin.vn -> api.aivin.vn on a fresh install)
 #   AIVIN_FULL_ACCESS    set to 1 to let the agent work anywhere on this computer (otherwise one folder)
 #   AIVIN_DIR            folder the agent may work in (default: current folder; ignored with AIVIN_FULL_ACCESS)
 #   AIVIN_VERSION        release, e.g. v1.1.0 (default: the one in <root>/latest.txt)
@@ -54,12 +54,13 @@ function Install-AivinCli {
     $ProgressPreference = 'SilentlyContinue'  # the Invoke-WebRequest progress bar slows downloads a lot on PowerShell 5
     $mode = Select-InstallMode
 
+    $downloadRoot = if ($env:AIVIN_DOWNLOAD_ROOT) { $env:AIVIN_DOWNLOAD_ROOT.TrimEnd('/') } else { 'https://get.aivin.vn' }
     if ($env:AIVIN_DOWNLOAD_BASE) {
         $base = $env:AIVIN_DOWNLOAD_BASE.TrimEnd('/')
     } else {
         # Resolve "latest" to a concrete version first, then download from that version's folder: the CDN may cache
         # files, and a versioned folder never mixes a new checksum list with an old binary.
-        $root = if ($env:AIVIN_DOWNLOAD_ROOT) { $env:AIVIN_DOWNLOAD_ROOT.TrimEnd('/') } else { 'https://get.aivin.vn' }
+        $root = $downloadRoot
         $version = $env:AIVIN_VERSION
         if (-not $version) {
             try { $version = ([Text.Encoding]::ASCII.GetString((Invoke-WebRequest -UseBasicParsing -Uri "$root/latest.txt" -Headers @{ 'Cache-Control' = 'no-cache' }).RawContentStream.ToArray())).Trim() }
@@ -137,6 +138,23 @@ function Install-AivinCli {
 
     Write-Step "Installed aivin $installedVersion to $installDir"
 
+    # The installer origin selects the matching Aivin environment on a fresh setup. Preserve a
+    # machine's existing choice during upgrades unless the caller explicitly selected a server.
+    $remoteHome = if ($env:AIVIN_REMOTE_HOME) { $env:AIVIN_REMOTE_HOME } else { Join-Path $env:USERPROFILE '.aivin' }
+    $serverConfig = Join-Path $remoteHome 'server.json'
+    $inferredServer = $null
+    try {
+        $downloadHost = ([Uri]$downloadRoot).Host.ToLowerInvariant()
+        if ($downloadHost -match '^get\.aivin\.(?<zone>cloud|vn)$') { $inferredServer = "https://api.aivin.$($Matches.zone)" }
+    } catch { }
+    $serverTarget = if ($env:AIVIN_SERVER) { $env:AIVIN_SERVER } else { $inferredServer }
+    $configureServer = $serverTarget -and ($env:AIVIN_SERVER -or -not (Test-Path $serverConfig))
+    if ($configureServer) {
+        & $target server $serverTarget | Out-Null
+        if ($LASTEXITCODE -ne 0) { Fail "Could not select Aivin server $serverTarget." }
+        Write-Step "Using Aivin server $serverTarget"
+    }
+
     # System tray app + Desktop/Start shortcuts + start with Windows (on by default; listed in Task Manager -> Startup apps).
     $desktop = $false
     if (-not $env:AIVIN_NO_DESKTOP) {
@@ -151,7 +169,7 @@ function Install-AivinCli {
         # With the tray app: only pair here - the tray starts taking work as soon as this computer is paired, so this window can close.
         # Without it (servers, CI): pair and keep taking work in this window.
         $argsList = @('remote', $(if ($desktop) { 'pair' } else { 'start' }), '--code', $env:AIVIN_PAIR_CODE)
-        if ($env:AIVIN_SERVER) { $argsList += @('--server', $env:AIVIN_SERVER) }
+        if ($serverTarget) { $argsList += @('--server', $serverTarget) }
         if ($env:AIVIN_FULL_ACCESS) { $argsList += @('--full-access') }
         elseif ($env:AIVIN_DIR) { $argsList += @('--dir', $env:AIVIN_DIR) }
         if ($desktop) { Write-Step 'Connecting this computer to Aivin ...' }
