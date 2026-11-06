@@ -93,7 +93,7 @@ namespace AivinDesktop {
       Config cfg = Config.Load(Path.Combine(Path.Combine(Home, "desktop"), "launch.cfg"));
       if (from >= args.Length) return 1;
       if (string.IsNullOrEmpty(cfg.Exe)) {
-        MessageBox.Show("The launch configuration is missing. Run `aivin desktop install` to repair AIVIN Office Suite.", "AIVIN Office Suite", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        MessageBox.Show("The launch configuration is missing. Run aivin desktop install to repair AIVIN Office Suite.", "AIVIN Office Suite", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         return 1;
       }
       StringBuilder line = new StringBuilder();

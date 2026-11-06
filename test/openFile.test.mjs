@@ -92,7 +92,7 @@ test('Programs & Features: mục HKCU trỏ Aivin.exe --uninstall, Aivin.exe nh�
   const cmds = uninstallEntryCommands({ exe: 'C:\\A\\Aivin.exe', version: '1.0.25', location: 'C:\\A' });
   const flat = cmds.map((c) => c.join(' '));
   assert.ok(cmds.every((c) => c[1] === 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AivinBot'));
-  assert.ok(flat.some((l) => l.includes('DisplayName') && l.includes('AIVIN Bot')));
+  assert.ok(flat.some((l) => l.includes('DisplayName') && l.includes('AIVIN Office Suite')));
   assert.ok(flat.some((l) => l.includes('UninstallString') && l.includes('"C:\\A\\Aivin.exe" --uninstall')));
   const src = launcherSource('C:\\h');
   assert.ok(src.indexOf('"--uninstall"') > 0 && src.indexOf('"--uninstall"') < src.indexOf('new Mutex'));
