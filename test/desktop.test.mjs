@@ -52,7 +52,7 @@ test('khay: Quick chat / Quick voice có chữ trong launch.cfg, gửi yêu cầ
 
 test('khay tự mở lại khi Aivin.exe bị thay: chờ hết daemon, mở sau khi nhả mutex', () => {
   const src = launcherSource('C:\\h');
-  assert.ok(src.includes('if (child != null || pairing || pairForm != null'), 'đang giữ daemon thì không chuyển');
+  assert.ok(src.includes('if (child != null || pairing || browserConnectInProgress || pairForm != null'), 'đang giữ daemon hoặc luồng đăng nhập thì không chuyển');
   assert.ok(src.indexOf('GC.KeepAlive(mutex);') < src.indexOf('if (Relaunch)'), 'mở lại sau khi nhả mutex');
   assert.ok(src.indexOf('OnChildExit();\n      if (SwapIfExeReplaced())') > 0, 'kiểm tra ngay sau khi daemon thoát');
 });
