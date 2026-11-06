@@ -65,7 +65,7 @@ export async function loadReleasePrivateKey(file) {
   let pass = process.env.AIVIN_RELEASE_KEY_PASSPHRASE;
   if (pass === undefined && process.platform === 'win32' && fs.existsSync(cachedFile)) {
     const encodedPath = Buffer.from(cachedFile, 'utf16le').toString('base64');
-    const ps = `$p=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedPath}')); $s=Get-Content -Raw -LiteralPath $p | ConvertTo-SecureString; $b=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($s); try {[Runtime.InteropServices.Marshal]::PtrToStringBSTR($b)} finally {[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b)}`;
+    const ps = `$p=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedPath}')); $raw=Get-Content -Raw -LiteralPath $p; $raw=$raw -replace '\\s',''; $s=ConvertTo-SecureString $raw; $b=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($s); try {[Runtime.InteropServices.Marshal]::PtrToStringBSTR($b)} finally {[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b)}`;
     pass = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', windowsHide: true }).trimEnd();
   }
   if (pass === undefined) pass = await readPassphrase();

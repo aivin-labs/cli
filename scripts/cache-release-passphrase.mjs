@@ -18,6 +18,6 @@ createPrivateKey({ key: pem, format: 'pem', passphrase: pass });
 const out = `${keyFile}.passphrase.dpapi`;
 const b64 = Buffer.from(pass, 'utf16le').toString('base64');
 const ps = `$s=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${b64}')) | ConvertTo-SecureString -AsPlainText -Force; ConvertFrom-SecureString $s`;
-const encrypted = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', windowsHide: true }).trim();
+const encrypted = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', windowsHide: true }).replace(/\s+/g, '');
 fs.writeFileSync(out, `${encrypted}\n`, { flag: 'w', mode: 0o600 });
 console.log(`Đã lưu mật khẩu được Windows bảo vệ cho tài khoản hiện tại: ${out}`);
