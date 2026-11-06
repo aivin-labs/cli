@@ -373,7 +373,7 @@ namespace AivinDesktop {
     Config cfg;
     NotifyIcon tray;
     Icon colorIcon, greyIcon, shownIcon;
-    ToolStripMenuItem status, updateItem, open, quickChat, quickVoice, pause, startup, mascot, terminal, quit, serverMenu, serverCloud, serverVn, serverLocal;
+    ToolStripMenuItem status, updateItem, open, connectCodeItem, quickChat, quickVoice, pause, startup, mascot, terminal, quit, serverMenu, serverCloud, serverVn, serverLocal;
     ToolStripSeparator quickSeparator;
     System.Windows.Forms.Timer timer;
     Control invoker;
@@ -389,6 +389,7 @@ namespace AivinDesktop {
     int delay = FirstDelay;
     int fast = 0;
     bool pairing = false;
+    bool browserConnectInProgress = false;
     bool rePairPromptPending = false;
     bool wasPaired;
     bool quitting = false;
@@ -411,6 +412,7 @@ namespace AivinDesktop {
       open = Item("", delegate { OpenAivin(); });
       open.Font = new Font("Segoe UI", 10.0f, FontStyle.Bold);
       open.Padding = new Padding(16, 7, 24, 7);
+      connectCodeItem = Item(cfg.T("connectCode"), delegate { ShowPairWithCode(); });
 
       quickChat = Item(cfg.T("quickChat"), delegate { OpenAivin(); });
       quickVoice = Item(cfg.T("quickVoice"), delegate { RequestMascot(VoiceFile); });
@@ -435,6 +437,7 @@ namespace AivinDesktop {
 
       menu.Items.AddRange(new ToolStripItem[] {
         open,
+        connectCodeItem,
         mascot,
         pause,
         quickSeparator,
@@ -514,9 +517,9 @@ namespace AivinDesktop {
       wasPaired = paired;
       if (child == null && paired && DateTime.Now >= nextStart && LockHolder() == 0) StartChild(null);
       Refresh();
-      if (rePairPromptPending && child == null && !pairing && pairForm == null && !tray.ContextMenuStrip.Visible) {
+      if (rePairPromptPending && child == null && !pairing && !browserConnectInProgress && pairForm == null && !tray.ContextMenuStrip.Visible) {
         rePairPromptPending = false;
-        ShowPair();
+        StartBrowserConnect();
       }
     }
 
@@ -526,7 +529,7 @@ namespace AivinDesktop {
      * để không ngắt việc đang chạy.
      */
     bool SwapIfExeReplaced() {
-      if (child != null || pairing || pairForm != null || isUpdating || tray.ContextMenuStrip.Visible) return false;
+      if (child != null || pairing || browserConnectInProgress || pairForm != null || isUpdating || tray.ContextMenuStrip.Visible) return false;
       try {
         string exe = Application.ExecutablePath;
         if (!File.Exists(exe) || File.GetLastWriteTimeUtc(exe) == exeStamp) return false;
@@ -699,7 +702,7 @@ namespace AivinDesktop {
       bool paired = HasPairedServer();
       bool paused = File.Exists(PausedFile);
       bool running = Running();
-      string state = !paired ? cfg.T(pairing ? "connecting" : "notPaired")
+      string state = !paired ? cfg.T(pairing || browserConnectInProgress ? "connecting" : "notPaired")
         : !running ? cfg.T("stopped") : paused ? cfg.T("paused") : cfg.T("running");
       status.Text = "●  " + state;
       string tip = "Aivin - " + state;
@@ -751,6 +754,8 @@ namespace AivinDesktop {
       serverVn.Checked = selectedServer == "https://api.aivin.vn";
       serverLocal.Checked = selectedServer == "http://localhost:3001";
       open.Text = cfg.T(paired ? "open" : "connect");
+      connectCodeItem.Visible = !paired;
+      connectCodeItem.Enabled = !browserConnectInProgress;
       pause.Text = cfg.T(paused ? "resume" : "pause");
       pause.Visible = paired;
       terminal.Text = cfg.T("terminal");
@@ -840,6 +845,7 @@ namespace AivinDesktop {
 
     /** Double-click Aivin.exe: show the mascot and the platform in a browser app window. */
     void OpenPlatform() {
+      if (!HasPairedServer()) { StartBrowserConnect(); return; }
       ThreadPool.QueueUserWorkItem(delegate { LaunchPlatformApp(); });
       OpenAivin();
     }
@@ -938,7 +944,7 @@ namespace AivinDesktop {
     /** Gửi yêu cầu cho daemon qua tệp đánh dấu (mascot-show = mở ô hỏi, mascot-voice = nói chuyện); daemon đang dừng thì chạy lại để nó nhận. */
     void RequestMascot(string requestFile) {
       if (quitting) return;
-      if (!HasPairedServer()) { ShowPair(); return; }
+      if (!HasPairedServer()) { StartBrowserConnect(); return; }
       try {
         try { SetMascotEnabled(true); } catch { }
         long ms = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
@@ -1029,7 +1035,7 @@ namespace AivinDesktop {
       nextStart = DateTime.MinValue;
       delay = FirstDelay;
       Refresh();
-      if (!HasPairedServer()) ShowPair();
+      if (!HasPairedServer()) StartBrowserConnect();
       else Tick();
     }
 
@@ -1066,74 +1072,38 @@ namespace AivinDesktop {
       Refresh();
     }
 
-    void ShowPair() {
-      if (pairForm != null) { pairForm.Activate(); return; }
-      Form f = new Form();
-      f.Text = cfg.T("connectTitle");
-      f.Icon = colorIcon;
-      f.Font = SystemFonts.MessageBoxFont;
-      f.AutoScaleDimensions = new SizeF(96F, 96F);
-      f.AutoScaleMode = AutoScaleMode.Dpi;
-      f.FormBorderStyle = FormBorderStyle.FixedDialog;
-      f.MaximizeBox = false;
-      f.MinimizeBox = false;
-      f.StartPosition = FormStartPosition.CenterScreen;
-      f.TopMost = true;
-      f.ClientSize = new Size(420, 194);
-      bool[] connectCancelled = new bool[] { false };
-      f.FormClosing += delegate { connectCancelled[0] = true; };
-      Label label = new Label();
-      label.Text = cfg.T("connectPrompt");
-      label.SetBounds(16, 16, 388, 52);
-      Label statusLabel = new Label();
-      statusLabel.SetBounds(16, 76, 388, 24);
-      statusLabel.ForeColor = Color.FromArgb(80, 90, 105);
-      Button signIn = new Button();
-      signIn.Text = cfg.T("connectSignIn");
-      signIn.SetBounds(16, 128, 190, 32);
-      signIn.BackColor = Color.FromArgb(33, 98, 230);
-      signIn.ForeColor = Color.White;
-      signIn.FlatStyle = FlatStyle.Flat;
-      Button code = new Button();
-      code.Text = cfg.T("connectCode");
-      code.SetBounds(212, 128, 128, 32);
-      Button cancel = new Button();
-      cancel.Text = cfg.T("pairCancel");
-      cancel.SetBounds(346, 128, 58, 32);
-      cancel.DialogResult = DialogResult.Cancel;
-      f.Controls.AddRange(new Control[] { label, statusLabel, signIn, code, cancel });
-      f.CancelButton = cancel;
-      pairForm = f;
-      signIn.Click += delegate {
-        signIn.Enabled = false;
-        code.Enabled = false;
-        statusLabel.Text = cfg.T("connectWorking");
-        ThreadPool.QueueUserWorkItem(delegate {
-          int loginResult = RunCliAndWait("login");
-          if (loginResult != 0) {
-            UI(delegate { if (!quitting && pairForm == f) { statusLabel.Text = cfg.T("connectFailed"); signIn.Enabled = code.Enabled = true; } });
-            return;
-          }
-          if (connectCancelled[0]) return;
-          UI(delegate { if (!quitting && pairForm == f) statusLabel.Text = cfg.T("connectPairing"); });
-          int pairResult = RunCliAndWait("remote pair");
+    void StartBrowserConnect() {
+      if (browserConnectInProgress) return;
+      browserConnectInProgress = true;
+      rePairPromptPending = false;
+      Refresh();
+      Balloon(cfg.T("connectBrowserHint"), ToolTipIcon.Info);
+      ThreadPool.QueueUserWorkItem(delegate {
+        int loginResult = RunCliAndWait("login");
+        if (quitting) return;
+        if (loginResult != 0) {
           UI(delegate {
-            if (quitting || pairForm != f) return;
-            if (pairResult == 0 && HasPairedServer()) {
-              statusLabel.Text = cfg.T("connectDone");
-              f.Close();
-            } else {
-              statusLabel.Text = cfg.T("connectFailed");
-              signIn.Enabled = code.Enabled = true;
-            }
+            if (quitting) return;
+            browserConnectInProgress = false;
+            Refresh();
+            Balloon(cfg.T("connectFailed"), ToolTipIcon.Warning);
           });
+          return;
+        }
+        UI(delegate { if (!quitting) Balloon(cfg.T("connectPairing"), ToolTipIcon.Info); });
+        int pairResult = RunCliAndWait("remote pair");
+        UI(delegate {
+          if (quitting) return;
+          browserConnectInProgress = false;
+          if (pairResult == 0 && HasPairedServer()) {
+            wasPaired = true;
+            Balloon(cfg.T("connectDone"), ToolTipIcon.Info);
+          } else {
+            Balloon(cfg.T("connectFailed"), ToolTipIcon.Warning);
+          }
+          Refresh();
         });
-      };
-      code.Click += delegate { f.DialogResult = DialogResult.Retry; f.Close(); };
-      DialogResult r = f.ShowDialog();
-      pairForm = null;
-      f.Dispose();
-      if (r == DialogResult.Retry && !quitting) { ShowPairWithCode(); return; }
+      });
     }
 
     int RunCliAndWait(string command) {
