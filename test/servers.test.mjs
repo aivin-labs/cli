@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawnSync } from 'child_process';
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-server-test-'));
 process.env.AIVIN_REMOTE_HOME = path.join(home, 'remote');
@@ -74,6 +75,25 @@ test('legacy single-server pairing is preserved and migrated when updated', () =
   const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.equal(stored.version, 2);
   assert.equal(credentials.loadDeviceCredentials('cloud')?.device_token, 'legacy-rotated');
+});
+
+test('aivin server --force accepts Commander options and persists the selected server', () => {
+  const cliHome = path.join(home, 'server-command');
+  const cliFile = path.resolve(process.cwd(), 'bin', 'cli.mjs');
+  const result = spawnSync(process.execPath, [cliFile, 'server', 'vn', '--force'], {
+    cwd: home,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      AIVIN_REMOTE_HOME: cliHome,
+      AIVIN_BASE_URL: '',
+      AIVIN_SERVER: '',
+      HOME: home,
+      USERPROFILE: home,
+    },
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(cliHome, 'server.json'), 'utf8')).server_url, 'https://api.aivin.vn');
 });
 
 test('test home is removed', (t) => {

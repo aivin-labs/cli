@@ -834,9 +834,8 @@ program
   .command('server [target]')
   .description('Show or switch the active Aivin server (cloud, vn, local, or a URL)')
   .option('--force', 'Switch servers without asking before stopping the current remote connection')
-  .action(async (target, command) => {
+  .action(async (target, options) => {
     try {
-      const options = command.opts();
       const current = normalizeServerUrl(process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
       if (!target) {
         console.log(`Máy chủ đang chọn: ${serverLabel(current)} (${current})`);
