@@ -72,7 +72,7 @@ test('gỡ cài đặt: bỏ yêu cầu còn chờ, thư mục làm việc, quy�
   saveMascotSettings({ work_dir: 'D:\\x', x: 1, y: 2 }, settingsFile);
   const base = path.resolve('goc');
   const granted = path.resolve('da-dong-y');
-  saveDeviceCredentials({ device_id: 'd1', device_token: 't', server_url: 'http://x', roots: [base, granted], extra_roots: [granted] });
+  saveDeviceCredentials({ device_id: 'd1', device_token: 't', server_url: 'https://example.test', roots: [base, granted], extra_roots: [granted] });
 
   clearWorkFolderState({ attachDir, settingsFile });
 

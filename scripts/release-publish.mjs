@@ -15,6 +15,9 @@ let version = `v${pkg.version}`;
 const REPO = process.env.AIVIN_CLI_REPO || 'aivin-labs/cli';
 const RELEASE_BRANCH = 'main';
 const SHIPPED = ['bin', 'docs', 'README.md', 'package.json', 'LICENSE'];
+// Tests are part of the source snapshot behind each release tag, even though npm does not ship them.
+// A test-only fix must get a new tag so CI does not keep reusing the failing run for an older tag.
+const RELEASE_INPUTS = [...SHIPPED, 'test'];
 const dist = path.join(root, 'dist');
 const site = path.join(root, 'deploy', 'get', 'site');
 // Khong qua shell: cmd.exe nuot ky tu ^ trong `tag^{commit}` (tag co that van bi bao "chua co tag").
@@ -38,7 +41,7 @@ function assertCanRelease() {
  * - co tag nhung chua len origin -> day tag.
  */
 function ensureTaggedRelease() {
-  if (git('status', '--porcelain', '--', ...SHIPPED)) throw new Error('Tep vao goi npm (bin/, docs/, ...) con thay doi chua commit - commit/stash truoc khi phat hanh.');
+  if (git('status', '--porcelain', '--', ...RELEASE_INPUTS)) throw new Error('Tep dau vao phat hanh hoac test (bin/, docs/, test/, ...) con thay doi chua commit - commit/stash truoc khi phat hanh.');
   const pushTag = () => git('push', 'origin', RELEASE_BRANCH, version);
   if (!hasTag(version)) {
     assertCanRelease();
@@ -47,7 +50,7 @@ function ensureTaggedRelease() {
     pushTag();
     return;
   }
-  if (git('diff', '--name-only', version, 'HEAD', '--', ...SHIPPED)) {
+  if (git('diff', '--name-only', version, 'HEAD', '--', ...RELEASE_INPUTS)) {
     assertCanRelease();
     execSync('npm version patch --no-git-tag-version', { stdio: 'ignore' });
     pkg = readPkg();

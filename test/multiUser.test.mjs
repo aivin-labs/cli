@@ -26,8 +26,8 @@ test('bật chế độ nhiều người dùng bằng cờ hoặc env', () => {
 });
 
 test('token máy tính tổ chức đọc từ env, thiếu biến thì không có', () => {
-  const env = { AIVIN_DEVICE_TOKEN: 'acme-dk-x', AIVIN_DEVICE_ID: 'orgpc-1', AIVIN_SERVER: 'http://host.docker.internal:3001/', AIVIN_DEVICE_NAME: 'Org PC' };
-  assert.deepEqual(credentialsFromEnv(env), { device_token: 'acme-dk-x', device_id: 'orgpc-1', name: 'Org PC', server_url: 'http://host.docker.internal:3001' });
+  const env = { AIVIN_DEVICE_TOKEN: 'acme-dk-x', AIVIN_DEVICE_ID: 'orgpc-1', AIVIN_SERVER: 'https://org.example.test:3001/', AIVIN_DEVICE_NAME: 'Org PC' };
+  assert.deepEqual(credentialsFromEnv(env), { device_token: 'acme-dk-x', device_id: 'orgpc-1', name: 'Org PC', server_url: 'https://org.example.test:3001' });
   assert.equal(credentialsFromEnv({ ...env, AIVIN_DEVICE_TOKEN: '' }), null);
 });
 

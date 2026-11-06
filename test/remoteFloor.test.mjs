@@ -231,7 +231,7 @@ test('token máy: kho bí mật lỗi → tệp thường kèm lý do (không l�
   const prevStore = process.env.AIVIN_TOKEN_STORE;
   process.env.AIVIN_TOKEN_STORE = process.platform === 'darwin' ? 'libsecret' : 'keychain';
   try {
-    const reason = saveDeviceCredentials({ device_id: 'dev-seal', device_token: 'wes-dk-plain-fallback', server_url: 'http://x' });
+    const reason = saveDeviceCredentials({ device_id: 'dev-seal', device_token: 'wes-dk-plain-fallback', server_url: 'https://example.test' });
     assert.ok(reason, 'có lý do hỏng');
     const creds = loadDeviceCredentials();
     assert.equal(creds.device_token, 'wes-dk-plain-fallback');
