@@ -4,7 +4,7 @@
  * giao diện, hoặc gửi quá dồn. Thao tác qua kênh WebRTC cũng đi qua đây.
  */
 
-export const CAST_INPUT_ACTIONS = Object.freeze(['move', 'click', 'dblclick', 'rightclick', 'mousedown', 'mouseup', 'scroll', 'type', 'key', 'hotkey']);
+export const CAST_INPUT_ACTIONS = Object.freeze(['move', 'click', 'dblclick', 'rightclick', 'mousedown', 'mouseup', 'scroll', 'type', 'paste', 'clipboard', 'key', 'hotkey']);
 
 export const CastInputRejection = Object.freeze({
   INVALID: 'invalid',
@@ -19,6 +19,7 @@ const MAX_SCROLL = 10_000;
 /** Toạ độ theo tỷ lệ (rx, ry): 0 = mép trái / trên, 65535 = mép phải / dưới. */
 const RATIO_SCALE = 65_535;
 const MAX_KEY_CHARS = 24;
+const MAX_PASTE_CHARS = 65_536;
 
 function finiteIn(value, limit) {
   const n = Number(value);
@@ -49,13 +50,14 @@ export function sanitizeCastInput(raw, maxTypeChars = 2000) {
   const deltaY = finiteIn(raw.deltaY, MAX_SCROLL);
   if (deltaX !== undefined) cmd.deltaX = Math.round(deltaX);
   if (deltaY !== undefined) cmd.deltaY = Math.round(deltaY);
-  if (typeof raw.text === 'string' && raw.text) cmd.text = raw.text.slice(0, maxTypeChars);
+  const charLimit = action === 'paste' || action === 'clipboard' ? MAX_PASTE_CHARS : maxTypeChars;
+  if (typeof raw.text === 'string' && raw.text) cmd.text = raw.text.slice(0, charLimit);
   if (typeof raw.key === 'string' && raw.key && raw.key.length <= MAX_KEY_CHARS) cmd.key = raw.key;
   const keys = shortStrings(raw.keys, 6);
   if (keys) cmd.keys = keys;
   const modifiers = shortStrings(raw.modifiers, 4);
   if (modifiers) cmd.modifiers = modifiers;
-  if (action === 'type' && !cmd.text) return null;
+  if ((action === 'type' || action === 'paste' || action === 'clipboard') && !cmd.text) return null;
   if (action === 'key' && !cmd.key) return null;
   if (action === 'hotkey' && !cmd.keys) return null;
   return cmd;

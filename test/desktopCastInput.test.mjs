@@ -8,6 +8,9 @@ test('sanitizeCastInput: trường lạ (op) không lọt, action lạ bị bỏ
   assert.equal(sanitizeCastInput({ action: 'exec' }), null);
   assert.equal(sanitizeCastInput({ action: 'type', text: '' }), null);
   assert.equal(sanitizeCastInput({ action: 'type', text: 'abcdef' }, 3).text, 'abc');
+  assert.equal(sanitizeCastInput({ action: 'paste', text: 'abcdef' }, 3).text, 'abcdef', 'paste dùng trần riêng (64 KB), không bị cắt bởi maxTypeChars');
+  assert.equal(sanitizeCastInput({ action: 'clipboard', text: 'xyz' }).text, 'xyz');
+  assert.equal(sanitizeCastInput({ action: 'paste', text: '' }), null);
 });
 
 test('cổng thao tác: tạm dừng / AI đang bấm / gửi dồn đều bị chặn', () => {
@@ -209,4 +212,119 @@ test('sanitizeCastInput: giữ toạ độ theo tỷ lệ trong khoảng, bỏ g
   assert.deepEqual(sanitizeCastInput({ action: 'move', x: 1, y: 2, rx: 32768, ry: 65535 }), { action: 'move', x: 1, y: 2, rx: 32768, ry: 65535 });
   assert.deepEqual(sanitizeCastInput({ action: 'move', x: 1, y: 2, rx: -1, ry: 5 }), { action: 'move', x: 1, y: 2 });
   assert.deepEqual(sanitizeCastInput({ action: 'move', x: 1, y: 2, rx: 70000, ry: 5 }), { action: 'move', x: 1, y: 2 });
+});
+
+test('createRawFrameReader: phân tách khung âm thanh PCM 16-bit (width < 0) xen kẽ khung video I420', async () => {
+  const { createRawFrameReader } = await import('../bin/lib/remote/desktop/desktopCast.mjs');
+  const videos = [];
+  const audios = [];
+  let corrupt = 0;
+  const read = createRawFrameReader((f) => videos.push(f), () => corrupt++, (a) => audios.push(a));
+  const videoHead = Buffer.alloc(12);
+  videoHead.writeInt32LE(2, 0); videoHead.writeInt32LE(2, 4); videoHead.writeInt32LE(6, 8);
+  const videoBuf = Buffer.concat([videoHead, Buffer.alloc(6, 9)]);
+
+  const pcmSamples = new Int16Array(960);
+  pcmSamples[0] = 1234;
+  pcmSamples[959] = -4321;
+  const pcmBytes = Buffer.from(pcmSamples.buffer);
+  const audioHead = Buffer.alloc(12);
+  audioHead.writeInt32LE(-2, 0); audioHead.writeInt32LE(48000, 4); audioHead.writeInt32LE(pcmBytes.length, 8);
+  const audioBuf = Buffer.concat([audioHead, pcmBytes]);
+
+  const combined = Buffer.concat([videoBuf, audioBuf]);
+  read(combined.subarray(0, 15));
+  read(combined.subarray(15, 300));
+  read(combined.subarray(300));
+
+  assert.equal(corrupt, 0);
+  assert.equal(videos.length, 1);
+  assert.equal(audios.length, 1);
+  assert.equal(audios[0].sampleRate, 48000);
+  assert.equal(audios[0].channelCount, 2);
+  assert.equal(audios[0].bitsPerSample, 16);
+  assert.equal(audios[0].numberOfFrames, 480);
+  assert.equal(audios[0].samples[0], 1234);
+  assert.equal(audios[0].samples[959], -4321);
+});
+
+test('WebRTC âm thanh: gắn RTCAudioSource track, đẩy khúc 10 ms và tắt/bật tiếng qua kênh điều khiển', async () => {
+  const { pcs, runtime } = fakeRtcRuntime();
+  const audioChunks = [];
+  const addedTracks = [];
+  const VideoSource = class { createTrack() { return { kind: 'video', stop() {} }; } onFrame() {} };
+  const AudioSource = class {
+    createTrack() { return { kind: 'audio', enabled: true, stop() { this.stopped = true; } }; }
+    onData(d) { audioChunks.push(d); }
+  };
+  const MediaStream = class { constructor(tracks) { this.tracks = tracks; } };
+  let modeChanges = 0;
+  runtime.RTCPeerConnection.prototype.addTrack = function (track, stream) { addedTracks.push({ track, stream }); };
+  const origin = runtime.RTCPeerConnection.prototype.createDataChannel;
+  runtime.RTCPeerConnection.prototype.createDataChannel = function (label, opts) {
+    const channel = origin.call(this, label, opts);
+    if (label === INPUT_CHANNEL) this.input = channel;
+    return channel;
+  };
+  const device = createDesktopWebRtc({
+    loadRuntime: async () => ({ ...runtime, MediaStream, nonstandard: { RTCVideoSource: VideoSource, RTCAudioSource: AudioSource } }),
+    onCursorMode: () => { modeChanges++; },
+  });
+  await device.start({ sessionId: 's', viewerId: 'v' });
+  assert.equal(addedTracks.length, 2);
+  assert.equal(addedTracks[0].stream, addedTracks[1].stream, 'video và audio chung một MediaStream');
+  assert.equal(device.hasAudio(), true);
+  assert.equal(device.needsAudio(), false, 'chưa mở kết nối thì chưa cần thu âm');
+  pcs[0].open();
+  assert.equal(device.needsAudio(), true);
+  const samples20ms = new Int16Array(480 * 2 * 2);
+  assert.equal(device.pushAudio({ samples: samples20ms, sampleRate: 48000, channelCount: 2, bitsPerSample: 16 }), true);
+  assert.equal(audioChunks.length, 2, 'khúc 20 ms tự cắt thành 2 khúc 10 ms (480 khung) đúng chuẩn RTCAudioSource');
+  assert.equal(audioChunks[0].numberOfFrames, 480);
+
+  pcs[0].input.onmessage({ data: JSON.stringify({ control: 'audio', enabled: false }) });
+  assert.equal(device.needsAudio(), false);
+  assert.equal(addedTracks[1].track.enabled, false);
+  assert.equal(modeChanges, 1);
+  assert.equal(device.pushAudio({ samples: samples20ms, sampleRate: 48000, channelCount: 2, bitsPerSample: 16 }), false);
+
+  device.setAudio(true);
+  assert.equal(device.needsAudio(), true);
+  assert.equal(addedTracks[1].track.enabled, true);
+  device.closeAll();
+  assert.equal(addedTracks[1].track.stopped, true);
+});
+
+test('WebRTC Clipboard + Secure Desktop: đẩy hai chiều qua kênh điều khiển, kèm mã phiên của peer', async () => {
+  const { pcs, runtime } = fakeRtcRuntime();
+  const sentInput = [];
+  const receivedCmds = [];
+  const origin = runtime.RTCPeerConnection.prototype.createDataChannel;
+  runtime.RTCPeerConnection.prototype.createDataChannel = function (label, opts) {
+    const channel = origin.call(this, label, opts);
+    if (label === INPUT_CHANNEL) { this.input = channel; channel.send = (m) => sentInput.push(JSON.parse(m)); }
+    return channel;
+  };
+  const device = createDesktopWebRtc({
+    loadRuntime: async () => runtime,
+    onInput: (cmd, viewerId) => receivedCmds.push({ cmd, viewerId }),
+  });
+  await device.start({ sessionId: 'cast-9', viewerId: 'v1' });
+  pcs[0].open();
+  pcs[0].input.readyState = 'open';
+
+  device.pushClipboard({ text: 'copied from remote' });
+  device.pushSecureDesktop({ active: true });
+  assert.deepEqual(sentInput, [
+    { t: 'clipboard', text: 'copied from remote' },
+    { t: 'secure_desktop', active: true },
+  ]);
+
+  pcs[0].input.onmessage({ data: JSON.stringify({ control: 'clipboard', text: 'pasted from viewer', paste: true }) });
+  pcs[0].input.onmessage({ data: JSON.stringify({ control: 'clipboard', text: 'sync only', paste: false }) });
+  assert.deepEqual(receivedCmds, [
+    { cmd: { action: 'paste', text: 'pasted from viewer', session_id: 'cast-9' }, viewerId: 'v1' },
+    { cmd: { action: 'clipboard', text: 'sync only', session_id: 'cast-9' }, viewerId: 'v1' },
+  ]);
+  device.closeAll();
 });

@@ -131,6 +131,8 @@ const VOICE_EVENTS = new Set([HostEvent.VOICE_START, HostEvent.VOICE_AUDIO, Host
 const THINK_MS = 8000;
 const RESULT_MS = 6000;
 const MAIN_THROTTLE_MS = 600;
+/** Chờ chừng này trước khi báo mất kết nối: rớt mạng thoáng qua vài giây rồi tự nối lại ngay thì giữ im lặng, không bật bong bóng. */
+const OFFLINE_GRACE_MS = 8000;
 const RESTART_DELAYS_MS = [5000, 30_000, 120_000];
 const QUEUE_LOGS = 40;
 /** Vắng lâu chừng này mà không có việc gì xảy ra → quay lại vẫn được vẫy chào (không bong bóng). */
@@ -241,7 +243,7 @@ export function createMascot({
   onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onOpenTool = () => {}, onDrop = () => {}, onWorkFolder = () => {}, onDetach = () => {}, onNotifyFreq = () => {},
   spawnImpl = spawn, dir = MASCOT_DIR, settingsFile = MASCOT_SETTINGS_FILE, showFile = MASCOT_SHOW_FILE, hideFile = MASCOT_HIDE_FILE, voiceFile = MASCOT_VOICE_FILE, hotkeysFile = MASCOT_HOTKEYS_FILE,
   attachDir = MASCOT_ATTACH_DIR, now = Date.now, timers = { setTimeout, clearTimeout },
-  thinkMs = THINK_MS, resultMs = RESULT_MS, mainThrottleMs = MAIN_THROTTLE_MS, restartDelaysMs = RESTART_DELAYS_MS, awayWaveMs = AWAY_WAVE_MS,
+  thinkMs = THINK_MS, resultMs = RESULT_MS, mainThrottleMs = MAIN_THROTTLE_MS, offlineGraceMs = OFFLINE_GRACE_MS, restartDelaysMs = RESTART_DELAYS_MS, awayWaveMs = AWAY_WAVE_MS,
 } = {}) {
   if (!enabled || platform !== 'win32') return NOOP;
   let currentLang = preferredLang ? mascotLang(env, platform, preferredLang) : mascotLang(env, platform);
@@ -511,6 +513,7 @@ export function createMascot({
     timers.clearTimeout(thinkTimer);
     timers.clearTimeout(resultTimer);
     timers.clearTimeout(mainTimer);
+    timers.clearTimeout(offlineTimer);
     quitHost();
   }
 
@@ -520,6 +523,8 @@ export function createMascot({
   let guiActive = 0;
   let paused = false;
   let offline = false;
+  let offlineTimer = null;
+  let everConnected = false;
   let phase = MascotState.IDLE;
   let batchOk = 0;
   let batchFailed = null;
@@ -608,6 +613,11 @@ export function createMascot({
     /** Lệnh của ô hỏi (ask.mjs: chat / chat_busy / ask_status) → cửa sổ. */
     chat(cmd) { send(cmd); },
     connected() {
+      const hadBlip = offlineTimer !== null && !offline && everConnected;
+      timers.clearTimeout(offlineTimer);
+      offlineTimer = null;
+      everConnected = true;
+      if (hadBlip) return;
       offline = false;
       syncState();
       log({ status: LogStatus.INFO, title: t(MascotText.CONNECTED) });
@@ -615,11 +625,17 @@ export function createMascot({
       send({ t: HostCommand.MAIN, text: t(MascotText.READY), quiet: true });
     },
     disconnected() {
-      if (offline) return;
-      offline = true;
-      syncState();
-      log({ status: LogStatus.WARN, title: t(MascotText.DISCONNECTED) });
-      main(t(MascotText.DISCONNECTED));
+      if (offline || offlineTimer) return;
+      const showOffline = () => {
+        offlineTimer = null;
+        if (offline || closed) return;
+        offline = true;
+        syncState();
+        log({ status: LogStatus.WARN, title: t(MascotText.DISCONNECTED) });
+        main(t(MascotText.DISCONNECTED));
+      };
+      if (offlineGraceMs <= 0) return showOffline();
+      offlineTimer = timers.setTimeout(showOffline, offlineGraceMs);
     },
     paused(on) {
       if (paused === on) return;

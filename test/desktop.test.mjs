@@ -206,9 +206,26 @@ test('DESKTOP_CAST_CSHARP: chỉ dùng cú pháp C# 5 và hỗ trợ LockBits, m
   assert.ok(DESKTOP_CAST_CSHARP.includes('MOUSEEVENTF_HWHEEL'));
 });
 
-test('DESKTOP_CAST_CSHARP: có DXGI + đường lùi GDI, con trỏ gửi riêng, không còn backtick trong nguồn C#', () => {
+test('DESKTOP_CAST_CSHARP: có DXGI + đường lùi GDI, thu âm WASAPI Loopback, con trỏ gửi riêng, biên dịch được bằng C# 5', { skip: process.platform !== 'win32', timeout: 120_000 }, () => {
   assert.ok(DESKTOP_CAST_CSHARP.includes('class DxgiScreen'));
   assert.ok(DESKTOP_CAST_CSHARP.includes('CaptureGdi'));
   assert.ok(DESKTOP_CAST_CSHARP.includes('class CursorTracker'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('class LoopbackAudio'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('class ClipboardSync'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('IsSecureDesktop'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('Parallel.For'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('WriteAudio'));
   assert.ok(!DESKTOP_CAST_CSHARP.includes('`'), 'không còn dấu backtick làm hỏng chuỗi nguồn');
+  const tmp = path.join(os.tmpdir(), `aivin-cast-compile-${process.pid}.cs`);
+  fs.writeFileSync(tmp, DESKTOP_CAST_CSHARP);
+  try {
+    const out = execFileSync('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      `Add-Type -Path '${tmp}' -ReferencedAssemblies 'UIAutomationClient','UIAutomationTypes','WindowsBase','System.Drawing','System.Windows.Forms','System.Web.Extensions','System.Core'; [AivinDesktopCast.LoopbackAudio]::SetEnabled($true); [AivinDesktopCast.LoopbackAudio]::Enabled`,
+    ], { encoding: 'utf8' }).trim();
+    assert.equal(out, 'True');
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
 });

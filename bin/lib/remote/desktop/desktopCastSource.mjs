@@ -4,14 +4,13 @@
  * - Chụp màn hình bằng Desktop Duplication, lùi Graphics.CopyFromScreen khi không dùng được (desktopCastCaptureSource.mjs).
  * - Con trỏ: gửi vị trí + hình riêng để FE vẽ tức thì; người xem chưa hỗ trợ / đường JPEG thì lồng vào khung hình (GetCursorInfo + DrawIcon).
  * - Hỗ trợ đa màn hình: lấy danh sách màn hình và chuyển đổi màn hình cần chụp theo thời gian thực.
- * - Co ảnh về chiều rộng tối đa (giữ tỉ lệ), nén ảnh sang định dạng JPEG nhẹ.
+ * - Co ảnh về chiều rộng tối đa (giữ tỉ lệ), nén ảnh sang định dạng JPEG nhẹ, tái sử dụng vùng đệm Bitmap/I420 để tránh GC pause.
  * - So sánh nguyên khung (memcmp) để chỉ gửi khi hình đổi hoặc giữ nhịp định kỳ (1 FPS): thay đổi nhỏ như con trỏ, gõ chữ cũng phải đi ngay
  *   (đo 03/11/2026: ảnh thu nhỏ 64x36 + ngưỡng làm chúng chờ tới nhịp 1 s). Đường JPEG thì đổi nhỏ giới hạn 5 khung/giây, đỡ tải máy chủ.
- * - Nhận lệnh chuột, bàn phím và phím tắt hệ thống (hotkeys) qua stdin và thực thi qua Win32 API.
- * - Hỗ trợ thay đổi độ phân giải, chất lượng nén JPEG, giới hạn FPS và chọn màn hình theo thời gian thực.
- * - Luồng video (02/11/2026): có `pipe` → mở named pipe gửi khung thô I420 ([rộng, cao, độ dài] int32 LE + dữ liệu) cho Node đưa vào
- *   RTCVideoSource (WebRTC tự mã hoá VP8, chỉ gửi phần đổi). JPEG chỉ nén khi còn người xem cần (`jpeg` qua config); không thì gửi dòng
- *   `meta` (kích thước, màn hình) để FE quy đổi toạ độ.
+ * - Nhận lệnh chuột, bàn phím, phím tắt hệ thống (hotkeys) và đồng bộ Clipboard hai chiều qua stdin / stdout.
+ * - Phát hiện vùng màn hình bảo mật Windows (hộp thoại UAC / màn hình khóa) và báo trạng thái về giao diện.
+ * - Hỗ trợ thay đổi độ phân giải, chất lượng nén JPEG, giới hạn FPS (tới 60 FPS) và chọn màn hình theo thời gian thực.
+ * - Luồng video + âm thanh: có `pipe` → mở named pipe gửi khung thô I420 + âm thanh PCM 16-bit 48 kHz cho tiến trình WebRTC.
  */
 
 import { DESKTOP_CAST_CAPTURE_CSHARP } from './desktopCastCaptureSource.mjs';
@@ -26,6 +25,7 @@ using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Automation;
 using System.Windows.Forms;
@@ -59,6 +59,23 @@ namespace AivinDesktopCast {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr pid);
 
+    // Phát hiện vùng màn hình bảo mật (UAC / Lock Screen)
+    [DllImport("user32.dll")] public static extern IntPtr OpenInputDesktop(uint dwFlags, bool fInherit, uint dwDesiredAccess);
+    [DllImport("user32.dll")] public static extern bool CloseDesktop(IntPtr hDesktop);
+
+    // Đồng bộ Clipboard
+    [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] public static extern bool OpenClipboard(IntPtr hWndNewOwner);
+    [DllImport("user32.dll")] public static extern bool CloseClipboard();
+    [DllImport("user32.dll")] public static extern bool EmptyClipboard();
+    [DllImport("user32.dll")] public static extern bool IsClipboardFormatAvailable(uint format);
+    [DllImport("user32.dll")] public static extern IntPtr GetClipboardData(uint uFormat);
+    [DllImport("user32.dll")] public static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+    [DllImport("kernel32.dll")] public static extern IntPtr GlobalAlloc(uint uFlags, UIntPtr dwBytes);
+    [DllImport("kernel32.dll")] public static extern IntPtr GlobalLock(IntPtr hMem);
+    [DllImport("kernel32.dll")] public static extern bool GlobalUnlock(IntPtr hMem);
+    [DllImport("kernel32.dll")] public static extern IntPtr GlobalFree(IntPtr hMem);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int x; public int y; }
 
@@ -82,6 +99,7 @@ namespace AivinDesktopCast {
     [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
     [DllImport("gdi32.dll")] public static extern int GetObject(IntPtr obj, int size, out BITMAP bm);
     [DllImport("gdi32.dll")] public static extern int GetDIBits(IntPtr hdc, IntPtr hbm, uint start, uint lines, [Out] int[] bits, ref BITMAPINFOHEADER info, uint usage);
+    [DllImport("ole32.dll")] public static extern void CoTaskMemFree(IntPtr p);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct ICONINFO { public bool fIcon; public int xHotspot; public int yHotspot; public IntPtr hbmMask; public IntPtr hbmColor; }
@@ -137,17 +155,20 @@ namespace AivinDesktopCast {
     }
   }
 
-  /** Named pipe một chiều gửi khung thô cho tiến trình Node (một khách). Khách rớt → chờ khách mới. */
+  /** Named pipe một chiều gửi khung thô I420 + âm thanh PCM cho tiến trình Node (một khách). Khách rớt → chờ khách mới. */
   static class RawPipe {
     static readonly object gate = new object();
     static NamedPipeServerStream pipe;
     public static volatile bool Connected;
+    static int videoBusy = 0;
+    static readonly byte[] videoHeader = new byte[12];
+    static byte[] audioPacket = new byte[12 + 1920];
 
     public static void Start(string name) {
       var t = new Thread(() => {
         while (CastHost.Running) {
           try {
-            var p = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.None, 0, 4 * 1024 * 1024);
+            var p = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.None, 0, 8 * 1024 * 1024);
             p.WaitForConnection();
             lock (gate) { pipe = p; Connected = true; }
             while (CastHost.Running && p.IsConnected) Thread.Sleep(200);
@@ -162,20 +183,48 @@ namespace AivinDesktopCast {
       t.Start();
     }
 
+    /** Ghi khung hình video I420: nếu đường ống đang bận ghi khung trước thì bỏ qua khung mới để không chặn âm thanh. */
     public static void Write(int width, int height, byte[] data) {
+      if (data == null || !Connected) return;
+      if (Interlocked.CompareExchange(ref videoBusy, 1, 0) != 0) return;
+      try {
+        bool locked = false;
+        try {
+          Monitor.TryEnter(gate, 5, ref locked);
+          if (!locked || pipe == null || !Connected) return;
+          BitConverter.GetBytes(width).CopyTo(videoHeader, 0);
+          BitConverter.GetBytes(height).CopyTo(videoHeader, 4);
+          BitConverter.GetBytes(data.Length).CopyTo(videoHeader, 8);
+          pipe.Write(videoHeader, 0, 12);
+          pipe.Write(data, 0, data.Length);
+        } catch {
+          Connected = false;
+          try { if (pipe != null) pipe.Dispose(); } catch { }
+          pipe = null;
+        } finally {
+          if (locked) Monitor.Exit(gate);
+        }
+      } finally {
+        Interlocked.Exchange(ref videoBusy, 0);
+      }
+    }
+
+    /** Ghi khúc âm thanh 10 ms: gộp header + mẫu vào 1 lần Write nguyên tử để giảm độ trễ và tránh tách gói. */
+    public static void WriteAudio(int sampleRate, int channels, byte[] pcm) {
+      if (pcm == null || pcm.Length == 0 || channels <= 0 || sampleRate <= 0 || !Connected) return;
       lock (gate) {
         if (pipe == null || !Connected) return;
         try {
-          var header = new byte[12];
-          BitConverter.GetBytes(width).CopyTo(header, 0);
-          BitConverter.GetBytes(height).CopyTo(header, 4);
-          BitConverter.GetBytes(data.Length).CopyTo(header, 8);
-          pipe.Write(header, 0, 12);
-          pipe.Write(data, 0, data.Length);
-          pipe.Flush();
+          int total = 12 + pcm.Length;
+          if (audioPacket.Length < total) audioPacket = new byte[total];
+          BitConverter.GetBytes(-channels).CopyTo(audioPacket, 0);
+          BitConverter.GetBytes(sampleRate).CopyTo(audioPacket, 4);
+          BitConverter.GetBytes(pcm.Length).CopyTo(audioPacket, 8);
+          Buffer.BlockCopy(pcm, 0, audioPacket, 12, pcm.Length);
+          pipe.Write(audioPacket, 0, total);
         } catch {
           Connected = false;
-          try { pipe.Dispose(); } catch { }
+          try { if (pipe != null) pipe.Dispose(); } catch { }
           pipe = null;
         }
       }
@@ -183,43 +232,80 @@ namespace AivinDesktopCast {
   }
 
   public static class CastScreen {
-    /** BGRX 32 bit → I420 (Y đủ, U/V lấy trung bình khối 2x2); kích thước cắt về số chẵn. */
+    static byte[] i420Raw;
+    static byte[] i420Out;
+    static Bitmap cursorBuffer;
+    static Bitmap scaleBuffer;
+    static Bitmap thumbBmp;
+    static byte[] thumbRaw;
+
+    /** Kiểm tra tiến trình có truy cập được vùng màn hình nhận thao tác không (false = đang ở hộp thoại UAC hoặc màn hình khóa). */
+    public static bool IsSecureDesktop() {
+      IntPtr hDesk = IntPtr.Zero;
+      try {
+        hDesk = Native.OpenInputDesktop(0, false, 0x0100u);
+        return hDesk == IntPtr.Zero;
+      } catch {
+        return false;
+      } finally {
+        if (hDesk != IntPtr.Zero) Native.CloseDesktop(hDesk);
+      }
+    }
+
+    /** BGRX 32 bit → I420: tái sử dụng mảng đệm tĩnh (tránh GC LOH) và chia luồng song song theo cặp hàng chẵn/lẻ. */
     public static byte[] ToI420(Bitmap bmp, out int w, out int h) {
       w = bmp.Width & ~1;
       h = bmp.Height & ~1;
-      var data = bmp.LockBits(new Rectangle(0, 0, w, h), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+      int width = w;
+      int height = h;
+      var data = bmp.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
       try {
         int stride = Math.Abs(data.Stride);
-        var raw = new byte[stride * h];
-        Marshal.Copy(data.Scan0, raw, 0, raw.Length);
-        int ySize = w * h;
-        int cw = w / 2;
-        var outBuf = new byte[ySize + ySize / 2];
+        int rawLen = stride * height;
+        if (i420Raw == null || i420Raw.Length < rawLen) i420Raw = new byte[rawLen];
+        byte[] raw = i420Raw;
+        Marshal.Copy(data.Scan0, raw, 0, rawLen);
+        int ySize = width * height;
+        int totalLen = ySize + ySize / 2;
+        if (i420Out == null || i420Out.Length != totalLen) i420Out = new byte[totalLen];
+        byte[] outBuf = i420Out;
+        int cw = width / 2;
         int uBase = ySize;
         int vBase = ySize + ySize / 4;
-        for (int y = 0; y < h; y++) {
-          int row = y * stride;
-          int yRow = y * w;
-          for (int x = 0; x < w; x++) {
-            int i = row + x * 4;
-            int b = raw[i], g = raw[i + 1], r = raw[i + 2];
-            outBuf[yRow + x] = (byte)(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
-          }
-        }
-        for (int y = 0; y < h; y += 2) {
-          int row0 = y * stride;
+        int pairs = height / 2;
+
+        Parallel.For(0, pairs, pair => {
+          int y0 = pair * 2;
+          int y1 = y0 + 1;
+          int row0 = y0 * stride;
           int row1 = row0 + stride;
-          int cRow = (y / 2) * cw;
-          for (int x = 0; x < w; x += 2) {
-            int i0 = row0 + x * 4, i1 = i0 + 4, i2 = row1 + x * 4, i3 = i2 + 4;
-            int b = (raw[i0] + raw[i1] + raw[i2] + raw[i3]) >> 2;
-            int g = (raw[i0 + 1] + raw[i1 + 1] + raw[i2 + 1] + raw[i3 + 1]) >> 2;
-            int r = (raw[i0 + 2] + raw[i1 + 2] + raw[i2 + 2] + raw[i3 + 2]) >> 2;
-            int ci = cRow + x / 2;
-            outBuf[uBase + ci] = (byte)(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
-            outBuf[vBase + ci] = (byte)(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+          int yRow0 = y0 * width;
+          int yRow1 = y1 * width;
+          int cRow = pair * cw;
+          for (int x = 0; x < width; x += 2) {
+            int i0 = row0 + x * 4;
+            int i1 = i0 + 4;
+            int i2 = row1 + x * 4;
+            int i3 = i2 + 4;
+
+            int b0 = raw[i0], g0 = raw[i0 + 1], r0 = raw[i0 + 2];
+            int b1 = raw[i1], g1 = raw[i1 + 1], r1 = raw[i1 + 2];
+            int b2 = raw[i2], g2 = raw[i2 + 1], r2 = raw[i2 + 2];
+            int b3 = raw[i3], g3 = raw[i3 + 1], r3 = raw[i3 + 2];
+
+            outBuf[yRow0 + x] = (byte)(((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8) + 16);
+            outBuf[yRow0 + x + 1] = (byte)(((66 * r1 + 129 * g1 + 25 * b1 + 128) >> 8) + 16);
+            outBuf[yRow1 + x] = (byte)(((66 * r2 + 129 * g2 + 25 * b2 + 128) >> 8) + 16);
+            outBuf[yRow1 + x + 1] = (byte)(((66 * r3 + 129 * g3 + 25 * b3 + 128) >> 8) + 16);
+
+            int bAvg = (b0 + b1 + b2 + b3) >> 2;
+            int gAvg = (g0 + g1 + g2 + g3) >> 2;
+            int rAvg = (r0 + r1 + r2 + r3) >> 2;
+            int ci = cRow + (x >> 1);
+            outBuf[uBase + ci] = (byte)(((-38 * rAvg - 74 * gAvg + 112 * bAvg + 128) >> 8) + 128);
+            outBuf[vBase + ci] = (byte)(((112 * rAvg - 94 * gAvg - 18 * bAvg + 128) >> 8) + 128);
           }
-        }
+        });
         return outBuf;
       } finally {
         bmp.UnlockBits(data);
@@ -261,10 +347,13 @@ namespace AivinDesktopCast {
       }
     }
 
-    /** Bản sao của khung có lồng con trỏ thật của Windows (đường JPEG / người xem chưa tự vẽ con trỏ). */
+    /** Bản sao của khung có lồng con trỏ thật của Windows (tái sử dụng cursorBuffer để tránh cấp phát mới mỗi khung). */
     public static Bitmap WithCursor(Bitmap src, Rectangle r) {
-      var copy = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppRgb);
-      using (var g = Graphics.FromImage(copy)) {
+      if (cursorBuffer == null || cursorBuffer.Width != src.Width || cursorBuffer.Height != src.Height) {
+        if (cursorBuffer != null) cursorBuffer.Dispose();
+        cursorBuffer = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppRgb);
+      }
+      using (var g = Graphics.FromImage(cursorBuffer)) {
         g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
         g.DrawImageUnscaled(src, 0, 0);
         try {
@@ -285,19 +374,22 @@ namespace AivinDesktopCast {
           }
         } catch {}
       }
-      return copy;
+      return cursorBuffer;
     }
 
     public static Bitmap Scale(Bitmap src, int maxWidth) {
       if (src.Width <= maxWidth) return src;
       int h = (int)Math.Round(src.Height * (double)maxWidth / src.Width);
-      var dst = new Bitmap(maxWidth, h, PixelFormat.Format32bppRgb);
-      using (var g = Graphics.FromImage(dst)) {
+      if (scaleBuffer == null || scaleBuffer.Width != maxWidth || scaleBuffer.Height != h) {
+        if (scaleBuffer != null) scaleBuffer.Dispose();
+        scaleBuffer = new Bitmap(maxWidth, h, PixelFormat.Format32bppRgb);
+      }
+      using (var g = Graphics.FromImage(scaleBuffer)) {
         g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
         g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
         g.DrawImage(src, 0, 0, maxWidth, h);
       }
-      return dst;
+      return scaleBuffer;
     }
 
     public static byte[] Jpeg(Bitmap bmp, int quality) {
@@ -319,29 +411,29 @@ namespace AivinDesktopCast {
 
     public static byte[] Thumb(Bitmap src) {
       var t = new byte[64 * 36];
-      using (var small = new Bitmap(64, 36, PixelFormat.Format24bppRgb)) {
-        using (var g = Graphics.FromImage(small)) {
-          g.DrawImage(src, 0, 0, 64, 36);
-        }
-        var data = small.LockBits(new Rectangle(0, 0, 64, 36), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-        try {
-          int stride = Math.Abs(data.Stride);
-          var raw = new byte[stride * 36];
-          Marshal.Copy(data.Scan0, raw, 0, raw.Length);
-          for (int y = 0; y < 36; y++) {
-            int rowOffset = y * stride;
-            int outOffset = y * 64;
-            for (int x = 0; x < 64; x++) {
-              int idx = rowOffset + x * 3;
-              int b = raw[idx];
-              int gVal = raw[idx + 1];
-              int r = raw[idx + 2];
-              t[outOffset + x] = (byte)((r * 3 + gVal * 6 + b) / 10);
-            }
+      if (thumbBmp == null) thumbBmp = new Bitmap(64, 36, PixelFormat.Format24bppRgb);
+      using (var g = Graphics.FromImage(thumbBmp)) {
+        g.DrawImage(src, 0, 0, 64, 36);
+      }
+      var data = thumbBmp.LockBits(new Rectangle(0, 0, 64, 36), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+      try {
+        int stride = Math.Abs(data.Stride);
+        int len = stride * 36;
+        if (thumbRaw == null || thumbRaw.Length < len) thumbRaw = new byte[len];
+        Marshal.Copy(data.Scan0, thumbRaw, 0, len);
+        for (int y = 0; y < 36; y++) {
+          int rowOffset = y * stride;
+          int outOffset = y * 64;
+          for (int x = 0; x < 64; x++) {
+            int idx = rowOffset + x * 3;
+            int b = thumbRaw[idx];
+            int gVal = thumbRaw[idx + 1];
+            int r = thumbRaw[idx + 2];
+            t[outOffset + x] = (byte)((r * 3 + gVal * 6 + b) / 10);
           }
-        } finally {
-          small.UnlockBits(data);
         }
+      } finally {
+        thumbBmp.UnlockBits(data);
       }
       return t;
     }
@@ -388,6 +480,7 @@ namespace AivinDesktopCast {
     static volatile int targetMaxFps = 15;
     static volatile int targetMaxWidth = 1366;
     static volatile int targetQuality = 65;
+    static bool lastSecureDesktop = false;
 
     public static void Run(string argsJson) {
       Native.SetProcessDPIAware();
@@ -396,11 +489,14 @@ namespace AivinDesktopCast {
       currentMonitor = a.ContainsKey("monitor") ? Convert.ToInt32(a["monitor"]) : -1;
       targetMaxFps = a.ContainsKey("max_fps") ? Convert.ToInt32(a["max_fps"]) : 15;
       if (targetMaxFps < 1) targetMaxFps = 1;
-      if (targetMaxFps > 30) targetMaxFps = 30;
+      if (targetMaxFps > 60) targetMaxFps = 60;
       targetMaxWidth = a.ContainsKey("max_width") ? Convert.ToInt32(a["max_width"]) : 1366;
       targetQuality = a.ContainsKey("quality") ? Convert.ToInt32(a["quality"]) : 65;
       string pipeName = a.ContainsKey("pipe") ? Convert.ToString(a["pipe"]) : "";
       if (!string.IsNullOrEmpty(pipeName)) { rawEnabled = true; RawPipe.Start(pipeName); }
+      if (a.ContainsKey("audio") && a["audio"] is bool) LoopbackAudio.SetEnabled((bool)a["audio"]);
+      if (rawEnabled) LoopbackAudio.Start();
+      ClipboardSync.Init();
 
       currentBounds = CastScreen.GetBounds(currentMonitor);
 
@@ -426,11 +522,23 @@ namespace AivinDesktopCast {
       bool changePending = false;
       int lastCursorSeq = -1;
       long lastSendMs = 0;
+      long lastAuxCheckMs = 0;
 
       while (running) {
         long frameStartMs = clock.ElapsedMilliseconds;
         long targetFrameInterval = 1000 / Math.Max(1, targetMaxFps);
         try {
+          if (frameStartMs - lastAuxCheckMs >= 250) {
+            lastAuxCheckMs = frameStartMs;
+            ClipboardSync.Poll();
+            bool sec = CastScreen.IsSecureDesktop();
+            if (sec != lastSecureDesktop) {
+              lastSecureDesktop = sec;
+              var secMsg = Out.Msg("secure_desktop");
+              secMsg["active"] = sec;
+              Out.Send(secMsg);
+            }
+          }
           currentBounds = CastScreen.GetBounds(currentMonitor);
           if (source.Capture(currentBounds, (int)targetFrameInterval, frameStartMs)) {
             changePending = true;
@@ -476,42 +584,34 @@ namespace AivinDesktopCast {
     }
 
     static void SendFrame(Bitmap frame, bool cursorInFrame, bool jpegMode, long nowMs, HostStats hostStats) {
-      Bitmap withCursor = null;
-      Bitmap scaled = null;
-      try {
-        Bitmap encodeBmp = frame;
-        if (cursorInFrame) {
-          withCursor = CastScreen.WithCursor(frame, currentBounds);
-          encodeBmp = withCursor;
-        }
-        if (encodeBmp.Width > targetMaxWidth) {
-          scaled = CastScreen.Scale(encodeBmp, targetMaxWidth);
-          encodeBmp = scaled;
-        }
-        currentImageWidth = encodeBmp.Width;
-        currentImageHeight = encodeBmp.Height;
-        if (rawEnabled && RawPipe.Connected) {
-          int rw, rh;
-          byte[] i420 = CastScreen.ToI420(encodeBmp, out rw, out rh);
-          RawPipe.Write(rw, rh, i420);
-        }
-        var frameMsg = Out.Msg(jpegMode ? "frame" : "meta");
-        if (jpegMode) frameMsg["image"] = Convert.ToBase64String(CastScreen.Jpeg(encodeBmp, targetQuality));
-        frameMsg["width"] = currentImageWidth;
-        frameMsg["height"] = currentImageHeight;
-        frameMsg["screenWidth"] = currentBounds.Width;
-        frameMsg["screenHeight"] = currentBounds.Height;
-        frameMsg["screenX"] = currentBounds.X;
-        frameMsg["screenY"] = currentBounds.Y;
-        frameMsg["monitor"] = currentMonitor;
-        frameMsg["screens"] = CastScreen.GetScreens();
-        frameMsg["ts"] = nowMs;
-        frameMsg["stats"] = hostStats.Snapshot(nowMs);
-        Out.Send(frameMsg);
-      } finally {
-        if (scaled != null) scaled.Dispose();
-        if (withCursor != null) withCursor.Dispose();
+      Bitmap encodeBmp = frame;
+      if (cursorInFrame) {
+        encodeBmp = CastScreen.WithCursor(frame, currentBounds);
       }
+      if (encodeBmp.Width > targetMaxWidth) {
+        encodeBmp = CastScreen.Scale(encodeBmp, targetMaxWidth);
+      }
+      currentImageWidth = encodeBmp.Width;
+      currentImageHeight = encodeBmp.Height;
+      if (rawEnabled && RawPipe.Connected) {
+        int rw, rh;
+        byte[] i420 = CastScreen.ToI420(encodeBmp, out rw, out rh);
+        RawPipe.Write(rw, rh, i420);
+      }
+      var frameMsg = Out.Msg(jpegMode ? "frame" : "meta");
+      if (jpegMode) frameMsg["image"] = Convert.ToBase64String(CastScreen.Jpeg(encodeBmp, targetQuality));
+      frameMsg["width"] = currentImageWidth;
+      frameMsg["height"] = currentImageHeight;
+      frameMsg["screenWidth"] = currentBounds.Width;
+      frameMsg["screenHeight"] = currentBounds.Height;
+      frameMsg["screenX"] = currentBounds.X;
+      frameMsg["screenY"] = currentBounds.Y;
+      frameMsg["monitor"] = currentMonitor;
+      frameMsg["screens"] = CastScreen.GetScreens();
+      frameMsg["ts"] = nowMs;
+      frameMsg["stats"] = hostStats.Snapshot(nowMs);
+      if (lastSecureDesktop) frameMsg["secureDesktop"] = true;
+      Out.Send(frameMsg);
     }
 
     static void ReadInputLoop() {
@@ -549,7 +649,7 @@ namespace AivinDesktopCast {
       try {
         if (cmd.ContainsKey("max_fps")) {
           int fps = Convert.ToInt32(cmd["max_fps"]);
-          if (fps >= 1 && fps <= 30) targetMaxFps = fps;
+          if (fps >= 1 && fps <= 60) targetMaxFps = fps;
         }
         if (cmd.ContainsKey("quality")) {
           int q = Convert.ToInt32(cmd["quality"]);
@@ -570,6 +670,9 @@ namespace AivinDesktopCast {
         if (cmd.ContainsKey("cursor") && cmd["cursor"] is bool) {
           CursorTracker.SetDrawInFrame((bool)cmd["cursor"]);
           refreshRequested = true;
+        }
+        if (cmd.ContainsKey("audio") && cmd["audio"] is bool) {
+          LoopbackAudio.SetEnabled((bool)cmd["audio"]);
         }
         if (cmd.ContainsKey("monitor")) {
           int m = Convert.ToInt32(cmd["monitor"]);
@@ -835,6 +938,23 @@ namespace AivinDesktopCast {
         } else if (action == "type") {
           string text = cmd.ContainsKey("text") ? Convert.ToString(cmd["text"]) : "";
           if (!string.IsNullOrEmpty(text)) TypeUnicode(text);
+        } else if (action == "clipboard") {
+          string text = cmd.ContainsKey("text") ? Convert.ToString(cmd["text"]) : "";
+          if (!string.IsNullOrEmpty(text)) ClipboardSync.SetText(text);
+        } else if (action == "paste") {
+          string text = cmd.ContainsKey("text") ? Convert.ToString(cmd["text"]) : "";
+          if (!string.IsNullOrEmpty(text)) {
+            if (ClipboardSync.SetText(text)) {
+              Native.keybd_event(0x11, 0, 0, UIntPtr.Zero);
+              Thread.Sleep(8);
+              Native.keybd_event(0x56, 0, 0, UIntPtr.Zero);
+              Thread.Sleep(15);
+              Native.keybd_event(0x56, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+              Native.keybd_event(0x11, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            } else {
+              TypeUnicode(text);
+            }
+          }
         } else if (action == "key") {
           string key = cmd.ContainsKey("key") ? Convert.ToString(cmd["key"]) : "";
           HandleSpecialKey(key);
@@ -887,19 +1007,20 @@ namespace AivinDesktopCast {
 
     /**
      * Sau cú nhấp trái của người xem: chờ ứng dụng nhận tiêu điểm rồi báo ô đang chọn có phải ô nhập chữ (có caret) không —
-     * trình duyệt trên điện thoại dựa vào đó tự mở bàn phím ảo. Chạy luồng riêng, không giữ hàng thao tác.
+     * trình duyệt trên điện thoại dựa vào đó tự mở bàn phím ảo. Kiểm sớm ở 40 ms để mở bàn phím nhanh, nếu chưa thấy mới chờ thêm.
      */
     static void ProbeInputFocus() {
       int seq = Interlocked.Increment(ref focusProbeSeq);
       ThreadPool.QueueUserWorkItem(_ => {
         try {
-          Thread.Sleep(150);
+          Thread.Sleep(40);
           if (seq != focusProbeSeq) return;
-          var info = new Native.GUITHREADINFO();
-          info.cbSize = Marshal.SizeOf(typeof(Native.GUITHREADINFO));
-          IntPtr fg = Native.GetForegroundWindow();
-          uint tid = fg == IntPtr.Zero ? 0 : Native.GetWindowThreadProcessId(fg, IntPtr.Zero);
-          bool editable = (tid != 0 && Native.GetGUIThreadInfo(tid, ref info) && info.hwndCaret != IntPtr.Zero) || FocusedIsTextInput();
+          bool editable = HasSystemCaret();
+          if (!editable) {
+            Thread.Sleep(90);
+            if (seq != focusProbeSeq) return;
+            editable = HasSystemCaret() || FocusedIsTextInput();
+          }
           var msg = new Dictionary<string, object>();
           msg["t"] = "input_focus";
           msg["editable"] = editable;
@@ -907,6 +1028,14 @@ namespace AivinDesktopCast {
         } catch {
         }
       });
+    }
+
+    static bool HasSystemCaret() {
+      var info = new Native.GUITHREADINFO();
+      info.cbSize = Marshal.SizeOf(typeof(Native.GUITHREADINFO));
+      IntPtr fg = Native.GetForegroundWindow();
+      uint tid = fg == IntPtr.Zero ? 0 : Native.GetWindowThreadProcessId(fg, IntPtr.Zero);
+      return tid != 0 && Native.GetGUIThreadInfo(tid, ref info) && info.hwndCaret != IntPtr.Zero;
     }
 
     /** Chromium / Edge / Electron chỉ tạo caret hệ thống khi bật trợ năng → hỏi UI Automation: ô Edit, hoặc ô có giá trị sửa được. */
@@ -947,8 +1076,10 @@ if ($dll -and (Test-Path -LiteralPath $dll)) {
   Add-Type -Path $dll
 } else {
   Add-Type -TypeDefinition ([IO.File]::ReadAllText($src)) -ReferencedAssemblies $refs -OutputAssembly $dll -OutputType Library
+  if ($env:AIVIN_CAST_COMPILE_ONLY -eq '1') { exit 0 }
   Add-Type -Path $dll
 }
+if ($env:AIVIN_CAST_COMPILE_ONLY -eq '1') { exit 0 }
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch {}
 try {
   [AivinDesktopCast.CastHost]::Run($env:AIVIN_CAST_ARGS)

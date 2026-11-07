@@ -598,5 +598,367 @@ namespace AivinDesktopCast {
       }
     }
   }
+
+  [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class MMDeviceEnumeratorCom {}
+
+  [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IMMDeviceEnumerator {
+    [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+    [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice endpoint);
+  }
+
+  [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IMMDevice {
+    [PreserveSig] int Activate(ref Guid iid, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+    [PreserveSig] int OpenPropertyStore(int access, out IntPtr props);
+    [PreserveSig] int GetId(out IntPtr id);
+  }
+
+  [ComImport, Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IAudioClient {
+    [PreserveSig] int Initialize(int shareMode, uint streamFlags, long bufferDuration, long periodicity, IntPtr format, IntPtr sessionGuid);
+    [PreserveSig] int GetBufferSize(out uint frames);
+    [PreserveSig] int GetStreamLatency(out long latency);
+    [PreserveSig] int GetCurrentPadding(out uint padding);
+    [PreserveSig] int IsFormatSupported(int shareMode, IntPtr format, out IntPtr closest);
+    [PreserveSig] int GetMixFormat(out IntPtr format);
+    [PreserveSig] int GetDevicePeriod(out long defaultPeriod, out long minPeriod);
+    [PreserveSig] int Start();
+    [PreserveSig] int Stop();
+    [PreserveSig] int Reset();
+    [PreserveSig] int SetEventHandle(IntPtr handle);
+    [PreserveSig] int GetService(ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object service);
+  }
+
+  [ComImport, Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface IAudioCaptureClient {
+    [PreserveSig] int GetBuffer(out IntPtr data, out uint frames, out uint flags, out ulong devicePosition, out ulong qpcPosition);
+    [PreserveSig] int ReleaseBuffer(uint frames);
+    [PreserveSig] int GetNextPacketSize(out uint frames);
+  }
+
+  /**
+   * Thu âm thanh hệ thống (WASAPI Loopback trên loa mặc định eConsole) ở luồng nền riêng, đổi trực tiếp về PCM 16-bit 48 kHz qua
+   * AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, cắt từng khúc 10 ms (480 khung) đẩy qua RawPipe sang tiến trình WebRTC.
+   * Tự đóng khi chưa có người xem cần tiếng; tự mở lại khi người dùng đổi thiết bị phát mặc định (cắm tai nghe / loa Bluetooth).
+   */
+  public static class LoopbackAudio {
+    const int SAMPLE_RATE = 48000;
+    const int CHUNK_FRAMES = SAMPLE_RATE / 100;
+    const uint FLAGS_LOOPBACK_AUTOCONVERT = 0x88020000u;
+    const uint BUFFER_SILENT = 2;
+    const long RETRY_MS = 2000;
+    const long DEVICE_CHECK_MS = 2000;
+
+    public static volatile bool Enabled = false;
+
+    public static void SetEnabled(bool value) {
+      Enabled = value;
+    }
+
+    public static void Start() {
+      var t = new Thread(Loop);
+      t.IsBackground = true;
+      t.SetApartmentState(ApartmentState.MTA);
+      t.Start();
+    }
+
+    static void Loop() {
+      IAudioClient client = null;
+      IAudioCaptureClient capture = null;
+      string activeId = null;
+      int channels = 2;
+      byte[] chunk = new byte[CHUNK_FRAMES * 4];
+      int chunkFilled = 0;
+      byte[] scratch = new byte[0];
+      var clock = System.Diagnostics.Stopwatch.StartNew();
+      long retryAt = 0;
+      long nextCheckAt = 0;
+
+      try {
+        while (CastHost.Running) {
+          if (!Enabled || !RawPipe.Connected) {
+            if (client != null) {
+              CloseClient(ref client, ref capture);
+              activeId = null;
+              chunkFilled = 0;
+            }
+            Thread.Sleep(40);
+            continue;
+          }
+
+          long now = clock.ElapsedMilliseconds;
+          if (client == null) {
+            if (now < retryAt) {
+              Thread.Sleep(40);
+              continue;
+            }
+            if (!OpenClient(out client, out capture, out activeId, out channels)) {
+              retryAt = now + RETRY_MS;
+              Thread.Sleep(40);
+              continue;
+            }
+            int wantBytes = CHUNK_FRAMES * channels * 2;
+            if (chunk.Length != wantBytes) chunk = new byte[wantBytes];
+            chunkFilled = 0;
+            nextCheckAt = now + DEVICE_CHECK_MS;
+          }
+
+          if (now >= nextCheckAt) {
+            nextCheckAt = now + DEVICE_CHECK_MS;
+            string currentId = DefaultEndpointId();
+            if (currentId != null && currentId != activeId) {
+              CloseClient(ref client, ref capture);
+              activeId = null;
+              chunkFilled = 0;
+              continue;
+            }
+          }
+
+          bool gotAny = false;
+          bool broken = false;
+          int bytesPerFrame = channels * 2;
+          int chunkBytes = chunk.Length;
+          uint packet;
+          while (Enabled && RawPipe.Connected) {
+            int hr = capture.GetNextPacketSize(out packet);
+            if (hr < 0) { broken = true; break; }
+            if (packet == 0) break;
+            IntPtr data;
+            uint frames;
+            uint flags;
+            ulong pos, qpc;
+            hr = capture.GetBuffer(out data, out frames, out flags, out pos, out qpc);
+            if (hr < 0) { broken = true; break; }
+            gotAny = true;
+            int bytes = (int)frames * bytesPerFrame;
+            bool silent = (flags & BUFFER_SILENT) != 0;
+            try {
+              if (!silent && bytes > 0) {
+                if (scratch.Length < bytes) scratch = new byte[bytes];
+                Marshal.Copy(data, scratch, 0, bytes);
+              }
+            } finally {
+              capture.ReleaseBuffer(frames);
+            }
+            int offset = 0;
+            while (offset < bytes) {
+              int take = Math.Min(chunkBytes - chunkFilled, bytes - offset);
+              if (silent) Array.Clear(chunk, chunkFilled, take);
+              else Buffer.BlockCopy(scratch, offset, chunk, chunkFilled, take);
+              chunkFilled += take;
+              offset += take;
+              if (chunkFilled == chunkBytes) {
+                RawPipe.WriteAudio(SAMPLE_RATE, channels, chunk);
+                chunkFilled = 0;
+              }
+            }
+          }
+
+          if (broken) {
+            CloseClient(ref client, ref capture);
+            activeId = null;
+            chunkFilled = 0;
+            retryAt = now + 1000;
+            continue;
+          }
+          if (!gotAny) Thread.Sleep(5);
+        }
+      } finally {
+        CloseClient(ref client, ref capture);
+      }
+    }
+
+    static string DefaultEndpointId() {
+      try {
+        var en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
+        IMMDevice dev;
+        if (en.GetDefaultAudioEndpoint(0, 0, out dev) != 0 && en.GetDefaultAudioEndpoint(0, 1, out dev) != 0) return null;
+        try {
+          IntPtr p;
+          if (dev.GetId(out p) != 0 || p == IntPtr.Zero) return null;
+          try {
+            return Marshal.PtrToStringUni(p);
+          } finally {
+            Native.CoTaskMemFree(p);
+          }
+        } finally {
+          try { Marshal.ReleaseComObject(dev); } catch { }
+        }
+      } catch {
+        return null;
+      }
+    }
+
+    static bool OpenClient(out IAudioClient client, out IAudioCaptureClient capture, out string deviceId, out int channels) {
+      client = null;
+      capture = null;
+      deviceId = null;
+      channels = 2;
+      IMMDevice dev = null;
+      IntPtr fmt = IntPtr.Zero;
+      try {
+        var en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
+        if (en.GetDefaultAudioEndpoint(0, 0, out dev) != 0 && en.GetDefaultAudioEndpoint(0, 1, out dev) != 0) return false;
+        IntPtr idPtr;
+        if (dev.GetId(out idPtr) == 0 && idPtr != IntPtr.Zero) {
+          try { deviceId = Marshal.PtrToStringUni(idPtr); } finally { Native.CoTaskMemFree(idPtr); }
+        }
+        Guid iid = typeof(IAudioClient).GUID;
+        object o;
+        if (dev.Activate(ref iid, 0x17, IntPtr.Zero, out o) != 0 || o == null) return false;
+        var c = (IAudioClient)o;
+        fmt = Marshal.AllocHGlobal(18);
+        if (!InitFormat(c, fmt, 2)) {
+          if (!InitFormat(c, fmt, 1)) {
+            try { Marshal.ReleaseComObject(c); } catch { }
+            return false;
+          }
+          channels = 1;
+        }
+        Guid capIid = typeof(IAudioCaptureClient).GUID;
+        object c2;
+        if (c.GetService(ref capIid, out c2) != 0 || c2 == null) {
+          try { Marshal.ReleaseComObject(c); } catch { }
+          return false;
+        }
+        if (c.Start() != 0) {
+          try { Marshal.ReleaseComObject(c2); } catch { }
+          try { Marshal.ReleaseComObject(c); } catch { }
+          return false;
+        }
+        client = c;
+        capture = (IAudioCaptureClient)c2;
+        return true;
+      } catch {
+        return false;
+      } finally {
+        if (fmt != IntPtr.Zero) Marshal.FreeHGlobal(fmt);
+        if (dev != null) { try { Marshal.ReleaseComObject(dev); } catch { } }
+      }
+    }
+
+    static bool InitFormat(IAudioClient c, IntPtr fmt, short ch) {
+      short align = (short)(ch * 2);
+      Marshal.WriteInt16(fmt, 0, 1);
+      Marshal.WriteInt16(fmt, 2, ch);
+      Marshal.WriteInt32(fmt, 4, SAMPLE_RATE);
+      Marshal.WriteInt32(fmt, 8, SAMPLE_RATE * align);
+      Marshal.WriteInt16(fmt, 12, align);
+      Marshal.WriteInt16(fmt, 14, 16);
+      Marshal.WriteInt16(fmt, 16, 0);
+      return c.Initialize(0, FLAGS_LOOPBACK_AUTOCONVERT, 500000, 0, fmt, IntPtr.Zero) == 0;
+    }
+
+    static void CloseClient(ref IAudioClient client, ref IAudioCaptureClient capture) {
+      if (client != null) {
+        try { client.Stop(); } catch { }
+        try { Marshal.ReleaseComObject(client); } catch { }
+        client = null;
+      }
+      if ( capture != null) {
+        try { Marshal.ReleaseComObject(capture); } catch { }
+        capture = null;
+      }
+    }
+  }
+
+  /** Đồng bộ bộ nhớ tạm (Clipboard văn bản Unicode) hai chiều giữa máy từ xa và trình duyệt điều khiển. */
+  public static class ClipboardSync {
+    const uint CF_UNICODETEXT = 13;
+    const uint GMEM_MOVEABLE = 0x0002;
+    const int MAX_CHARS = 65536;
+    static readonly object syncGate = new object();
+    static uint lastSeq = 0;
+    static string lastText = "";
+
+    public static void Init() {
+      try { lastSeq = Native.GetClipboardSequenceNumber(); } catch { }
+    }
+
+    public static void Poll() {
+      uint seq;
+      try { seq = Native.GetClipboardSequenceNumber(); } catch { return; }
+      if (seq == 0 || seq == lastSeq) return;
+      string text = null;
+      lock (syncGate) {
+        if (seq == lastSeq) return;
+        lastSeq = seq;
+        text = ReadTextUnsafe();
+        if (string.IsNullOrEmpty(text) || text == lastText) return;
+        lastText = text;
+      }
+      var msg = Out.Msg("clipboard");
+      msg["text"] = text;
+      Out.Send(msg);
+    }
+
+    static string ReadTextUnsafe() {
+      for (int attempt = 0; attempt < 3; attempt++) {
+        if (Native.OpenClipboard(IntPtr.Zero)) {
+          try {
+            if (!Native.IsClipboardFormatAvailable(CF_UNICODETEXT)) return null;
+            IntPtr hData = Native.GetClipboardData(CF_UNICODETEXT);
+            if (hData == IntPtr.Zero) return null;
+            IntPtr ptr = Native.GlobalLock(hData);
+            if (ptr == IntPtr.Zero) return null;
+            try {
+              string s = Marshal.PtrToStringUni(ptr);
+              if (s != null && s.Length > MAX_CHARS) s = s.Substring(0, MAX_CHARS);
+              return s;
+            } finally {
+              Native.GlobalUnlock(hData);
+            }
+          } catch {
+            return null;
+          } finally {
+            Native.CloseClipboard();
+          }
+        }
+        Thread.Sleep(5);
+      }
+      return null;
+    }
+
+    public static bool SetText(string text) {
+      if (string.IsNullOrEmpty(text)) return false;
+      if (text.Length > MAX_CHARS) text = text.Substring(0, MAX_CHARS);
+      lock (syncGate) {
+        for (int attempt = 0; attempt < 5; attempt++) {
+          if (Native.OpenClipboard(IntPtr.Zero)) {
+            IntPtr hGlobal = IntPtr.Zero;
+            try {
+              Native.EmptyClipboard();
+              int bytes = (text.Length + 1) * 2;
+              hGlobal = Native.GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)(ulong)bytes);
+              if (hGlobal == IntPtr.Zero) return false;
+              IntPtr target = Native.GlobalLock(hGlobal);
+              if (target == IntPtr.Zero) return false;
+              try {
+                Marshal.Copy(text.ToCharArray(), 0, target, text.Length);
+                Marshal.WriteInt16(target, text.Length * 2, 0);
+              } finally {
+                Native.GlobalUnlock(hGlobal);
+              }
+              if (Native.SetClipboardData(CF_UNICODETEXT, hGlobal) != IntPtr.Zero) {
+                hGlobal = IntPtr.Zero;
+                lastText = text;
+                lastSeq = Native.GetClipboardSequenceNumber();
+                return true;
+              }
+              return false;
+            } catch {
+              return false;
+            } finally {
+              if (hGlobal != IntPtr.Zero) Native.GlobalFree(hGlobal);
+              Native.CloseClipboard();
+            }
+          }
+          Thread.Sleep(5);
+        }
+      }
+      return false;
+    }
+  }
 }
 `;

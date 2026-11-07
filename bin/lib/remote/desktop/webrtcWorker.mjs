@@ -11,13 +11,13 @@ import { createWebRtcRuntimeLoader } from './webrtcRuntime.mjs';
  * thoát của daemon (trình giữ chạy / tự lùi bản dựa vào mã đó), và lỗi native giữa phiên chỉ làm mất WebRTC (lùi JPEG), không mất daemon.
  *
  * Giao thức: mỗi dòng stdin / stdout một JSON.
- * daemon → con: `start {sessionId, viewerId, iceServers, videoBitrate}` ·`signal {msg}` · `push {frame}` · `pipe {name}` · `close {viewerId}` · `closeAll`
+ * daemon → con: `start {sessionId, viewerId, iceServers, videoBitrate, audio}` · `signal {msg}` · `push {frame}` · `pipe {name}` · `audio {enabled}` · `clipboard {clipboard}` · `secureDesktop {secureDesktop}` · `close {viewerId}` · `closeAll`
  * daemon → con (con trỏ): `cursor {cursor}` · `cursorShape {shape}`
  * daemon → con (tệp thả vào): `fileReply {viewerId, msg}`
  * con → daemon: `started {viewerId, ok}` · `signal {payload}` · `status {payload}` · `input {raw, viewerId}` · `peerReady {viewerId}` ·
  * `file {viewerId, msg, sessionId}` · `fileChunk {viewerId, data}` (base64; người gửi chờ `ack` nên ống không dồn quá cỡ cửa sổ gửi) ·
- * `state {needsFallback, needsJpeg, hasVideo, videoLive, localCursor}` · `log {text}`
- * Khung thô I420 không đi qua daemon: con tự nối named pipe của tiến trình quay.
+ * `state {needsFallback, needsJpeg, hasVideo, videoLive, localCursor, needsAudio, hasAudio}` · `log {text}`
+ * Khung thô I420 + âm thanh PCM không đi qua daemon: con tự nối named pipe của tiến trình quay.
  */
 
 export const DESKTOP_WEBRTC_WORKER_ARG = '__desktop-webrtc-worker';
@@ -30,7 +30,13 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
   let rtc;
   const sendState = () => {
     const state = {
-      needsFallback: rtc.needsFallback(), needsJpeg: rtc.needsJpeg(), hasVideo: rtc.hasVideo(), videoLive: Date.now() - lastRawAt < VIDEO_LIVE_MS, localCursor: rtc.localCursor(),
+      needsFallback: rtc.needsFallback(),
+      needsJpeg: rtc.needsJpeg(),
+      hasVideo: rtc.hasVideo(),
+      videoLive: Date.now() - lastRawAt < VIDEO_LIVE_MS,
+      localCursor: rtc.localCursor(),
+      needsAudio: rtc.needsAudio(),
+      hasAudio: rtc.hasAudio(),
     };
     const key = JSON.stringify(state);
     if (key !== lastState) { lastState = key; send({ t: 'state', ...state }); }
@@ -53,7 +59,11 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
     pipeName = name;
     pipeSocket?.destroy();
     const sock = net.connect(`\\\\.\\pipe\\${name}`);
-    const read = createRawFrameReader((frame) => { if (rtc.pushRaw(frame)) lastRawAt = Date.now(); }, () => sock.destroy());
+    const read = createRawFrameReader(
+      (frame) => { if (rtc.pushRaw(frame)) lastRawAt = Date.now(); },
+      () => sock.destroy(),
+      (audio) => { rtc.pushAudio(audio); },
+    );
     sock.on('data', read);
     sock.on('error', () => {});
     sock.on('close', () => {
@@ -67,7 +77,13 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
 
   const handlers = {
     start: async (m) => {
-      const ok = await rtc.start({ sessionId: m.sessionId, viewerId: m.viewerId, iceServers: m.iceServers || [], videoBitrate: m.videoBitrate || null }).catch(() => false);
+      const ok = await rtc.start({
+        sessionId: m.sessionId,
+        viewerId: m.viewerId,
+        iceServers: m.iceServers || [],
+        videoBitrate: m.videoBitrate || null,
+        audio: m.audio !== false,
+      }).catch(() => false);
       send({ t: 'started', viewerId: m.viewerId, ok });
       sendState();
     },
@@ -76,7 +92,10 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
     cursor: (m) => rtc.pushCursor(m.cursor),
     cursorShape: (m) => rtc.pushCursorShape(m.shape),
     inputFocus: (m) => rtc.pushInputFocus(m.focus),
+    clipboard: (m) => rtc.pushClipboard(m.clipboard),
+    secureDesktop: (m) => rtc.pushSecureDesktop(m.secureDesktop),
     fileReply: (m) => rtc.replyFile(m.viewerId, m.msg),
+    audio: (m) => { rtc.setAudio(m.enabled !== false); sendState(); },
     pipe: (m) => { if (m.name) connectPipe(String(m.name)); },
     close: (m) => { rtc.close(m.viewerId); sendState(); },
     closeAll: () => { rtc.closeAll(); const sock = pipeSocket; pipeSocket = null; pipeName = ''; sock?.destroy(); sendState(); },
@@ -95,14 +114,14 @@ export async function runDesktopWebRtcWorker({ input = process.stdin, output = p
 }
 
 /**
- * Phía daemon: cùng API với createDesktopWebRtc (start / signal / push / needsFallback / needsJpeg / hasVideo / close / closeAll) + `attachPipe`
+ * Phía daemon: cùng API với createDesktopWebRtc (start / signal / push / needsFallback / needsJpeg / hasVideo / needsAudio / hasAudio / setAudio / close / closeAll) + `attachPipe`
  * và `videoLive`. Tiến trình con dựng khi phiên đầu cần, tắt khi `closeAll`; con chết giữa phiên → coi như không ai có WebRTC (lùi JPEG).
  */
 export function createDesktopWebRtcWorker({
   command, emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onFile = () => {}, onFileChunk = () => {}, onPeerReady = () => {}, onState = () => {}, log = () => {}, spawnImpl = spawn,
 } = {}) {
   let child = null;
-  const NO_PEER_STATE = { needsFallback: true, needsJpeg: true, hasVideo: false, videoLive: false, localCursor: false };
+  const NO_PEER_STATE = { needsFallback: true, needsJpeg: true, hasVideo: false, videoLive: false, localCursor: false, needsAudio: false, hasAudio: false };
   let state = NO_PEER_STATE;
   const waiting = new Map();
   const peers = new Set();
@@ -122,7 +141,15 @@ export function createDesktopWebRtcWorker({
       else if (m.t === 'fileChunk') onFileChunk(m.viewerId, Buffer.from(String(m.data || ''), 'base64'));
       else if (m.t === 'peerReady') onPeerReady(m.viewerId);
       else if (m.t === 'state') {
-        state = { needsFallback: !!m.needsFallback, needsJpeg: !!m.needsJpeg, hasVideo: !!m.hasVideo, videoLive: !!m.videoLive, localCursor: !!m.localCursor };
+        state = {
+          needsFallback: !!m.needsFallback,
+          needsJpeg: !!m.needsJpeg,
+          hasVideo: !!m.hasVideo,
+          videoLive: !!m.videoLive,
+          localCursor: !!m.localCursor,
+          needsAudio: !!m.needsAudio,
+          hasAudio: !!m.hasAudio,
+        };
         onState();
       }
       else if (m.t === 'log') log(String(m.text || ''));
@@ -147,14 +174,14 @@ export function createDesktopWebRtcWorker({
     try { child.stdin.write(JSON.stringify(msg) + '\n'); } catch { /* con vừa chết */ }
   };
 
-  function start({ sessionId, viewerId, iceServers = [], videoBitrate = null }) {
+  function start({ sessionId, viewerId, iceServers = [], videoBitrate = null, audio }) {
     ensure();
     peers.add(viewerId);
     return new Promise((resolve) => {
       const timer = setTimeout(() => { waiting.delete(viewerId); resolve(false); }, 30_000);
       timer.unref?.();
       waiting.set(viewerId, (ok) => { clearTimeout(timer); resolve(ok); });
-      send({ t: 'start', sessionId, viewerId, iceServers, videoBitrate });
+      send({ t: 'start', sessionId, viewerId, iceServers, videoBitrate, ...(typeof audio === 'boolean' ? { audio } : {}) });
     });
   }
 
@@ -178,7 +205,10 @@ export function createDesktopWebRtcWorker({
     // Hình gửi cả khi chưa có người xem: bộ quay chỉ gửi mỗi hình một lần, tiến trình con giữ lại cho người xem sau.
     pushCursorShape: (shape) => { if (child) send({ t: 'cursorShape', shape }); },
     pushInputFocus: (focus) => { if (child && peers.size) send({ t: 'inputFocus', focus }); },
+    pushClipboard: (clipboard) => { if (child && peers.size) send({ t: 'clipboard', clipboard }); },
+    pushSecureDesktop: (secureDesktop) => { if (child && peers.size) send({ t: 'secureDesktop', secureDesktop }); },
     replyFile: (viewerId, msg) => send({ t: 'fileReply', viewerId, msg }),
+    setAudio: (enabled) => { if (child) send({ t: 'audio', enabled: enabled !== false }); },
     attachPipe: (name) => { if (name) send({ t: 'pipe', name }); },
     close: (viewerId) => { peers.delete(viewerId); send({ t: 'close', viewerId }); },
     closeAll,
@@ -187,5 +217,7 @@ export function createDesktopWebRtcWorker({
     hasVideo: () => state.hasVideo,
     videoLive: () => state.videoLive,
     localCursor: () => state.localCursor,
+    needsAudio: () => state.needsAudio,
+    hasAudio: () => state.hasAudio,
   };
 }

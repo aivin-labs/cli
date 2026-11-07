@@ -97,12 +97,17 @@ test('worker client: dựng tiến trình con bằng lệnh của CLI + cờ ẩ
   proc.reply({ t: 'signal', payload: { type: 'offer' } });
   proc.reply({ t: 'input', raw: { action: 'move' }, viewerId: 'v1' });
   proc.reply({ t: 'peerReady', viewerId: 'v1' });
-  proc.reply({ t: 'state', needsFallback: false, needsJpeg: false, hasVideo: true, videoLive: true });
+  proc.reply({ t: 'state', needsFallback: false, needsJpeg: false, hasVideo: true, videoLive: true, needsAudio: true, hasAudio: true });
   await tick();
   assert.deepEqual(got.signals, [{ type: 'offer' }]);
   assert.deepEqual(got.inputs, [[{ action: 'move' }, 'v1']]);
   assert.deepEqual(got.ready, ['v1']);
   assert.equal(rtc.videoLive(), true);
+  assert.equal(rtc.needsAudio(), true);
+  assert.equal(rtc.hasAudio(), true);
+  rtc.setAudio(false);
+  await tick();
+  assert.deepEqual(proc.sent.at(-1), { t: 'audio', enabled: false });
   rtc.attachPipe('aivin-cast-1');
   await tick();
   assert.deepEqual(proc.sent.at(-1), { t: 'pipe', name: 'aivin-cast-1' });

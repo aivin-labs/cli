@@ -25,10 +25,12 @@ const RAW_HEADER_BYTES = 12;
 const MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024;
 
 /**
- * Tách luồng khung thô từ named pipe: mỗi khung = [rộng, cao, độ dài] int32 LE + dữ liệu I420. Trả hàm nhận từng khúc dữ liệu.
+ * Tách luồng khung thô từ named pipe:
+ * - Video: [rộng > 0, cao > 0, độ dài] int32 LE + dữ liệu I420.
+ * - Audio: [rộng = -số_kênh < 0, cao = tần_số_lấy_mẫu, độ dài] int32 LE + dữ liệu PCM 16-bit LE.
  * Độ dài vô lý → `onCorrupt` (đóng pipe, không cố đồng bộ lại).
  */
-export function createRawFrameReader(onFrame, onCorrupt = () => {}) {
+export function createRawFrameReader(onFrame, onCorrupt = () => {}, onAudio = () => {}) {
   const header = Buffer.alloc(RAW_HEADER_BYTES);
   let headerFilled = 0;
   let frame = null;
@@ -45,13 +47,25 @@ export function createRawFrameReader(onFrame, onCorrupt = () => {}) {
         const width = header.readInt32LE(0);
         const height = header.readInt32LE(4);
         const length = header.readInt32LE(8);
-        if (width <= 0 || height <= 0 || length !== width * height * 1.5 || length > MAX_RAW_FRAME_BYTES) {
-          onCorrupt();
-          return;
+        if (width < 0) {
+          const channelCount = -width;
+          const sampleRate = height;
+          const bytesPerFrame = channelCount * 2;
+          if ((channelCount !== 1 && channelCount !== 2) || sampleRate < 8000 || sampleRate > 96000 || sampleRate % 100 !== 0 || length <= 0 || length > 192000 || length % bytesPerFrame !== 0) {
+            onCorrupt();
+            return;
+          }
+          frame = { audio: true, sampleRate, channelCount, numberOfFrames: length / bytesPerFrame, data: new Uint8Array(length) };
+          filled = 0;
+        } else {
+          if (width <= 0 || height <= 0 || length !== width * height * 1.5 || length > MAX_RAW_FRAME_BYTES) {
+            onCorrupt();
+            return;
+          }
+          // Vùng nhớ riêng cho từng khung (bộ mã hoá giữ tham chiếu), chép thẳng từng khúc: khúc pipe 64 KB, ghép dần cả khung ăn luồng chính ~9 ms.
+          frame = { width, height, data: new Uint8ClampedArray(length) };
+          filled = 0;
         }
-        // Vùng nhớ riêng cho từng khung (bộ mã hoá giữ tham chiếu), chép thẳng từng khúc: khúc pipe 64 KB, ghép dần cả khung ăn luồng chính ~9 ms.
-        frame = { width, height, data: new Uint8ClampedArray(length) };
-        filled = 0;
       }
       const piece = chunk.subarray(pos, pos + frame.data.length - filled);
       frame.data.set(piece, filled);
@@ -60,7 +74,17 @@ export function createRawFrameReader(onFrame, onCorrupt = () => {}) {
       if (filled === frame.data.length) {
         const done = frame;
         frame = null;
-        onFrame(done);
+        if (done.audio) {
+          onAudio({
+            samples: new Int16Array(done.data.buffer, done.data.byteOffset, done.data.byteLength / 2),
+            sampleRate: done.sampleRate,
+            bitsPerSample: 16,
+            channelCount: done.channelCount,
+            numberOfFrames: done.numberOfFrames,
+          });
+        } else {
+          onFrame(done);
+        }
       }
     }
   };
@@ -75,6 +99,38 @@ export function isDesktopCastSupported(platform = process.platform) {
  */
 export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } = {}) {
   let activeSession = null;
+  let prewarming = null;
+
+  /** Biên dịch sẵn DLL C# ở nền khi daemon khởi động để lần mở phiên đầu tiên không mất ~800 ms chờ csc. */
+  function prewarm() {
+    if (!isDesktopCastSupported() || prewarming || activeSession) return prewarming;
+    let files;
+    try { files = hostFiles(dir); } catch { return null; }
+    if (fs.existsSync(files.dll)) return null;
+    prewarming = new Promise((resolve) => {
+      try {
+        const proc = spawnImpl('powershell.exe', [
+          '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', files.ps1,
+        ], {
+          env: {
+            ...process.env,
+            AIVIN_CAST_SRC: files.src,
+            AIVIN_CAST_DLL: files.dll,
+            AIVIN_CAST_COMPILE_ONLY: '1',
+          },
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        proc.on('exit', () => { prewarming = null; resolve(true); });
+        proc.on('error', () => { prewarming = null; resolve(false); });
+        proc.unref?.();
+      } catch {
+        prewarming = null;
+        resolve(false);
+      }
+    });
+    return prewarming;
+  }
 
   function start({
     sessionId,
@@ -87,6 +143,8 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     onCursor,
     onCursorShape,
     onInputFocus,
+    onClipboard,
+    onSecureDesktop,
     onCapture,
     rawPipe = false,
     onReady,
@@ -156,6 +214,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
           screens: msg.screens,
           ts: msg.ts,
           stats: msg.stats,
+          ...(msg.secureDesktop ? { secureDesktop: true } : {}),
         });
       } else if (msg.t === 'meta') {
         onMeta?.({
@@ -170,6 +229,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
           screens: msg.screens,
           ts: msg.ts,
           stats: msg.stats,
+          ...(msg.secureDesktop ? { secureDesktop: true } : {}),
         });
       } else if (msg.t === 'cursor') {
         onCursor?.({ x: msg.x, y: msg.y, visible: msg.visible, shape: msg.shape });
@@ -177,6 +237,10 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
         onCursorShape?.({ id: msg.id, png: msg.png, hotX: msg.hotX, hotY: msg.hotY });
       } else if (msg.t === 'input_focus') {
         onInputFocus?.({ editable: msg.editable === true });
+      } else if (msg.t === 'clipboard') {
+        if (typeof msg.text === 'string' && msg.text) onClipboard?.({ text: msg.text });
+      } else if (msg.t === 'secure_desktop') {
+        onSecureDesktop?.({ active: msg.active === true });
       } else if (msg.t === 'capture') {
         onCapture?.({ mode: msg.mode, reason: msg.reason });
       } else if (msg.t === 'error') {
@@ -230,6 +294,15 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       config({ cursor: on });
     }
 
+    /** Bật / tắt thu âm thanh hệ thống qua WASAPI loopback. */
+    let audioOn = false;
+    function setAudio(on) {
+      const next = on !== false;
+      if (!pipeName || audioOn === next) return;
+      audioOn = next;
+      config({ audio: next });
+    }
+
     /** Gửi ngay một khung (người xem mới nối, màn hình đang đứng yên). */
     function refresh() {
       if (!child.stdin || child.stdin.destroyed) return;
@@ -261,6 +334,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       config,
       setJpeg,
       setCursorInFrame,
+      setAudio,
       refresh,
       stop,
       pipeName,
@@ -303,6 +377,10 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     activeSession?.setCursorInFrame(on);
   }
 
+  function setAudio(on) {
+    activeSession?.setAudio(on);
+  }
+
   function refresh() {
     activeSession?.refresh();
   }
@@ -322,6 +400,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
   }
 
   return {
+    prewarm,
     start,
     setSessionId,
     sessionId,
@@ -329,6 +408,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     config,
     setJpeg,
     setCursorInFrame,
+    setAudio,
     refresh,
     pipeName,
     stop,

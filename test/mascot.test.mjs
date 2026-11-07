@@ -488,3 +488,28 @@ test('mức báo là 3 nấc bấm (không còn thanh trượt): đủ nhãn t�
     for (const k of ['notify_step_min', 'notify_step_mid', 'notify_step_max']) assert.ok(s[k] && s[k] !== k, `${lang}.${k}`);
   }
 });
+
+test('mất kết nối thoáng qua (< offlineGraceMs) rồi nối lại → giữ im lặng; mất lâu hơn → báo mất kết nối rồi khôi phục', async () => {
+  const { m, host } = makeMascot({ offlineGraceMs: 40 });
+  const child = host.spawned[0];
+  child.send({ t: HostEvent.READY });
+  m.connected();
+  await tick();
+  child.sent.length = 0;
+
+  // Rớt mạng 15 ms (< 40 ms) rồi nối lại ngay → không hiện bong bóng hay dòng log mất kết nối
+  m.disconnected();
+  await sleep(15);
+  m.connected();
+  await sleep(40);
+  assert.equal(child.sent.length, 0, 'rớt mạng thoáng qua không phát cảnh báo');
+
+  // Rớt mạng quá 40 ms → chuyển trạng thái OFFLINE + hiện bong bóng, nối lại thì về IDLE
+  m.disconnected();
+  await sleep(55);
+  assert.ok(child.sent.some((c) => c.t === HostCommand.STATE && c.state === MascotState.OFFLINE));
+  assert.ok(child.sent.some((c) => c.t === HostCommand.MAIN && !c.quiet && /Mất kết nối/.test(c.text)));
+  m.connected();
+  assert.ok(child.sent.some((c) => c.t === HostCommand.STATE && c.state === MascotState.IDLE));
+  m.close();
+});
