@@ -427,8 +427,8 @@ namespace AivinDesktop {
       serverVn = Item(cfg.T("serverVn"), delegate { ChangeServer("https://api.aivin.vn"); });
       serverLocal = Item(cfg.T("serverLocal"), delegate { ChangeServer("http://localhost:3001"); });
       serverMenu.DropDownItems.AddRange(new ToolStripItem[] { serverCloud, serverVn, serverLocal });
-      serverMenu.DropDown.ShowImageMargin = false;
-      serverMenu.DropDown.ShowCheckMargin = false;
+      ToolStripDropDownMenu serverDrop = serverMenu.DropDown as ToolStripDropDownMenu; if (serverDrop != null) { serverDrop.ShowImageMargin = false; }
+      if (serverDrop != null) { serverDrop.ShowCheckMargin = false; }
       serverMenu.DropDown.BackColor = Color.White;
       serverMenu.DropDown.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
       serverMenu.DropDown.Padding = new Padding(2, 6, 2, 6);
