@@ -38,12 +38,13 @@ function Select-InstallMode {
     if ($env:AIVIN_NO_DESKTOP -or $env:AIVIN_PAIR_CODE -or $null -ne $env:AIVIN_NO_AUTOSTART -or $null -ne $env:AIVIN_OPEN_PLATFORM) { return $mode }
 
     $choices = [System.Management.Automation.Host.ChoiceDescription[]]@(
-        (New-Object -TypeName System.Management.Automation.Host.ChoiceDescription -ArgumentList '&1. Recommended - start with Windows and open AIVIN'),
-        (New-Object -TypeName System.Management.Automation.Host.ChoiceDescription -ArgumentList '&2. Background only - start with Windows, do not open platform'),
-        (New-Object -TypeName System.Management.Automation.Host.ChoiceDescription -ArgumentList '&3. Open AIVIN now, do not start with Windows')
+        (New-Object -TypeName System.Management.Automation.Host.ChoiceDescription -ArgumentList '&1'),
+        (New-Object -TypeName System.Management.Automation.Host.ChoiceDescription -ArgumentList '&2'),
+        (New-Object -TypeName System.Management.Automation.Host.ChoiceDescription -ArgumentList '&3')
     )
+    $promptMsg = "Choose how AIVIN should start. Press Enter for the recommended setup.`n`n  [1] Recommended - start with Windows and open AIVIN`n  [2] Background only - start with Windows, do not open platform`n  [3] Open AIVIN now, do not start with Windows`n"
     try {
-        $selected = $Host.UI.PromptForChoice('AIVIN setup', 'Choose how AIVIN should start. Press Enter for the recommended setup.', $choices, 0)
+        $selected = $Host.UI.PromptForChoice('AIVIN setup', $promptMsg, $choices, 0)
     } catch { $selected = 0 }
     if ($selected -eq 1) { $mode.OpenPlatform = $false }
     if ($selected -eq 2) { $mode.Autostart = $false }

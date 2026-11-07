@@ -240,6 +240,8 @@ namespace AivinDesktop {
       }
     }
 
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) { }
+
     protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
       if (e.Item.Selected && e.Item.Enabled) {
         int width = Math.Min(e.Item.Width, e.ToolStrip.ClientSize.Width - e.Item.Bounds.Left);
@@ -425,6 +427,11 @@ namespace AivinDesktop {
       serverVn = Item(cfg.T("serverVn"), delegate { ChangeServer("https://api.aivin.vn"); });
       serverLocal = Item(cfg.T("serverLocal"), delegate { ChangeServer("http://localhost:3001"); });
       serverMenu.DropDownItems.AddRange(new ToolStripItem[] { serverCloud, serverVn, serverLocal });
+      serverMenu.DropDown.ShowImageMargin = false;
+      serverMenu.DropDown.ShowCheckMargin = false;
+      serverMenu.DropDown.BackColor = Color.White;
+      serverMenu.DropDown.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+      serverMenu.DropDown.Padding = new Padding(2, 6, 2, 6);
       startup = Item(cfg.T("startup"), delegate { SetStartup(!StartupEnabled()); Refresh(); });
       updateItem = Item("", delegate { CheckOrApplyUpdate(); });
 
@@ -750,9 +757,12 @@ namespace AivinDesktop {
       }
       string selectedServer = CurrentServerUrl();
       serverMenu.Text = cfg.T("server") + ": " + ServerName(selectedServer);
-      serverCloud.Checked = selectedServer == "https://api.aivin.cloud";
-      serverVn.Checked = selectedServer == "https://api.aivin.vn";
-      serverLocal.Checked = selectedServer == "http://localhost:3001";
+      bool isCloud = selectedServer == "https://api.aivin.cloud";
+      bool isVn = selectedServer == "https://api.aivin.vn";
+      bool isLocal = selectedServer == "http://localhost:3001";
+      serverCloud.Text = (isCloud ? "✓  " : "    ") + cfg.T("serverCloud");
+      serverVn.Text = (isVn ? "✓  " : "    ") + cfg.T("serverVn");
+      serverLocal.Text = (isLocal ? "✓  " : "    ") + cfg.T("serverLocal");
       open.Text = cfg.T(paired ? "open" : "connect");
       connectCodeItem.Visible = !paired;
       connectCodeItem.Enabled = !browserConnectInProgress;
