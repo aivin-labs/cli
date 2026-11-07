@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import WSClient from 'ws';
 import {
-  AIVIN_BROWSER_PROFILE_DIR, DEBUG_PORTS, LOCAL_BROWSERS, detectDefaultBrowserId, launchLocalChromeWithDebugging, probeLocalChromeDebugger,
+  AIVIN_BROWSER_PROFILE_DIR, DEBUG_PORTS, LOCAL_BROWSERS, detectDefaultBrowserId, hideAivinBrowserFromTaskbar, launchLocalChromeWithDebugging, probeLocalChromeDebugger,
   resolveBrowserInstall,
 } from '../localBrowser.mjs';
 import { DeviceErrorCode } from './constants.mjs';
@@ -65,12 +65,12 @@ export function detectLocalBrowser() {
  */
 export async function ensureAivinBrowser(preferredId, { ports = DEBUG_PORTS, launch = true, log } = {}) {
   const running = await activeBrowserEndpoint(AIVIN_BROWSER_PROFILE_DIR);
-  if (running) return { wsUrl: running.wsUrl, browserId: (await probeLocalChromeDebugger(running.port)).browserId || preferredId, port: running.port };
+  if (running) { hideAivinBrowserFromTaskbar(AIVIN_BROWSER_PROFILE_DIR); return { wsUrl: running.wsUrl, browserId: (await probeLocalChromeDebugger(running.port)).browserId || preferredId, port: running.port }; }
   // Cửa sổ Aivin đang mở mà không ghi DevToolsActivePort (Edge với cổng cố định) → dùng lại theo dòng lệnh tiến trình, không mở thêm.
   const processPort = await browserPortFromProcesses(AIVIN_BROWSER_PROFILE_DIR);
   if (processPort) {
     const { wsUrl, browserId } = await probeLocalChromeDebugger(processPort);
-    if (wsUrl) return { wsUrl, browserId: browserId || preferredId, port: processPort };
+    if (wsUrl) { hideAivinBrowserFromTaskbar(AIVIN_BROWSER_PROFILE_DIR); return { wsUrl, browserId: browserId || preferredId, port: processPort }; }
   }
   if (!launch) throw new DeviceToolError(DeviceErrorCode.BROWSER_NOT_FOUND, 'The Aivin browser window is no longer running');
   const conflicts = [];

@@ -6,7 +6,7 @@ import path from 'path';
 import { WebSocketServer } from 'ws';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
-const { browserIdFromName, browserIdFromRegQuery, findOnPath } = await import('../bin/lib/localBrowser.mjs');
+const { browserIdFromName, browserIdFromRegQuery, buildHideTaskbarPowerShellScript, findOnPath, hideAivinBrowserFromTaskbar } = await import('../bin/lib/localBrowser.mjs');
 const { applyDevicePolicy } = await import('../bin/lib/remote/cdpPolicy.mjs');
 const { createBrowserTunnels } = await import('../bin/lib/remote/browserTunnel.mjs');
 const { createTabGrouper, ensureTabGroupsExtension, groupTitle, TAB_GROUPS_SW_FILE } = await import('../bin/lib/remote/tabGroups.mjs');
@@ -209,4 +209,13 @@ test('bộ gom nhóm: trình duyệt không cho nạp tiện ích (mở bởi b�
   assert.equal(fake.state.evaluations.length, 0);
   g.close();
   await browser.close();
+});
+
+test('ẩn cửa sổ Aivin khỏi thanh tác vụ Windows: chỉ tạo lệnh với WS_EX_TOOLWINDOW cho đúng thư mục hồ sơ Aivin', () => {
+  const script = buildHideTaskbarPowerShellScript('C:\\Users\\thang\\.aivin\\browser-profile');
+  assert.match(script, /0x00000080/);
+  assert.match(script, /0x00040000/);
+  assert.match(script, /--user-data-dir=/);
+  assert.match(script, /C:\\Users\\thang\\\.aivin\\browser-profile/);
+  assert.equal(hideAivinBrowserFromTaskbar('C:\\Users\\thang\\.aivin\\browser-profile', { platform: 'linux', force: true }), false);
 });
