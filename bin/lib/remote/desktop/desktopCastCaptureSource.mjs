@@ -340,13 +340,17 @@ namespace AivinDesktopCast {
     }
 
     bool CaptureGdi(Rectangle bounds) {
-      if (scratch == null) scratch = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppRgb);
-      CastScreen.CopyScreen(scratch, bounds);
-      bool same = CastScreen.SameFrame(scratch, frame);
-      var t = frame;
-      frame = scratch;
-      scratch = t;
-      return !same;
+      try {
+        if (scratch == null) scratch = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppRgb);
+        CastScreen.CopyScreen(scratch, bounds);
+        bool same = CastScreen.SameFrame(scratch, frame);
+        var t = frame;
+        frame = scratch;
+        scratch = t;
+        return !same;
+      } catch {
+        return false;
+      }
     }
 
     void Report(string mode, string reason) {

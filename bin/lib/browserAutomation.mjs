@@ -210,7 +210,7 @@ export async function runBrowserMissionLocal(mission, options) {
     serverUrl,
     authorization: `Bearer ${apiKey || ''}`,
     browser: { id: browser.id, name: browser.name },
-    useDailyBrowser: options.separateBrowser !== true,
+    useDailyBrowser: options.dailyBrowser === true,
     ensureBrowser,
     say: sayTunnelEvent,
   });

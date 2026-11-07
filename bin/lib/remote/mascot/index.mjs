@@ -1,3 +1,16 @@
+
+function formatDeviceLabel(raw, lang = 'vi') {
+  if (!raw) return null;
+  const isVi = lang === 'vi';
+  const s = String(raw).trim();
+  if (/iphone/i.test(s)) return isVi ? 'Điện thoại iPhone' : 'iPhone';
+  if (/ipad/i.test(s)) return isVi ? 'Máy tính bảng iPad' : 'iPad';
+  if (/android/i.test(s)) return isVi ? 'Điện thoại Android' : 'Android phone';
+  if (/mac/i.test(s)) return isVi ? 'Máy tính Mac' : 'Mac computer';
+  if (/win/i.test(s)) return isVi ? 'Máy tính khác' : 'Another computer';
+  if (/web/i.test(s)) return isVi ? 'Trình duyệt web' : 'Web browser';
+  return s;
+}
 import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
@@ -616,11 +629,22 @@ export function createMascot({
       log({ status: on ? LogStatus.WARN : LogStatus.INFO, title: text });
       main(text);
     },
-    /** Có người đang xem + điều khiển màn hình máy này từ web (Desktop Scenecast) — chủ máy luôn biết. */
-    remoteView(on) {
-      const text = t(on ? MascotText.CAST_VIEWING : MascotText.CAST_ENDED);
-      log({ status: on ? LogStatus.WARN : LogStatus.INFO, title: text });
-      main(text);
+        /** Có người đang xem + điều khiển màn hình máy này từ web (Desktop Scenecast) — chủ máy luôn biết. */
+    remoteView(on, { device } = {}) {
+      if (on) {
+        const devName = formatDeviceLabel(device, currentLang);
+        const text = devName
+          ? t(MascotText.CAST_VIEWING_DEVICE, { device: devName })
+          : t(MascotText.CAST_VIEWING);
+        log({ status: LogStatus.WARN, title: text });
+        main(text);
+        send({ t: HostCommand.GESTURE, g: 'startle', face: 'curious', sec: 4.5 });
+      } else {
+        const text = t(MascotText.CAST_ENDED);
+        log({ status: LogStatus.INFO, title: text });
+        main(text);
+        send({ t: HostCommand.GESTURE, g: 'relief', face: 'relief', sec: 2.5 });
+      }
     },
     callStarted(call, tool) {
       if (!call?.call_id || tool?.internal) return;

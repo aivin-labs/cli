@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 import path from 'path';
 import os from 'os';
 import chalk from 'chalk';
@@ -21,6 +22,29 @@ import { execSync, spawn } from 'child_process';
 // fully independently of whatever the user's main browser is doing, at the cost of a one-time login
 // (Facebook etc.) the first time it's used - after that, cookies persist here just like any profile.
 export const AIVIN_BROWSER_PROFILE_DIR = path.join(os.homedir(), '.aivin', 'browser-profile');
+export const AIVIN_CAST_EXTENSION_DIR = path.join(os.homedir(), '.aivin', 'cast-extension');
+
+export function ensureCastExtension() {
+  try {
+    fs.mkdirSync(AIVIN_CAST_EXTENSION_DIR, { recursive: true });
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const srcDir = path.join(__dirname, 'remote', 'browserExtension');
+    if (fs.existsSync(srcDir)) {
+      const files = fs.readdirSync(srcDir);
+      for (const file of files) {
+        const srcFile = path.join(srcDir, file);
+        const destFile = path.join(AIVIN_CAST_EXTENSION_DIR, file);
+        if (!fs.existsSync(destFile) || fs.statSync(srcFile).mtimeMs > fs.statSync(destFile).mtimeMs) {
+          fs.copyFileSync(srcFile, destFile);
+        }
+      }
+    }
+  } catch {
+    // best-effort
+  }
+  return AIVIN_CAST_EXTENSION_DIR;
+}
 
 // 9222 is Chrome/Edge's conventional remote-debugging port, but it's not reserved to them - anything
 // can be listening there (found the hard way: this project's own local docker-compose stack publishes
@@ -315,9 +339,25 @@ export async function launchLocalChromeWithDebugging(port = CHROME_DEBUG_PORT, p
   } else {
     log(`   Opening your dedicated AI Browser window...`);
   }
+  const extensionDir = ensureCastExtension();
   const child = spawn(
     browser.exe,
-    [`--remote-debugging-port=${port}`, `--user-data-dir=${AIVIN_BROWSER_PROFILE_DIR}`, '--no-first-run', '--start-maximized', EXTENSION_DEBUGGING_FLAG],
+    [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${AIVIN_BROWSER_PROFILE_DIR}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--window-position=10000,10000',
+      '--window-size=1280,800',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
+      `--load-extension=${extensionDir}`,
+      `--disable-extensions-except=${extensionDir}`,
+      '--allowlisted-extension-id=mfbaifggkmifehjhddocjfikbegaonjg',
+      '--auto-accept-this-tab-capture',
+      EXTENSION_DEBUGGING_FLAG,
+    ],
     { detached: true, stdio: 'ignore' },
   );
   // Without a listener, a failed spawn (exe gone since lookup, no permission) is an unhandled 'error'

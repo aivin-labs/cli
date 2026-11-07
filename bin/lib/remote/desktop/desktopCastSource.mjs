@@ -253,8 +253,11 @@ namespace AivinDesktopCast {
 
     /** Chụp vùng màn hình vào ảnh có sẵn (không kèm con trỏ). */
     public static void CopyScreen(Bitmap dst, Rectangle r) {
-      using (var g = Graphics.FromImage(dst)) {
-        g.CopyFromScreen(r.Left, r.Top, 0, 0, r.Size);
+      try {
+        using (var g = Graphics.FromImage(dst)) {
+          g.CopyFromScreen(r.Left, r.Top, 0, 0, r.Size);
+        }
+      } catch {
       }
     }
 
@@ -369,7 +372,7 @@ namespace AivinDesktopCast {
   }
 
   public static class CastHost {
-    const long JPEG_SMALL_CHANGE_INTERVAL_MS = 200;
+    const long JPEG_SMALL_CHANGE_INTERVAL_MS = 66;
     const double JPEG_BIG_CHANGE_DIFF = 4.5;
     const int RATIO_SCALE = 65535;
     static volatile bool running = true;
@@ -665,6 +668,22 @@ namespace AivinDesktopCast {
       }
     }
 
+    static int wheelAccY = 0;
+    static int wheelAccX = 0;
+
+    static void FlushWheelAccumulator() {
+      if (Math.Abs(wheelAccY) >= 40) {
+        int sign = wheelAccY > 0 ? 1 : -1;
+        Native.mouse_event(Native.MOUSEEVENTF_WHEEL, 0, 0, -sign * 120, 0);
+      }
+      wheelAccY = 0;
+      if (Math.Abs(wheelAccX) >= 40) {
+        int sign = wheelAccX > 0 ? 1 : -1;
+        Native.mouse_event(Native.MOUSEEVENTF_HWHEEL, 0, 0, sign * 120, 0);
+      }
+      wheelAccX = 0;
+    }
+
     // Nút + phím bổ trợ đang giữ qua mousedown (chỉ luồng đọc lệnh đụng tới). Gói mouseup không đủ để biết cần nhả gì: người xem có thể thả Ctrl trước khi thả chuột.
     static readonly List<int> heldButtons = new List<int>();
     static readonly List<byte> heldModifiers = new List<byte>();
@@ -685,6 +704,7 @@ namespace AivinDesktopCast {
       for (int i = heldButtons.Count - 1; i >= 0; i--) MouseButton(heldButtons[i], false);
       heldButtons.Clear();
       ReleaseHeldModifiers();
+      FlushWheelAccumulator();
     }
 
     static void HandleInput(Dictionary<string, object> cmd) {
@@ -783,8 +803,32 @@ namespace AivinDesktopCast {
           Native.SetCursorPos(targetX, targetY);
           PressModifiers(mods);
           try {
-            if (deltaY != 0) Native.mouse_event(Native.MOUSEEVENTF_WHEEL, 0, 0, -deltaY, 0);
-            if (deltaX != 0) Native.mouse_event(Native.MOUSEEVENTF_HWHEEL, 0, 0, deltaX, 0);
+            if (deltaY != 0) {
+              if (Math.Abs(deltaY) >= 120) {
+                Native.mouse_event(Native.MOUSEEVENTF_WHEEL, 0, 0, -deltaY, 0);
+                wheelAccY = 0;
+              } else {
+                wheelAccY += deltaY;
+                if (Math.Abs(wheelAccY) >= 120) {
+                  int steps = wheelAccY / 120;
+                  Native.mouse_event(Native.MOUSEEVENTF_WHEEL, 0, 0, -steps * 120, 0);
+                  wheelAccY %= 120;
+                }
+              }
+            }
+            if (deltaX != 0) {
+              if (Math.Abs(deltaX) >= 120) {
+                Native.mouse_event(Native.MOUSEEVENTF_HWHEEL, 0, 0, deltaX, 0);
+                wheelAccX = 0;
+              } else {
+                wheelAccX += deltaX;
+                if (Math.Abs(wheelAccX) >= 120) {
+                  int steps = wheelAccX / 120;
+                  Native.mouse_event(Native.MOUSEEVENTF_HWHEEL, 0, 0, steps * 120, 0);
+                  wheelAccX %= 120;
+                }
+              }
+            }
           } finally {
             ReleaseModifiers(mods);
           }

@@ -296,7 +296,7 @@ async function findDownload(dir, name, since, signal) {
  */
 export function createBrowserTunnels({
   serverUrl, deviceToken, authorization, browser, downloadsDir = AIVIN_DOWNLOADS_DIR, say = () => {}, ensureBrowser = ensureAivinBrowser,
-  useDailyBrowser = true, findDaily = findDailyBrowser, createMux = createCdpMux, notify = showOSNotification,
+  useDailyBrowser = false, findDaily = findDailyBrowser, createMux = createCdpMux, notify = showOSNotification,
   groupTabs = true, createGrouper = createTabGrouper,
 }) {
   const live = new Map(); // tunnelId → { close, done, deliberate }

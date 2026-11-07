@@ -291,7 +291,7 @@ export async function startRemoteClient(options = {}) {
   ensureMemoryLoaded();
   watchMemoryDir();
   const fileIndex = multiUser ? null : createFileIndex(indexRootsFor(roots, fullAccess));
-  const useDailyBrowser = options.separateBrowser !== true;
+  const useDailyBrowser = options.dailyBrowser === true;
   const browserTunnels = browser ? createBrowserTunnels({ serverUrl, deviceToken: () => creds.device_token, browser, useDailyBrowser, say: (m) => say(chalk.cyan(m)) }) : null;
   // Tiến trình host riêng cho giao diện và cho Office COM (chỉ dựng khi lời gọi đầu tiên cần) — một lệnh COM treo / bị huỷ không làm mất snapshot giao diện.
   const guiHost = guiProfile ? createWindowsHost() : null;
@@ -981,6 +981,7 @@ export async function startRemoteClient(options = {}) {
     socket.on(DeviceEvent.DESKTOP_CAST_START, guarded(DeviceEvent.DESKTOP_CAST_START, async (payload) => {
     const sessionId = payload?.session_id;
     const viewerId = payload?.viewer_id;
+    const viewerDevice = payload?.viewer_device || payload?.viewerDevice || payload?.viewer_platform || payload?.viewerPlatform;
     if (!sessionId || !viewerId) return;
     // Chủ máy đã tạm dừng điều khiển từ xa → từ chối cả xem màn hình.
     if (isRemotePaused()) {
@@ -1022,7 +1023,7 @@ export async function startRemoteClient(options = {}) {
         rawPipe: true,
         onReady: (meta) => {
           say(chalk.cyan(`  🖥️  Đang có người xem + điều khiển màn hình máy này từ web (${meta.bounds?.width}x${meta.bounds?.height})`));
-          mascot.remoteView(true);
+          mascot.remoteView(true, { device: viewerDevice });
           emitCastStatus({ session_id: sessionId, state: CastState.READY, bounds: meta.bounds });
         },
         onError: (err) => {

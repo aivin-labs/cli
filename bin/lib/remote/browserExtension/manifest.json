@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "AIVIN Cast",
+  "version": "1.2.0",
+  "description": "Phát màn hình tab của panel Trình duyệt qua WebRTC — chỉ BE điều khiển qua CDP.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjbUEydjSbRzIhsATPPwRcb6/lN9nrg930Kiw9KvAZ8cWf7mdxP/p26uHVaS492iSjAYT4N3QZfxlbaxF7vdnJTBS5fs+yW085RzdVTtYFOwGwZp7ymhShZxQXC7p2RRja55Jukc4NrVuYFUMeJJBtgdJARGRDZqve2+3R6fsGzG8LMSr52xTNzTrA0MzQdp9xV6BXGXUf+MkMtKY8qwW7PqAkOyGIkZ/+4vc8EJafBklGXywQZZ1DZb6g+yDWMkxv0CjABTUnBegBfcChRjhtbw5Ro26K5RIaQ3fUuxtuPI4SEwNehXALAmmYXasdNXNkU/9L+SshMHPhBRgHpDiAQIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "alarms",
+    "debugger"
+  ],
+  "background": {
+    "service_worker": "cast-worker-2.js"
+  }
+}
