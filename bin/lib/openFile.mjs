@@ -40,6 +40,8 @@ const OPEN_TEXT = Object.freeze({
     [OpenFileError.NOT_LOGGED_IN]: 'Máy này chưa đăng nhập Aivin — mở Terminal và chạy: aivin login',
     [OpenFileError.UPLOAD_FAILED]: 'Tải "{name}" lên Drive không được: {reason}',
     opening: 'Đang mở "{name}" trên Aivin…',
+    uploading: 'Đang tải "{name}" lên Drive… ({percent}%)',
+    processing: 'Đang xử lý "{name}" và mở tài liệu…',
     failed_title: 'Không mở được bằng AIVIN Bot',
   },
   en: {
@@ -48,6 +50,8 @@ const OPEN_TEXT = Object.freeze({
     [OpenFileError.NOT_LOGGED_IN]: 'This computer is not signed in to Aivin — open a terminal and run: aivin login',
     [OpenFileError.UPLOAD_FAILED]: 'Could not upload "{name}" to Drive: {reason}',
     opening: 'Opening "{name}" in Aivin…',
+    uploading: 'Uploading "{name}" to Drive… ({percent}%)',
+    processing: 'Processing "{name}" and opening document…',
     failed_title: 'Could not open with AIVIN Bot',
   },
 });
@@ -118,13 +122,20 @@ async function driveFileExists(serverUrl, auth, { workspaceId, fileId }) {
   }
 }
 
-async function uploadToDrive(serverUrl, auth, { workspaceId, name, buffer }) {
+async function uploadToDrive(serverUrl, auth, { workspaceId, name, buffer }, onProgress) {
   const form = new FormData();
   form.append('file', new Blob([buffer]), name);
   try {
     const res = await axios.post(`${serverUrl}/fileshare/${encodeURIComponent(workspaceId)}/upload`, form, {
       ...auth, maxBodyLength: Infinity, maxContentLength: Infinity, timeout: 10 * 60_000,
+      onUploadProgress: (e) => {
+        if (e.total && onProgress) {
+          const percent = Math.min(100, Math.round((e.loaded * 100) / e.total));
+          onProgress(percent);
+        }
+      },
     });
+    if (onProgress) onProgress(100, 'processing');
     const id = res.data?.id || res.data?._id;
     if (!id) throw new Error('no file id in the upload response');
     return String(id);
@@ -147,7 +158,7 @@ async function findReusable(serverUrl, auth, { index, key }) {
 export function appWindowCommand(url, { defaultId = detectDefaultBrowserId(), resolve = resolveBrowserInstall } = {}) {
   const browser = LOCAL_BROWSERS.find((b) => b.id === defaultId);
   const install = browser ? resolve(browser) : null;
-  return install ? { exe: install.exe, args: [`--app=${url}`] } : null;
+  return install ? { exe: install.exe, args: ['--start-maximized', `--app=${url}`] } : null;
 }
 
 function openInWindow(url) {
@@ -171,7 +182,7 @@ async function resolveWebUrl(serverUrl) {
  * Tải (hoặc dùng lại) rồi mở. Trả `{ url, fileId, workspaceId, reused }`; lỗi → OpenFileFailure.
  * `display`: OpenDisplay — cửa sổ riêng (mặc định), tab thường, hoặc chỉ trả đường dẫn (--print).
  */
-export async function openLocalFile(filePath, { workspace, display: displayMode = OpenDisplay.WINDOW, indexFile = OPEN_INDEX_FILE } = {}) {
+export async function openLocalFile(filePath, { workspace, display: displayMode = OpenDisplay.WINDOW, indexFile = OPEN_INDEX_FILE, onProgress } = {}) {
   if (!process.env.API_KEY) throw new OpenFileFailure(OpenFileError.NOT_LOGGED_IN);
   const local = readLocalFile(filePath);
   const serverUrl = missionServerUrl();
@@ -183,7 +194,7 @@ export async function openLocalFile(filePath, { workspace, display: displayMode 
 
   const index = readOpenIndex(indexFile);
   const reusedId = await findReusable(serverUrl, auth, { index, key });
-  const fileId = reusedId || await uploadToDrive(serverUrl, auth, { workspaceId, name: local.name, buffer: local.buffer });
+  const fileId = reusedId || await uploadToDrive(serverUrl, auth, { workspaceId, name: local.name, buffer: local.buffer }, onProgress);
 
   index[key] = { file_id: fileId, workspace_id: workspaceId, name: local.name, path: local.abs, opened_at: new Date().toISOString() };
   try { writeOpenIndex(index, indexFile); } catch { /* chỉ mất lần dùng lại sau */ }

@@ -49,6 +49,7 @@ test('registry: ProgID trỏ Aivin.exe --open "%1", mỗi đuôi có Open with +
   assert.equal(openCommand(exe), `"${exe}" --open "%1"`);
   assert.ok(flat.some((l) => l.includes(`${OPEN_WITH_PROGID}\\shell\\open\\command`) && l.includes(openCommand(exe))));
   assert.ok(flat.some((l) => l.includes('.docx\\OpenWithProgids') && l.includes('REG_NONE')));
+  assert.ok(flat.some((l) => l.includes(`${OPEN_WITH_PROGID}\\shell\\open`) && l.includes('FriendlyAppName') && l.includes('AIVIN Office Suite')));
   assert.ok(flat.some((l) => l.includes('SystemFileAssociations\\.docx\\shell\\AivinOpen') && l.includes('Mở bằng AIVIN Office Suite')));
   assert.ok(cmds.every((c) => c[1].startsWith('HKCU\\')), 'chỉ ghi HKCU, không cần admin');
 });
@@ -131,7 +132,7 @@ test('dấu bộ khoá đổi khi đổi ngôn ngữ / chỗ Aivin.exe → daemo
 
 test('cửa sổ riêng chỉ dùng trình duyệt mặc định Chromium; Firefox / chưa rõ → null để mở tab thường', () => {
   const resolve = (b) => ({ id: b.id, exe: `C:\\${b.id}.exe` });
-  assert.deepEqual(appWindowCommand('https://a/drive?x=1', { defaultId: 'chrome', resolve }), { exe: 'C:\\chrome.exe', args: ['--app=https://a/drive?x=1'] });
+  assert.deepEqual(appWindowCommand('https://a/drive?x=1', { defaultId: 'chrome', resolve }), { exe: 'C:\\chrome.exe', args: ['--start-maximized', '--app=https://a/drive?x=1'] });
   assert.equal(appWindowCommand('https://a', { defaultId: null, resolve }), null);
   assert.equal(appWindowCommand('https://a', { defaultId: 'edge', resolve: () => null }), null);
 });

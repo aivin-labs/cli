@@ -74,7 +74,7 @@ export function associationRegCommands({ exe, lang = 'en', extensions = OPEN_WIT
     ['add', progId, '/ve', '/d', s.fileType, '/f'],
     ['add', progId, '/v', 'FriendlyTypeName', '/d', s.fileType, '/f'],
     ['add', `${progId}\\DefaultIcon`, '/ve', '/d', `"${exe}",0`, '/f'],
-    ['add', `${progId}\\shell\\open`, '/v', 'FriendlyAppName', '/d', s.openWith, '/f'],
+    ['add', `${progId}\\shell\\open`, '/v', 'FriendlyAppName', '/d', REGISTERED_APP_NAME, '/f'],
     ['add', `${progId}\\shell\\open\\command`, '/ve', '/d', openCommand(exe), '/f'],
     ['add', capabilities, '/v', 'ApplicationName', '/d', REGISTERED_APP_NAME, '/f'],
     ['add', capabilities, '/v', 'ApplicationDescription', '/d', s.shortcut, '/f'],

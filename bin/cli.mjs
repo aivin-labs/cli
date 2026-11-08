@@ -1185,9 +1185,26 @@ program
     const toast = process.env.AIVIN_OPEN_UI === 'toast';
     for (const file of files) {
       try {
-        if (toast) showOSNotification({ title: 'AIVIN Bot', body: openText('opening', { name: path.basename(file) }) });
+        const name = path.basename(file);
+        if (toast) showOSNotification({ title: 'AIVIN Bot', body: openText('opening', { name }) });
+        let lastReported = 0;
+        const onProgress = (percent, phase) => {
+          if (phase === 'processing') {
+            if (toast) showOSNotification({ title: 'AIVIN Bot', body: openText('processing', { name }) });
+            else process.stdout.write(`\r${chalk.cyan('⏳')} ${openText('processing', { name })}\n`);
+            return;
+          }
+          if (percent - lastReported >= 25 || percent === 100) {
+            lastReported = percent;
+            if (toast && (percent === 0 || percent === 50 || percent === 100)) {
+              showOSNotification({ title: 'AIVIN Bot', body: openText('uploading', { name, percent }) });
+            } else if (!toast) {
+              process.stdout.write(`\r${chalk.cyan('⬆')} ${openText('uploading', { name, percent })}`);
+            }
+          }
+        };
         const display = options.print ? OpenDisplay.NONE : options.tab ? OpenDisplay.TAB : OpenDisplay.WINDOW;
-        const res = await openFile(file, { workspace: options.workspace, display });
+        const res = await openFile(file, { workspace: options.workspace, display, onProgress });
         console.log(options.print ? res.url : chalk.green(`✅ ${res.name} → ${res.url}${res.reused ? ' (Drive copy reused)' : ''}${res.viewOnly ? ' (view only, not signed in - closes with its window)' : ''}`));
       } catch (error) {
         console.error(chalk.red('❌'), error.message);
