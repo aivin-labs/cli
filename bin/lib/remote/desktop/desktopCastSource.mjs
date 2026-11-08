@@ -978,8 +978,12 @@ namespace AivinDesktopCast {
               try {
                 byte[] bytes = Convert.FromBase64String(b64);
                 using (var ms = new System.IO.MemoryStream(bytes)) {
-                  using (var bmp = new System.Drawing.Bitmap(ms)) {
+                  using (var src = System.Drawing.Image.FromStream(ms)) {
                     var dataObj = new System.Windows.Forms.DataObject();
+                    var bmp = new System.Drawing.Bitmap(src.Width, src.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    using (var g = System.Drawing.Graphics.FromImage(bmp)) {
+                      g.DrawImage(src, 0, 0, src.Width, src.Height);
+                    }
                     dataObj.SetImage(bmp);
                     try {
                       string tempFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "aivin_paste_" + DateTime.Now.Ticks + ".png");
@@ -995,13 +999,14 @@ namespace AivinDesktopCast {
             });
             sta.SetApartmentState(ApartmentState.STA);
             sta.Start();
-            if (sta.Join(2500)) {
-              Thread.Sleep(40);
+            if (sta.Join(3000)) {
+              Thread.Sleep(60);
               Native.keybd_event(0x11, 0, 0, UIntPtr.Zero);
-              Thread.Sleep(10);
-              Native.keybd_event(0x56, 0, 0, UIntPtr.Zero);
               Thread.Sleep(20);
+              Native.keybd_event(0x56, 0, 0, UIntPtr.Zero);
+              Thread.Sleep(30);
               Native.keybd_event(0x56, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+              Thread.Sleep(15);
               Native.keybd_event(0x11, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
             }
           }
@@ -1025,10 +1030,12 @@ namespace AivinDesktopCast {
                 string ext = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
                 if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".gif" || ext == ".webp") {
                   try {
-                    using (var fs = new System.IO.FileStream(filePath, System.IO.FileMode.Open, System.IO.FileAccess.Read)) {
-                      using (var img = System.Drawing.Image.FromStream(fs)) {
-                        dataObj.SetImage(new System.Drawing.Bitmap(img));
+                    using (var src = System.Drawing.Image.FromFile(filePath)) {
+                      var bmp = new System.Drawing.Bitmap(src.Width, src.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                      using (var g = System.Drawing.Graphics.FromImage(bmp)) {
+                        g.DrawImage(src, 0, 0, src.Width, src.Height);
                       }
+                      dataObj.SetImage(bmp);
                     }
                   } catch { }
                 }
@@ -1037,13 +1044,14 @@ namespace AivinDesktopCast {
             });
             sta.SetApartmentState(ApartmentState.STA);
             sta.Start();
-            if (sta.Join(2500)) {
-              Thread.Sleep(40);
+            if (sta.Join(3000)) {
+              Thread.Sleep(60);
               Native.keybd_event(0x11, 0, 0, UIntPtr.Zero);
-              Thread.Sleep(10);
-              Native.keybd_event(0x56, 0, 0, UIntPtr.Zero);
               Thread.Sleep(20);
+              Native.keybd_event(0x56, 0, 0, UIntPtr.Zero);
+              Thread.Sleep(30);
               Native.keybd_event(0x56, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+              Thread.Sleep(15);
               Native.keybd_event(0x11, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
             }
           }

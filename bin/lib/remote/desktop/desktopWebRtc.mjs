@@ -8,7 +8,7 @@
 const MAX_BUFFERED_BYTES = 512 * 1024;
 /** Kênh thao tác chuột / phím người xem → máy: tin cậy + đúng thứ tự (nhả chuột không được đến trước nhấn), đi thẳng peer-to-peer. */
 export const INPUT_CHANNEL = 'aivin-desktop-input';
-const MAX_INPUT_MESSAGE_BYTES = 128 * 1024;
+const MAX_INPUT_MESSAGE_BYTES = 25 * 1024 * 1024;
 /** Kênh tệp người xem kéo thả / dán vào màn hình (castFileDrop.mjs): tin cậy + đúng thứ tự, tách khỏi kênh thao tác để tệp lớn không làm trễ chuột. */
 export const FILE_CHANNEL = 'aivin-desktop-files';
 const MAX_FILE_CHUNK_BYTES = 256 * 1024;
