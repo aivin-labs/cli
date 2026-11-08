@@ -201,7 +201,18 @@ export function createCastFileDrop({
     // Ổ không phải NTFS không có luồng phụ: bỏ qua, tệp vẫn nhận xong.
     if (process.platform === 'win32') await fs.promises.writeFile(`${dest}:Zone.Identifier`, ZONE_IDENTIFIER).catch(() => undefined);
     reply(viewerId, { t: 'saved', id: active.id, name: path.basename(dest), path: dest });
-    onSaved({ viewerId, path: dest, name: path.basename(dest), bytes: active.size, reveal: msg.reveal === true });
+    onSaved({
+      viewerId,
+      path: dest,
+      name: path.basename(dest),
+      bytes: active.size,
+      reveal: msg.reveal === true && !msg.paste,
+      paste: msg.paste === true,
+      x: msg.x,
+      y: msg.y,
+      rx: msg.rx,
+      ry: msg.ry,
+    });
   }
 
   function message(viewerId, msg) {

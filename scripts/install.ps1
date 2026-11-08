@@ -32,6 +32,80 @@ function Write-Step($text) { Write-Host "  $text" -ForegroundColor Cyan }
 # user's PowerShell window; the outer try/catch below swallows this marker exception instead of dumping an error record.
 function Fail($text) { Write-Host "  $text" -ForegroundColor Red; throw [System.OperationCanceledException]::new($text) }
 
+function Download-FileWithProgress {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Uri,
+        [Parameter(Mandatory = $true)] [string]$OutFile,
+        [string]$Label = 'Downloading'
+    )
+
+    $req = [System.Net.HttpWebRequest]::Create($Uri)
+    $req.Method = 'GET'
+    $req.UserAgent = 'Aivin-Installer'
+    $req.Timeout = 120000
+
+    $res = $req.GetResponse()
+    $totalBytes = $res.ContentLength
+    $stream = $res.GetResponseStream()
+    $fileStream = [System.IO.File]::Create($OutFile)
+
+    $buffer = New-Object byte[] 65536
+    $receivedBytes = 0
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastUpdate = 0
+    $frames = @('|', '/', '-', '\')
+    $frameIdx = 0
+    $isRedirected = $false
+    try { $isRedirected = [Console]::IsOutputRedirected } catch { }
+
+    try {
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $fileStream.Write($buffer, 0, $read)
+            $receivedBytes += $read
+
+            if ($sw.ElapsedMilliseconds - $lastUpdate -ge 80) {
+                $lastUpdate = $sw.ElapsedMilliseconds
+                $frameIdx = ($frameIdx + 1) % $frames.Length
+                $spinner = $frames[$frameIdx]
+
+                if ($totalBytes -gt 0) {
+                    $pct = [Math]::Min(100, [Math]::Floor(($receivedBytes / $totalBytes) * 100))
+                    $mbRecv = [Math]::Round($receivedBytes / 1MB, 1)
+                    $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
+                    $speed = if ($sw.Elapsed.TotalSeconds -gt 0) { [Math]::Round(($receivedBytes / 1MB) / $sw.Elapsed.TotalSeconds, 1) } else { 0 }
+
+                    $barWidth = 20
+                    $filled = [Math]::Min($barWidth, [Math]::Floor(($pct / 100) * $barWidth))
+                    $bar = ('=' * $filled)
+                    if ($filled -lt $barWidth) {
+                        $bar = $bar + '>' + (' ' * ($barWidth - $filled - 1))
+                    }
+                    if (-not $isRedirected) {
+                        Write-Host -NoNewline ("`r  $spinner $Label [$bar] $pct% ($mbRecv / $mbTotal MB, $speed MB/s)".PadRight(75))
+                    }
+                } else {
+                    $mbRecv = [Math]::Round($receivedBytes / 1MB, 1)
+                    if (-not $isRedirected) {
+                        Write-Host -NoNewline ("`r  $spinner $Label ($mbRecv MB) ...".PadRight(75))
+                    }
+                }
+            }
+        }
+    } finally {
+        $fileStream.Dispose()
+        $stream.Dispose()
+        $res.Dispose()
+    }
+
+    $totalMb = [Math]::Round($receivedBytes / 1MB, 1)
+    $finalBar = '=' * 20
+    if (-not $isRedirected) {
+        Write-Host ("`r  [+] $Label [$finalBar] 100% ($totalMb MB)".PadRight(75)) -ForegroundColor Green
+    } else {
+        Write-Host "  [+] $Label ($totalMb MB) completed." -ForegroundColor Green
+    }
+}
+
 function Select-InstallMode {
     $mode = @{ Autostart = ($env:AIVIN_NO_AUTOSTART -ne '1'); OpenPlatform = ($env:AIVIN_OPEN_PLATFORM -ne '0') }
     # Explicit environment settings and pairing-code installs are suitable for scripts/one-line setup.
@@ -79,14 +153,13 @@ function Install-AivinCli {
 
     Write-Host ''
     Write-Host '  Aivin - installing the computer connector' -ForegroundColor White
-    Write-Step "Downloading $asset ..."
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ('aivin-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
         $gz = Join-Path $tmp "$asset.gz"
         $exe = Join-Path $tmp $asset
         $sums = Join-Path $tmp 'SHA256SUMS'
-        try { Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset.gz" -OutFile $gz }
+        try { Download-FileWithProgress -Uri "$base/$asset.gz" -OutFile $gz -Label "Downloading $asset" }
         catch { Fail "Could not download $asset from $base - check the network, or this platform may not be published yet. ($($_.Exception.Message))" }
         try { Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS" -OutFile $sums }
         catch { Fail "Could not download the checksum list from $base. ($($_.Exception.Message))" }
@@ -104,7 +177,33 @@ function Install-AivinCli {
             $out = [IO.File]::Create($exe)
             try {
                 $unzip = New-Object IO.Compression.GZipStream($in, [IO.Compression.CompressionMode]::Decompress)
-                try { $unzip.CopyTo($out) } finally { $unzip.Dispose() }
+                try {
+                    $buf = New-Object byte[] 65536
+                    $decompressed = 0
+                    $swZip = [System.Diagnostics.Stopwatch]::StartNew()
+                    $lastZip = 0
+                    $zipFrames = @('|', '/', '-', '\')
+                    $zIdx = 0
+                    $isRedir = $false
+                    try { $isRedir = [Console]::IsOutputRedirected } catch { }
+                    while (($r = $unzip.Read($buf, 0, $buf.Length)) -gt 0) {
+                        $out.Write($buf, 0, $r)
+                        $decompressed += $r
+                        if ($swZip.ElapsedMilliseconds - $lastZip -ge 80) {
+                            $lastZip = $swZip.ElapsedMilliseconds
+                            $zIdx = ($zIdx + 1) % $zipFrames.Length
+                            $mb = [Math]::Round($decompressed / 1MB, 1)
+                            if (-not $isRedir) {
+                                Write-Host -NoNewline ("`r  $($zipFrames[$zIdx]) Extracting $asset ($mb MB) ...".PadRight(75))
+                            }
+                        }
+                    }
+                    if (-not $isRedir) {
+                        Write-Host ("`r  [+] Extracted $asset ($([Math]::Round($decompressed / 1MB, 1)) MB)".PadRight(75)) -ForegroundColor Green
+                    } else {
+                        Write-Host "  [+] Extracted $asset ($([Math]::Round($decompressed / 1MB, 1)) MB)" -ForegroundColor Green
+                    }
+                } finally { $unzip.Dispose() }
             } finally { $out.Dispose() }
         } finally { $in.Dispose() }
 

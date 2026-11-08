@@ -955,6 +955,90 @@ namespace AivinDesktopCast {
               TypeUnicode(text);
             }
           }
+        } else if (action == "paste_image") {
+          string b64 = cmd.ContainsKey("data") ? Convert.ToString(cmd["data"]) : "";
+          if (!string.IsNullOrEmpty(b64)) {
+            if (cmd.ContainsKey("click") && Convert.ToBoolean(cmd["click"])) {
+              Native.SetCursorPos(targetX, targetY);
+              Thread.Sleep(20);
+              Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+              Thread.Sleep(15);
+              Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+              Thread.Sleep(35);
+            }
+            var sta = new Thread(() => {
+              try {
+                byte[] bytes = Convert.FromBase64String(b64);
+                using (var ms = new System.IO.MemoryStream(bytes)) {
+                  using (var bmp = new System.Drawing.Bitmap(ms)) {
+                    var dataObj = new System.Windows.Forms.DataObject();
+                    dataObj.SetImage(bmp);
+                    try {
+                      string tempFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "aivin_paste_" + DateTime.Now.Ticks + ".png");
+                      bmp.Save(tempFile, System.Drawing.Imaging.ImageFormat.Png);
+                      var sc = new System.Collections.Specialized.StringCollection();
+                      sc.Add(tempFile);
+                      dataObj.SetFileDropList(sc);
+                    } catch { }
+                    System.Windows.Forms.Clipboard.SetDataObject(dataObj, true);
+                  }
+                }
+              } catch { }
+            });
+            sta.SetApartmentState(ApartmentState.STA);
+            sta.Start();
+            if (sta.Join(2500)) {
+              Thread.Sleep(40);
+              Native.keybd_event(0x11, 0, 0, UIntPtr.Zero);
+              Thread.Sleep(10);
+              Native.keybd_event(0x56, 0, 0, UIntPtr.Zero);
+              Thread.Sleep(20);
+              Native.keybd_event(0x56, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+              Native.keybd_event(0x11, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            }
+          }
+        } else if (action == "paste_file") {
+          string filePath = cmd.ContainsKey("path") ? Convert.ToString(cmd["path"]) : "";
+          if (!string.IsNullOrEmpty(filePath) && System.IO.File.Exists(filePath)) {
+            if (cmd.ContainsKey("click") && Convert.ToBoolean(cmd["click"])) {
+              Native.SetCursorPos(targetX, targetY);
+              Thread.Sleep(20);
+              Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+              Thread.Sleep(15);
+              Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+              Thread.Sleep(35);
+            }
+            var sta = new Thread(() => {
+              try {
+                var dataObj = new System.Windows.Forms.DataObject();
+                var sc = new System.Collections.Specialized.StringCollection();
+                sc.Add(filePath);
+                dataObj.SetFileDropList(sc);
+                string ext = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
+                if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".gif" || ext == ".webp") {
+                  try {
+                    using (var fs = new System.IO.FileStream(filePath, System.IO.FileMode.Open, System.IO.FileAccess.Read)) {
+                      using (var img = System.Drawing.Image.FromStream(fs)) {
+                        dataObj.SetImage(new System.Drawing.Bitmap(img));
+                      }
+                    }
+                  } catch { }
+                }
+                System.Windows.Forms.Clipboard.SetDataObject(dataObj, true);
+              } catch { }
+            });
+            sta.SetApartmentState(ApartmentState.STA);
+            sta.Start();
+            if (sta.Join(2500)) {
+              Thread.Sleep(40);
+              Native.keybd_event(0x11, 0, 0, UIntPtr.Zero);
+              Thread.Sleep(10);
+              Native.keybd_event(0x56, 0, 0, UIntPtr.Zero);
+              Thread.Sleep(20);
+              Native.keybd_event(0x56, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+              Native.keybd_event(0x11, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            }
+          }
         } else if (action == "key") {
           string key = cmd.ContainsKey("key") ? Convert.ToString(cmd["key"]) : "";
           HandleSpecialKey(key);

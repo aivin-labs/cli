@@ -354,6 +354,8 @@ namespace AivinDesktop {
     static readonly string LogoFile = Path.Combine(Program.Home, "desktop", "logo.png");
     static readonly string StateFile = Path.Combine(Program.Home, "desktop", "tray-state.txt");
     static readonly string LogFile = Path.Combine(Program.Home, "remote-service.log");
+    static readonly string CastSessionFile = Path.Combine(Program.Home, "desktop-cast-session.json");
+    static readonly string CastActionFile = Path.Combine(Program.Home, "desktop-cast-action.json");
     static readonly object logLock = new object();
 
     /** Nhật ký chung với macOS / Linux: đầu ra của daemon + lúc khay chạy / thấy daemon thoát. Quá 5 MB thì đổi sang .1. */
@@ -376,7 +378,8 @@ namespace AivinDesktop {
     NotifyIcon tray;
     Icon colorIcon, greyIcon, shownIcon;
     ToolStripMenuItem status, updateItem, open, connectCodeItem, quickChat, quickVoice, pause, startup, mascot, terminal, quit, serverMenu, serverCloud, serverVn, serverLocal;
-    ToolStripSeparator quickSeparator;
+    ToolStripSeparator quickSeparator, stopCastSeparator;
+    ToolStripMenuItem stopCastItem;
     System.Windows.Forms.Timer timer;
     Control invoker;
     EventWaitHandle openEvent, quitEvent;
@@ -441,6 +444,11 @@ namespace AivinDesktop {
       status.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
 
       quit = Item(cfg.T("quit"), delegate { Quit(); });
+      stopCastItem = Item("", delegate { DisconnectAndBlockCast(); });
+      stopCastItem.ForeColor = Color.FromArgb(210, 45, 45);
+      stopCastItem.Visible = false;
+      stopCastSeparator = new ToolStripSeparator();
+      stopCastSeparator.Visible = false;
 
       menu.Items.AddRange(new ToolStripItem[] {
         open,
@@ -456,6 +464,8 @@ namespace AivinDesktop {
         startup,
         updateItem,
         status,
+        stopCastSeparator,
+        stopCastItem,
         new ToolStripSeparator(),
         quit
       });
@@ -780,6 +790,57 @@ namespace AivinDesktop {
       quickVoice.ShortcutKeyDisplayString = HotkeyLabel(hotkeys, "voice");
       // WinForms không tính đủ chỗ cho cột phím tắt khi menu tự vẽ chữ: tự giữ bề rộng tối thiểu để phím không bị cắt / đè lên tên mục.
       quickChat.Owner.MinimumSize = new Size(Math.Max(ShortcutRowWidth(quickChat), ShortcutRowWidth(quickVoice)), 0);
+
+      // Kiểm tra có thiết bị đang cast màn hình không
+      string castDevice = null;
+      try {
+        if (File.Exists(CastSessionFile)) {
+          string castTxt = File.ReadAllText(CastSessionFile);
+          if (Regex.IsMatch(castTxt, "\"active\"\\s*:\\s*true")) {
+            Match mDev = Regex.Match(castTxt, "\"viewer_device\"\\s*:\\s*\"([^\"]+)\"");
+            if (mDev.Success && !string.IsNullOrEmpty(mDev.Groups[1].Value)) {
+              castDevice = mDev.Groups[1].Value;
+            } else {
+              Match mId = Regex.Match(castTxt, "\"viewer_id\"\\s*:\\s*\"([^\"]+)\"");
+              castDevice = mId.Success ? mId.Groups[1].Value : "Remote device";
+            }
+          }
+        }
+      } catch { }
+
+      if (!string.IsNullOrEmpty(castDevice)) {
+        string tpl = cfg.T("stopCast");
+        if (string.IsNullOrEmpty(tpl)) tpl = "Disconnect cast ({device})";
+        stopCastItem.Text = "⏹  " + tpl.Replace("{device}", castDevice);
+        stopCastItem.Visible = true;
+        stopCastSeparator.Visible = true;
+      } else {
+        stopCastItem.Visible = false;
+        stopCastSeparator.Visible = false;
+      }
+    }
+
+    void DisconnectAndBlockCast() {
+      try {
+        string castTxt = File.Exists(CastSessionFile) ? File.ReadAllText(CastSessionFile) : "";
+        string viewerId = "";
+        string viewerDevice = "";
+        Match mId = Regex.Match(castTxt, "\"viewer_id\"\\s*:\\s*\"([^\"]+)\"");
+        if (mId.Success) viewerId = mId.Groups[1].Value;
+        Match mDev = Regex.Match(castTxt, "\"viewer_device\"\\s*:\\s*\"([^\"]+)\"");
+        if (mDev.Success) viewerDevice = mDev.Groups[1].Value;
+
+        string actionJson = "{\"action\":\"stop_and_block\",\"viewer_id\":\"" + viewerId + "\",\"viewer_device\":\"" + viewerDevice + "\",\"requested_at\":\"" + DateTime.UtcNow.ToString("o") + "\"}\r\n";
+        File.WriteAllText(CastActionFile, actionJson, new UTF8Encoding(false));
+
+        stopCastItem.Visible = false;
+        stopCastSeparator.Visible = false;
+
+        string devName = !string.IsNullOrEmpty(viewerDevice) ? viewerDevice : viewerId;
+        string msg = cfg.T("castDisconnected");
+        if (string.IsNullOrEmpty(msg)) msg = "Disconnected cast from {device}.";
+        Balloon(msg.Replace("{device}", devName), ToolTipIcon.Info);
+      } catch { }
     }
 
     static int ShortcutRowWidth(ToolStripMenuItem item) {

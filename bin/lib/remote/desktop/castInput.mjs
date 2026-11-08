@@ -4,7 +4,10 @@
  * giao diện, hoặc gửi quá dồn. Thao tác qua kênh WebRTC cũng đi qua đây.
  */
 
-export const CAST_INPUT_ACTIONS = Object.freeze(['move', 'click', 'dblclick', 'rightclick', 'mousedown', 'mouseup', 'scroll', 'type', 'paste', 'clipboard', 'key', 'hotkey']);
+export const CAST_INPUT_ACTIONS = Object.freeze([
+  'move', 'click', 'dblclick', 'rightclick', 'mousedown', 'mouseup', 'scroll', 'type', 'paste', 'clipboard', 'key', 'hotkey',
+  'paste_image', 'paste_file'
+]);
 
 export const CastInputRejection = Object.freeze({
   INVALID: 'invalid',
@@ -57,6 +60,19 @@ export function sanitizeCastInput(raw, maxTypeChars = 2000) {
   if (keys) cmd.keys = keys;
   const modifiers = shortStrings(raw.modifiers, 4);
   if (modifiers) cmd.modifiers = modifiers;
+  if (action === 'paste_image') {
+    if (typeof raw.data !== 'string' || !raw.data) return null;
+    cmd.data = raw.data.slice(0, 25_000_000); // Tối đa ~18MB ảnh base64
+    if (typeof raw.mime === 'string') cmd.mime = raw.mime.slice(0, 64);
+    if (raw.click) cmd.click = true;
+    return cmd;
+  }
+  if (action === 'paste_file') {
+    if (typeof raw.path !== 'string' || !raw.path) return null;
+    cmd.path = raw.path;
+    if (raw.click) cmd.click = true;
+    return cmd;
+  }
   if ((action === 'type' || action === 'paste' || action === 'clipboard') && !cmd.text) return null;
   if (action === 'key' && !cmd.key) return null;
   if (action === 'hotkey' && !cmd.keys) return null;

@@ -49,6 +49,9 @@ import { createDesktopWebRtcWorker } from './desktop/webrtcWorker.mjs';
 import { CastInputRejection, createCastInputGate } from './desktop/castInput.mjs';
 import { createCastFileDrop, FileDropReason, revealInExplorer } from './desktop/castFileDrop.mjs';
 import {
+  askCastConsent, blockViewer, checkCastAction, clearCastSession, isViewerBlocked, recordCastSession, unblockViewer,
+} from './desktop/castAuth.mjs';
+import {
   BootAction, MAX_BOOTS_BEFORE_ROLLBACK, RESTART_EXIT_CODE, UPDATE_CONFIRM_AFTER_MS, UPDATE_ROLLED_BACK, checkBootAfterUpdate, cleanupRetired, clearStaleInstalledMarker,
   confirmUpdate, ingestSupervisorRollback, isStandaloneBinary, noteCleanExit, updateProfile,
 } from '../selfUpdate.mjs';
@@ -459,11 +462,22 @@ export async function startRemoteClient(options = {}) {
   const castFileDrop = createCastFileDrop({
     reply: (viewerId, msg) => desktopWebRtc.replyFile(viewerId, msg),
     checkAllowed: () => (isRemotePaused() ? FileDropReason.PAUSED : aiGuiBusy > 0 ? FileDropReason.AI_ACTIVE : null),
-    onSaved: ({ path: file, name, bytes, reveal }) => {
+    onSaved: ({ path: file, name, bytes, reveal, paste, x, y, rx, ry }) => {
       say(chalk.cyan(`  📥 Đã nhận tệp từ web: ${file}`));
       logActivity({ type: 'desktop_cast_file', id: desktopCast.sessionId(), name, bytes });
-      // Không mở cửa sổ đè lên giữa lúc AI đang bấm.
-      if (reveal && aiGuiBusy === 0) revealInExplorer(file);
+      if (paste) {
+        desktopCast.sendInput({
+          action: 'paste_file',
+          path: file,
+          x,
+          y,
+          rx,
+          ry,
+          click: Number.isFinite(x) && Number.isFinite(y),
+        });
+      } else if (reveal && aiGuiBusy === 0) {
+        revealInExplorer(file);
+      }
     },
   });
   // WebRTC chạy ở tiến trình con (thư viện native sập lúc thoát — xem webrtcWorker.mjs), daemon chỉ chuyển tín hiệu / thao tác / JPEG.
@@ -491,6 +505,7 @@ export async function startRemoteClient(options = {}) {
   };
   /** Dừng hẳn phiên trên máy (tạm dừng / mất kết nối / tắt daemon); `notify` = báo BE kết thúc phiên. */
   const stopDesktopCast = (reason, notify = true) => {
+    clearCastSession();
     const sessionId = desktopCast.sessionId();
     clearTimeout(castDisconnectTimer);
     castDisconnectTimer = null;
@@ -505,6 +520,17 @@ export async function startRemoteClient(options = {}) {
   };
   let mascotChat = null;
   let castDisconnectTimer = null;
+  const castActionTimer = setInterval(() => {
+    const action = checkCastAction();
+    if (action && action.action === 'stop_and_block') {
+      const viewerId = action.viewer_id;
+      const viewerDevice = action.viewer_device;
+      blockViewer({ viewerId, viewerDevice });
+      say(chalk.yellow(`  ⏹  Người dùng đã ngắt kết nối và chặn cast từ: ${viewerDevice || viewerId}`));
+      stopDesktopCast('user_revoked');
+    }
+  }, 1000);
+  castActionTimer.unref?.();
 
   say(chalk.blue('💻 Aivin Device Agent — máy này nhận việc từ agent của bạn'));
   say(chalk.gray(`   Máy:        ${creds.name} (${creds.device_id})`));
@@ -995,6 +1021,17 @@ export async function startRemoteClient(options = {}) {
       emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.REFUSED, reason: 'paused' });
       return;
     }
+    if (isViewerBlocked({ viewerId, viewerDevice })) {
+      say(chalk.yellow(`  ⚠️  Thiết bị "${viewerDevice || viewerId}" đang yêu cầu xem màn hình sau khi bị ngắt kết nối. Đang mở hộp thoại xác thực...`));
+      const allowed = await askCastConsent({ viewerDevice: viewerDevice || 'Thiết bị từ xa', timeoutSec: 30 });
+      if (!allowed) {
+        say(chalk.red(`  ✕  Người dùng đã từ chối yêu cầu xem màn hình từ: ${viewerDevice || viewerId}`));
+        emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.REFUSED, reason: 'rejected_by_user' });
+        return;
+      }
+      say(chalk.green(`  ✓  Người dùng đã cho phép thiết bị "${viewerDevice || viewerId}" xem màn hình`));
+      unblockViewer({ viewerId, viewerDevice });
+    }
     const castConfig = {
       max_fps: payload?.max_fps || 15,
       max_width: payload?.max_width || 1366,
@@ -1036,6 +1073,7 @@ export async function startRemoteClient(options = {}) {
         onReady: (meta) => {
           say(chalk.cyan(`  🖥️  Đang có người xem + điều khiển màn hình máy này từ web (${meta.bounds?.width}x${meta.bounds?.height})`));
           mascot.remoteView(true, { device: viewerDevice });
+          recordCastSession({ active: true, sessionId, viewerId, viewerDevice });
           emitCastStatus({ session_id: sessionId, state: CastState.READY, bounds: meta.bounds });
         },
         onError: (err) => {
@@ -1044,6 +1082,7 @@ export async function startRemoteClient(options = {}) {
         onStop: () => {
           say(chalk.gray('  ⏹  Đã ngừng xem màn hình từ web'));
           mascot.remoteView(false);
+          clearCastSession();
         },
       });
       if (!started) return;

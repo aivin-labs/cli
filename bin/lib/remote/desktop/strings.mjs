@@ -47,6 +47,8 @@ export const TRAY_STRINGS = Object.freeze({
     workHere: 'Làm việc ở đây với AIVIN Bot',
     uninstallPrompt: 'Gỡ AIVIN Bot khỏi máy này?\n\nỨng dụng, lệnh aivin và kết nối của máy với tài khoản sẽ bị xoá.\nCó xoá luôn dữ liệu (ghi nhớ của bot, bản sao tệp để hoàn tác, phiên đăng nhập trình duyệt)? Xoá rồi không lấy lại được.\n\nYes = gỡ và xoá dữ liệu\nNo = gỡ, giữ dữ liệu\nCancel = không gỡ',
     uninstallFailed: 'Không gỡ tự động được. Mở Terminal và chạy: aivin uninstall',
+    stopCast: 'Ngưng kết nối cast ({device})',
+    castDisconnected: 'Đã ngưng kết nối từ {device}. Thiết bị này sẽ cần xác nhận nếu muốn kết nối lại.',
     fileType: 'Tài liệu mở bằng AIVIN Office Suite',
   },
   en: {
@@ -96,6 +98,8 @@ export const TRAY_STRINGS = Object.freeze({
     workHere: 'Work here with AIVIN Bot',
     uninstallPrompt: 'Remove AIVIN Bot from this computer?\n\nThe app, the aivin command and this computer\'s connection to your account will be removed.\nAlso delete your data (the bot\'s memory, file copies kept for undo, browser sign-ins)? This cannot be undone.\n\nYes = remove and delete data\nNo = remove, keep data\nCancel = do not remove',
     uninstallFailed: 'Could not remove it automatically. Open a terminal and run: aivin uninstall',
+    stopCast: 'Disconnect cast from {device}',
+    castDisconnected: 'Disconnected cast from {device}. Future casts will require confirmation.',
     fileType: 'Document opened with AIVIN Office Suite',
   },
 });
