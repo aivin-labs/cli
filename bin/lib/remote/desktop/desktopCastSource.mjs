@@ -910,6 +910,10 @@ namespace AivinDesktopCast {
               if (Math.Abs(deltaY) >= 120) {
                 Native.mouse_event(Native.MOUSEEVENTF_WHEEL, 0, 0, -deltaY, 0);
                 wheelAccY = 0;
+              } else if (Math.Abs(deltaY) >= 70) {
+                int sign = deltaY > 0 ? 1 : -1;
+                Native.mouse_event(Native.MOUSEEVENTF_WHEEL, 0, 0, -sign * 120, 0);
+                wheelAccY = 0;
               } else {
                 wheelAccY += deltaY;
                 if (Math.Abs(wheelAccY) >= 120) {
@@ -922,6 +926,10 @@ namespace AivinDesktopCast {
             if (deltaX != 0) {
               if (Math.Abs(deltaX) >= 120) {
                 Native.mouse_event(Native.MOUSEEVENTF_HWHEEL, 0, 0, deltaX, 0);
+                wheelAccX = 0;
+              } else if (Math.Abs(deltaX) >= 70) {
+                int sign = deltaX > 0 ? 1 : -1;
+                Native.mouse_event(Native.MOUSEEVENTF_HWHEEL, 0, 0, sign * 120, 0);
                 wheelAccX = 0;
               } else {
                 wheelAccX += deltaX;
