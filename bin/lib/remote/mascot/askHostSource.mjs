@@ -41,6 +41,11 @@ const CHOICE_INK = '#3B4256';
 const CHOICE_HOVER = '#0F1E1B4B';
 /** Viền chấm tròn / ô vuông đầu mỗi lựa chọn (chưa tích). */
 const CHOICE_MARK = '#9AA1B2';
+/**
+ * Bề rộng nội dung nút lựa chọn / nút link. Trong ô hỏi (240) nút rộng 213, còn 207 khi thanh cuộn hiện; trừ lề trong 10 + 10 còn 187. Rộng hơn
+ * thì mép phải bị cắt — đúng chỗ icon (05/11/2026: 192 làm mất nửa icon khi hội thoại đủ dài để cuộn).
+ */
+export const CHOICE_ROW_WIDTH = 186;
 /** Nút mở link: icon Lucide + màu đậm cùng tông với nền nút (`CHOICE_CARDS[2]`, xanh trời). */
 const LINK_ICON_PATH = lucidePath('external-link');
 /** Nút x trên chip tệp đính kèm. */
@@ -295,8 +300,8 @@ function TypingDots {
 }
 # Link buttons under a bubble (the answer's "open this page" buttons, "view on Aivin"): a click opens the browser, nothing goes to the agent.
 function LinkCard($text, $url, $iconPath = '${LINK_ICON_PATH}') {
-  $dock = New-Object Windows.Controls.DockPanel; $dock.MaxWidth = 192
-  $icon = LucideIcon $(if ($iconPath) { $iconPath } else { '${LINK_ICON_PATH}' }) 13 '${ICON_INKS[2]}'; $icon.Margin = '8,3,0,0'; $icon.VerticalAlignment = 'Top'; [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$dock.Children.Add($icon)
+  $dock = New-Object Windows.Controls.DockPanel; $dock.MaxWidth = ${CHOICE_ROW_WIDTH}
+  $icon = LucideIcon $(if ($iconPath) { $iconPath } else { '${LINK_ICON_PATH}' }) 13 '${ICON_INKS[2]}'; $icon.Margin = '8,2,0,0'; $icon.VerticalAlignment = 'Top'; [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$dock.Children.Add($icon)
   $tb = New-Object Windows.Controls.TextBlock; $tb.TextWrapping = 'Wrap'; $tb.Foreground = Brush '${CHOICE_INK}'; SetText $tb $text; [void]$dock.Children.Add($tb)
   $btn = New-Object Windows.Controls.Button; $btn.Style = $w.FindResource('Btn'); $btn.Content = $dock; $btn.CommandParameter = [string]$url; $btn.ToolTip = [string]$url
   $btn.FontSize = 13; $btn.FontWeight = 'Normal'; $btn.Padding = '10,6,10,6'; $btn.Margin = '0,0,0,3'; $btn.HorizontalAlignment = 'Left'
@@ -376,8 +381,9 @@ function ChatRow($m) {
 # unticks, a confirm button sends the ticked ones), the text, the option's icon at the end when it has one we can draw.
 # Soft look: each card filled with a light pastel (cycling the ask box's glow colors), no border, dark-grey text; hover deepens it.
 # Icon at the end of an option: the daemon looks up the Lucide name (the set Aivin's web uses) and sends its outline; an emoji is drawn as is.
+# Top margin 2 centres it on the first line of text (17 high), so it stays level with the tick mark.
 function ChoiceIcon($o, $ink) {
-  if ($o.icon_path) { $i = LucideIcon $o.icon_path 14 $ink; $i.Margin = '8,3,0,0'; $i.VerticalAlignment = 'Top'; return $i }
+  if ($o.icon_path) { $i = LucideIcon $o.icon_path 14 $ink; $i.Margin = '8,2,0,0'; $i.VerticalAlignment = 'Top'; return $i }
   if (-not $o.icon) { return $null }
   $tb = New-Object Windows.Controls.TextBlock; $tb.FontSize = 13; $tb.Margin = '8,1,0,0'; $tb.VerticalAlignment = 'Top'; SetText $tb $o.icon; $tb
 }
@@ -406,7 +412,7 @@ function ChoiceButtons($options, $multiple) {
   foreach ($o in @($options)) {
     if (-not $o) { continue }
     $c = $cards[$k % $cards.Count]; $k++; $id = [string]$o.id
-    $row = New-Object Windows.Controls.DockPanel; $row.Width = 192
+    $row = New-Object Windows.Controls.DockPanel; $row.Width = ${CHOICE_ROW_WIDTH}
     $mark = ChoiceMark $multi; [Windows.Controls.DockPanel]::SetDock($mark, 'Left'); [void]$row.Children.Add($mark)
     $icon = ChoiceIcon $o $inks[($k - 1) % $inks.Count]; if ($icon) { [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$row.Children.Add($icon) }
     $tb = New-Object Windows.Controls.TextBlock; SetText $tb $o.text; $tb.TextWrapping = 'Wrap'; $tb.Foreground = Brush '${CHOICE_INK}'; [void]$row.Children.Add($tb)
