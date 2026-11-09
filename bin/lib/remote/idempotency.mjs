@@ -5,7 +5,8 @@ import { DeviceErrorCode } from './constants.mjs';
 /**
  * Chống làm trùng (28/10/2026): BE gắn `idem_key` cho mỗi bước có tác dụng (theo nhiệm vụ + lượt + bước + tham số). BE khởi động lại giữa
  * chừng → agentic chạy tiếp → lô bước dở được gửi lại: bước đã làm (hoặc đang làm) trả lại đúng kết quả cũ thay vì ghi / gửi / chạy lần hai.
- * Bước hỏng thì quên khoá — lần sau được chạy lại.
+ * Bước hỏng thì quên khoá — lần sau được chạy lại; trừ khi bị dừng GIỮA CHỪNG (hết giờ / huỷ sau khi đã bắt đầu, `ran` của scheduler) → lần
+ * gửi lại nhận `INTERRUPTED` thay vì làm lần hai.
  *
  * Sổ trên đĩa (29/10/2026, `file`): daemon khởi động lại (sập, máy khởi động lại, tự cập nhật) vẫn nhớ. Bước xong → trả kết quả cũ; bước
  * ĐANG chạy lúc daemon chết → `INTERRUPTED` (không biết đã làm tới đâu — không tự làm lần hai, Planner kiểm lại rồi mới làm).
@@ -31,6 +32,17 @@ function keptOutcome(outcome) {
 const interruptedOutcome = () => ({
   ok: false,
   error: 'This step had already started on this device when the Aivin agent restarted — it may have partly run. Check its effect before doing it again.',
+  error_code: DeviceErrorCode.INTERRUPTED,
+  duration_ms: 0,
+});
+
+/** Bước bị dừng giữa chừng (hết giờ / huỷ / tạm dừng) SAU khi đã bắt đầu: có thể đã làm một phần — lần gửi lại không chạy mù lần hai. */
+const STOPPED_MIDWAY = new Set([DeviceErrorCode.CALL_TIMEOUT, DeviceErrorCode.CANCELLED]);
+export const stoppedMidway = (outcome) => !outcome?.ok && outcome?.ran === true && STOPPED_MIDWAY.has(outcome.error_code);
+
+const stoppedOutcome = (outcome) => ({
+  ok: false,
+  error: `This step was stopped after it had started on this device (${outcome.error_code === DeviceErrorCode.CALL_TIMEOUT ? 'timed out' : 'cancelled'}) — it may have partly run. Check its effect before doing it again.`,
   error_code: DeviceErrorCode.INTERRUPTED,
   duration_ms: 0,
 });
@@ -151,7 +163,12 @@ export function createIdempotentRunner(run, isReadOnly, { onDuplicate, now = () 
     const rawPromise = run(call, ...rest, ...(deferStart ? [{ started }] : []));
     const promise = rawPromise.then(async (r) => {
       if (r.outcome.ok) await log?.done(key, r.outcome);
-      else { seen.delete(key); await log?.failed(key); }
+      else if (stoppedMidway(r.outcome)) {
+        // Lần này trả đúng lỗi gốc; lần gửi lại cùng khoá nhận INTERRUPTED (như bước đang chạy lúc daemon chết).
+        const kept = stoppedOutcome(r.outcome);
+        seen.set(key, { promise: Promise.resolve({ tool: r.tool, outcome: kept }), at: t });
+        await log?.done(key, kept);
+      } else { seen.delete(key); await log?.failed(key); }
       return r;
     }, async (err) => {
       seen.delete(key);

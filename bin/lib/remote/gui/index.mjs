@@ -6,6 +6,7 @@ import { DeviceToolError, resolveInRoots } from '../sandbox.mjs';
 import { showOSNotification } from '../notify.mjs';
 import { PS_UTF8_PREFIX } from '../processes.mjs';
 import { createWindowsHost } from './windowsHost.mjs';
+import { isProtectedPromptWindow } from '../humanInput.mjs';
 
 /**
  * Tầng điều khiển giao diện (28/10/2026, đợt 1: Windows). Nhìn cửa sổ bằng cây trợ năng của hệ điều hành (UI Automation) + ảnh khi cây
@@ -73,6 +74,10 @@ const normalizeProcess = (name) => String(name || '').toLowerCase().replace(/\.e
 
 /** Ứng dụng này có được điều khiển không — ném lỗi nếu bị chặn. */
 export function assertWindowAllowed(windowInfo, { fullAccess }) {
+  // Hộp xác nhận / đồng ý của chính Aivin: chỉ người ở máy trả lời — AI bấm "Cho phép" là tự duyệt việc của mình (humanInput.mjs).
+  if (isProtectedPromptWindow(windowInfo?.title)) {
+    throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, 'This is an Aivin confirmation box — only the person at this computer can answer it');
+  }
   const proc = normalizeProcess(windowInfo?.process);
   if (!proc) return;
   if (BLOCKED_PROCESSES.has(proc)) throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, `Controlling "${windowInfo.process}" is not allowed on this device`);
@@ -201,7 +206,7 @@ export function createGuiController({
 
   async function windows(args, ctx) {
     const list = await host.call('windows', { all: !!args.include_dialogs }, ctx);
-    return { windows: list.map((w) => ({ ...w, blocked: BLOCKED_PROCESSES.has(normalizeProcess(w.process)) || (!fullAccess && SHELL_PROCESSES.has(normalizeProcess(w.process))) || undefined })) };
+    return { windows: list.map((w) => ({ ...w, blocked: BLOCKED_PROCESSES.has(normalizeProcess(w.process)) || (!fullAccess && SHELL_PROCESSES.has(normalizeProcess(w.process))) || isProtectedPromptWindow(w.title) || undefined })) };
   }
 
   /**

@@ -29,8 +29,11 @@ test('tệp hành động hỏng (khay cũ gặp dấu ngoặc kép trong tên):
 });
 
 test('lệnh ngắt: không có phiên thì báo, có phiên thì gửi', () => {
-  assert.equal(requestCastStop(), false);
+  assert.equal(requestCastStop({ daemonAlive: () => true }), false);
   fs.writeFileSync(CAST_SESSION_FILE, '{}');
-  assert.equal(requestCastStop(), true);
+  // Tệp phiên sót lại mà daemon không chạy: không có ai để ngắt.
+  assert.equal(requestCastStop({ daemonAlive: () => false }), false);
+  fs.writeFileSync(CAST_SESSION_FILE, '{}');
+  assert.equal(requestCastStop({ daemonAlive: () => true }), true);
   assert.equal(checkCastAction().action, 'stop_and_block');
 });

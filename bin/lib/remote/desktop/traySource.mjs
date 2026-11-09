@@ -791,10 +791,10 @@ namespace AivinDesktop {
       // WinForms không tính đủ chỗ cho cột phím tắt khi menu tự vẽ chữ: tự giữ bề rộng tối thiểu để phím không bị cắt / đè lên tên mục.
       quickChat.Owner.MinimumSize = new Size(Math.Max(ShortcutRowWidth(quickChat), ShortcutRowWidth(quickVoice)), 0);
 
-      // Kiểm tra có thiết bị đang cast màn hình không
+      // Kiểm tra có thiết bị đang cast màn hình không — chỉ khi daemon còn chạy (tệp phiên có thể sót lại sau khi daemon chết).
       string castDevice = null;
       try {
-        if (File.Exists(CastSessionFile)) {
+        if (running && File.Exists(CastSessionFile)) {
           string castTxt = File.ReadAllText(CastSessionFile);
           if (Regex.IsMatch(castTxt, "\"active\"\\s*:\\s*true")) {
             Match mDev = Regex.Match(castTxt, "\"viewer_device\"\\s*:\\s*\"([^\"]+)\"");
@@ -822,6 +822,13 @@ namespace AivinDesktop {
 
     void DisconnectAndBlockCast() {
       try {
+        // Daemon không chạy: không còn phiên nào để ngắt — dọn tệp phiên sót, không báo "đã ngắt" sai sự thật.
+        if (!Running()) {
+          try { File.Delete(CastSessionFile); } catch { }
+          stopCastItem.Visible = false;
+          stopCastSeparator.Visible = false;
+          return;
+        }
         string castTxt = File.Exists(CastSessionFile) ? File.ReadAllText(CastSessionFile) : "";
         string viewerId = "";
         string viewerDevice = "";

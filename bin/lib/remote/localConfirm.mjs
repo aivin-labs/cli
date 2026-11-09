@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import readline from 'readline';
 import { AIVIN_BRAND, AIVIN_LOGO_PNG_BASE64 } from './brand.mjs';
+import { CONFIRM_WINDOW_TITLE, HUMAN_GUARD_PS, humanGuardEnv } from './humanInput.mjs';
 
 /**
  * Hộp "Cho phép / Từ chối" NGAY TRÊN MÁY cho việc sàn luật tại máy đòi xác nhận (localPolicy.mjs). BE không trả lời thay được: chỉ người
@@ -14,7 +15,7 @@ import { AIVIN_BRAND, AIVIN_LOGO_PNG_BASE64 } from './brand.mjs';
 /** `CANCELLED`: lời gọi bị huỷ (BE huỷ / hết giờ, tạm dừng, daemon dừng) trong lúc hộp đang chờ hoặc còn xếp hàng — hộp đóng, việc không chạy. */
 export const ConfirmResult = Object.freeze({ ALLOW: 'allow', REJECT: 'reject', TIMEOUT: 'timeout', UNAVAILABLE: 'unavailable', CANCELLED: 'cancelled' });
 
-const TITLE = 'Aivin — xác nhận trên máy này';
+const TITLE = CONFIRM_WINDOW_TITLE;
 const HEADING = 'Agent Aivin xin chạy một việc trên máy này';
 const ALLOW_LABEL = 'Cho phép';
 const REJECT_LABEL = 'Từ chối';
@@ -73,6 +74,20 @@ const WINDOWS_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xam
  <Window.Resources>
   ${buttonStyle('Btn', 10)}
   ${buttonStyle('IconBtn', 8)}
+  <Style TargetType="ScrollBar">
+   <Setter Property="Width" Value="5"/>
+   <Setter Property="MinWidth" Value="5"/>
+   <Setter Property="Template"><Setter.Value>
+    <ControlTemplate TargetType="ScrollBar">
+     <Track x:Name="PART_Track" IsDirectionReversed="True">
+      <Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType="Thumb">
+       <Border x:Name="ThumbBar" CornerRadius="2.5" Background="#D5D8DE" Margin="0,1"/>
+       <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ThumbBar" Property="Background" Value="#9EA4AF"/></Trigger></ControlTemplate.Triggers>
+      </ControlTemplate></Thumb.Template></Thumb></Track.Thumb>
+     </Track>
+    </ControlTemplate>
+   </Setter.Value></Setter>
+  </Style>
   ${cardMotion('In', 1, 1, 180, 'EaseOut')}
   ${cardMotion('Out', 0, 0.97, 120, 'EaseIn')}
  </Window.Resources>
@@ -95,15 +110,15 @@ const WINDOWS_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xam
    <TextBlock x:Name="DetailLabel" Margin="0,16,0,6" FontSize="12" Foreground="${B.muted}"/>
    <Border CornerRadius="10" Background="#F4F6FA" BorderBrush="#E8ECF3" BorderThickness="1" Padding="14,11">
     <ScrollViewer MaxHeight="150" VerticalScrollBarVisibility="Auto">
-     <TextBlock x:Name="Detail" FontFamily="Cascadia Mono, Consolas" FontSize="13" Foreground="${B.ink}" TextWrapping="Wrap"/>
+     <TextBlock x:Name="Detail" Margin="0,0,8,0" FontFamily="Cascadia Mono, Consolas" FontSize="13" Foreground="${B.ink}" TextWrapping="Wrap"/>
     </ScrollViewer>
    </Border>
-   <DockPanel Margin="0,24,0,0" LastChildFill="False">
-    <TextBlock x:Name="Countdown" VerticalAlignment="Center" FontSize="12" Foreground="${B.muted}"/>
+   <DockPanel Margin="0,24,0,0" LastChildFill="True">
     <Button x:Name="Allow" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0" Margin="10,0,0,0"
             Background="${B.brand}" Foreground="White" BorderThickness="0" Tag="#26000000"/>
     <Button x:Name="Reject" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0"
             Background="White" Foreground="${B.ink}" BorderBrush="#C9CDD4" BorderThickness="1" Tag="#0F000000" IsCancel="True" IsDefault="True"/>
+    <TextBlock x:Name="Countdown" VerticalAlignment="Center" Margin="0,0,12,0" FontSize="12" Foreground="${B.muted}" TextWrapping="Wrap"/>
    </DockPanel>
   </StackPanel>
  </Border>
@@ -113,6 +128,8 @@ const WINDOWS_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xam
 const WINDOWS_SCRIPT = [
   'Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase',
   'function D($n) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Environment]::GetEnvironmentVariable($n))) }',
+  // Chỉ nhận "Cho phép" từ thao tác thật (humanInput.mjs) — AI không tự bấm được bằng UI Automation / SendInput.
+  ...HUMAN_GUARD_PS,
   "$w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml](D 'AIVIN_C_XAML'))))",
   "$w.Title = D 'AIVIN_C_TITLE'",
   "foreach ($n in 'Sub', 'Heading', 'Reason', 'Purpose', 'DetailLabel', 'Detail') { $w.FindName($n).Text = D ('AIVIN_C_' + $n.ToUpper()) }",
@@ -124,12 +141,12 @@ const WINDOWS_SCRIPT = [
   '$tm = New-Object Windows.Threading.DispatcherTimer; $tm.Interval = [TimeSpan]::FromSeconds(1)',
   // Đóng có hiệu ứng: chạy storyboard "Out" rồi mới đóng cửa sổ; bấm liên tiếp chỉ tính lần đầu.
   "function Finish($r) { if ($script:closing) { return }; $script:closing = $true; $script:result = $r; $tm.Stop(); $sb = $w.FindResource('Out').Clone(); $sb.Add_Completed({ $w.Close() }); $sb.Begin($card) }",
-  "$w.FindName('Allow').Add_Click({ Finish 'Yes' })",
+  "$w.FindName('Allow').Add_Click({ if (Test-Human) { Finish 'Yes' } else { $script:hintLeft = 3; $cd.Text = $script:hint } })",
   "$w.FindName('Reject').Add_Click({ Finish 'No' }); $w.FindName('Close').Add_Click({ Finish 'No' })",
   "$w.FindName('Head').Add_MouseLeftButtonDown({ $w.DragMove() })",
   "$script:left = [int]$env:AIVIN_C_SECONDS; $fmt = D 'AIVIN_C_COUNTDOWN'; $cd = $w.FindName('Countdown'); $cd.Text = $fmt -f $script:left",
-  "$tm.Add_Tick({ $script:left--; $cd.Text = $fmt -f $script:left; if ($script:left -le 0) { Finish 'Timeout' } })",
-  "$w.Add_ContentRendered({ $w.FindResource('In').Begin($card); $w.Activate(); [void]$w.FindName('Reject').Focus(); $tm.Start() })",
+  "$tm.Add_Tick({ $script:left--; if ($script:hintLeft -gt 0) { $script:hintLeft--; $cd.Text = $script:hint } else { $cd.Text = $fmt -f $script:left }; if ($script:left -le 0) { Finish 'Timeout' } })",
+  "$w.Add_ContentRendered({ Install-Guard $w; $w.FindResource('In').Begin($card); $w.Activate(); [void]$w.FindName('Reject').Focus(); $tm.Start() })",
   '[void]$w.ShowDialog(); $tm.Stop(); $script:result',
 ].join('\n');
 
@@ -153,6 +170,8 @@ export function confirmCommand({ request, timeoutSec, platform = process.platfor
         AIVIN_C_DETAILLABEL: b64('SẼ THỰC HIỆN'), AIVIN_C_DETAIL: b64(request.detail),
         AIVIN_C_ALLOW: b64(`_${ALLOW_LABEL}`), AIVIN_C_REJECT: b64(`_${REJECT_LABEL}`),
         AIVIN_C_COUNTDOWN: b64('Tự từ chối sau {0} giây'), AIVIN_C_SECONDS: String(timeoutSec),
+        // `trustTag`: phiên điều khiển màn hình chủ máy đã bấm đồng ý → thao tác từ phiên đó cũng duyệt được (humanInput.mjs).
+        ...humanGuardEnv(request.trustTag),
       },
       parse: (out, code) => (code !== 0 ? ConfirmResult.UNAVAILABLE : /\bYes\b/.test(out) ? ConfirmResult.ALLOW
         : /\bTimeout\b/.test(out) ? ConfirmResult.TIMEOUT : ConfirmResult.REJECT),

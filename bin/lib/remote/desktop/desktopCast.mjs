@@ -21,6 +21,9 @@ function hostFiles(dir = CAST_DIR) {
   return { src, ps1, dll: path.join(dir, `cast-${hash}.dll`) };
 }
 
+/** Chờ tiến trình quay tự thoát sau "stop" (nhả phím / nút, thả pipe) trước khi giết. */
+export const STOP_GRACE_MS = 3000;
+
 const RAW_HEADER_BYTES = 12;
 const MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024;
 
@@ -149,6 +152,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     onSecureDesktop,
     onCapture,
     rawPipe = false,
+    inputTag = null,
     onReady,
     onError,
     onStop,
@@ -171,6 +175,8 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       quality,
       monitor,
       ...(pipeName ? { pipe: pipeName } : {}),
+      // Dấu bí mật của phiên trên thao tác bơm vào (humanInput.mjs) — chuỗi để không mất chính xác qua JSON.
+      ...(Number.isSafeInteger(inputTag) && inputTag > 0 ? { input_tag: String(inputTag) } : {}),
     });
 
     const child = spawnImpl('powershell.exe', [
@@ -190,6 +196,8 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       windowsHide: true,
     });
 
+    // Ghi vào stdin lúc tiến trình đang thoát (ống đã đóng) báo lỗi bất đồng bộ — không để thành lỗi không ai bắt.
+    child.stdin?.on?.('error', () => {});
     let rl = readline.createInterface({ input: child.stdout });
     let packetSeq = 0;
 
@@ -318,22 +326,31 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       try { child.stdin.write(JSON.stringify({ op: 'refresh' }) + '\n'); } catch { /* đang đóng */ }
     }
 
+    /**
+     * Dừng: gửi "stop" (tiến trình bỏ thao tác còn xếp hàng, nhả phím / nút đang giữ rồi tự thoát). Chỉ giết khi quá `STOP_GRACE_MS` — giết
+     * sớm (trước đây 500 ms) giữa lúc kéo thả / tổ hợp phím là nút chuột, Ctrl / Shift kẹt xuống trên máy (TerminateProcess bỏ qua `finally`).
+     */
+    let killTimer = null;
+    child.on('close', () => clearTimeout(killTimer));
     function stop() {
       if (activeSession === session) activeSession = null;
+      if (killTimer) return;
       try {
         if (child.stdin && !child.stdin.destroyed) {
           child.stdin.write('stop\n');
+          child.stdin.end();
         }
       } catch {
         // bỏ qua
       }
-      setTimeout(() => {
+      killTimer = setTimeout(() => {
         try {
           child.kill();
         } catch {
           // bỏ qua
         }
-      }, 500);
+      }, STOP_GRACE_MS);
+      killTimer.unref?.();
     }
 
     const session = {

@@ -14,11 +14,15 @@ const START_DELAY_MS = 5_000;
 /** Rảnh bấy nhiêu lâu rồi mới thả cờ (lô bước kế thường tới ngay sau). */
 const IDLE_RELEASE_MS = 60_000;
 
-const WINDOWS_SCRIPT = [
+/**
+ * ES_CONTINUOUS | ES_SYSTEM_REQUIRED (2147483649): chặn ngủ do rảnh, KHÔNG giữ màn hình sáng. `display` (phiên xem + điều khiển màn hình từ xa,
+ * 09/11/2026): thêm ES_DISPLAY_REQUIRED (2147483651) — người xem chỉ nhìn không thao tác thì màn hình không tắt / không khoá giữa phiên
+ * (màn hình khoá là secure desktop: từ xa không mở lại được).
+ */
+const windowsScript = (display) => [
   "$sig = '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint esFlags);'",
   "$k = Add-Type -MemberDefinition $sig -Name AivinAwake -Namespace Aivin -PassThru",
-  // ES_CONTINUOUS | ES_SYSTEM_REQUIRED: chặn ngủ do rảnh, KHÔNG giữ màn hình sáng.
-  '[void]$k::SetThreadExecutionState([uint32]2147483649)',
+  `[void]$k::SetThreadExecutionState([uint32]${display ? 2147483651 : 2147483649})`,
   '[void][Console]::In.ReadToEnd()',
 ].join('; ');
 
@@ -27,9 +31,9 @@ function hasLinuxInhibit() {
 }
 
 /** Lệnh giữ máy thức theo hệ điều hành — `null` khi không có cách nào. */
-export function keepAwakeCommand(platform = process.platform, { pid = process.pid, linuxInhibit = hasLinuxInhibit } = {}) {
-  if (platform === 'win32') return { cmd: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', WINDOWS_SCRIPT] };
-  if (platform === 'darwin') return { cmd: 'caffeinate', args: ['-i', '-w', String(pid)] };
+export function keepAwakeCommand(platform = process.platform, { pid = process.pid, linuxInhibit = hasLinuxInhibit, display = false } = {}) {
+  if (platform === 'win32') return { cmd: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', windowsScript(display)] };
+  if (platform === 'darwin') return { cmd: 'caffeinate', args: [...(display ? ['-d'] : []), '-i', '-w', String(pid)] };
   if (platform === 'linux' && linuxInhibit()) {
     return { cmd: 'systemd-inhibit', args: ['--what=idle:sleep', '--who=Aivin', '--why=Aivin agent is working on this computer', '--mode=block', 'cat'] };
   }
@@ -40,8 +44,10 @@ export function keepAwakeCommand(platform = process.platform, { pid = process.pi
  * `hold(reason)` / `release(reason)` đếm theo lý do (mỗi lời gọi đang chạy một lần, tiến trình nền một lần). Bận liên tục quá
  * `startDelayMs` → bật; hết bận `idleMs` → tắt.
  */
-export function createKeepAwake({ enabled = true, platform = process.platform, spawnImpl = spawn, startDelayMs = START_DELAY_MS, idleMs = IDLE_RELEASE_MS, say } = {}) {
-  const command = enabled ? keepAwakeCommand(platform) : null;
+export function createKeepAwake({
+  enabled = true, platform = process.platform, spawnImpl = spawn, startDelayMs = START_DELAY_MS, idleMs = IDLE_RELEASE_MS, display = false, say,
+} = {}) {
+  const command = enabled ? keepAwakeCommand(platform, { display }) : null;
   let holds = 0;
   let child = null;
   let startTimer = null;
@@ -54,7 +60,7 @@ export function createKeepAwake({ enabled = true, platform = process.platform, s
       child = spawnImpl(command.cmd, command.args, { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
       child.on('error', () => { child = null; });
       child.on('exit', () => { child = null; });
-      say?.('☕ Đang có việc — giữ máy không tự ngủ');
+      say?.(display ? '☕ Đang có người xem màn hình từ xa — giữ màn hình sáng' : '☕ Đang có việc — giữ máy không tự ngủ');
     } catch {
       child = null;
     }

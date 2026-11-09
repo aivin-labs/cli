@@ -4,6 +4,8 @@ import { spawn } from 'child_process';
 import { REMOTE_CONFIG_DIR } from '../constants.mjs';
 import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
 import { CastConsentDecision } from './castConsent.mjs';
+import { lockHolder } from '../daemonLock.mjs';
+import { CAST_CONSENT_WINDOW_TITLE, HUMAN_GUARD_PS, humanGuardEnv } from '../humanInput.mjs';
 
 export const CAST_SESSION_FILE = path.join(REMOTE_CONFIG_DIR, 'desktop-cast-session.json');
 export const CAST_ACTION_FILE = path.join(REMOTE_CONFIG_DIR, 'desktop-cast-action.json');
@@ -55,6 +57,8 @@ export function recordCastSession({ active = true, sessionId = '', viewerId = ''
     fs.mkdirSync(path.dirname(CAST_SESSION_FILE), { recursive: true });
     const payload = {
       active: !!active,
+      // Daemon đang giữ phiên: khay / `aivin remote disconnect` biết tệp còn sót sau khi daemon chết (không còn ai để ngắt).
+      pid: process.pid,
       session_id: sessionId,
       viewer_id: viewerId,
       viewer_device: viewerDevice,
@@ -96,15 +100,22 @@ export function checkCastAction() {
   }
 }
 
-/** Gửi yêu cầu ngắt từ dòng lệnh, cùng đường với nút ở khay. Trả về `false` nếu không có phiên nào đang chạy. */
-export function requestCastStop() {
+/**
+ * Gửi yêu cầu ngắt từ dòng lệnh, cùng đường với nút ở khay. Trả về `false` nếu không có phiên nào đang chạy — kể cả khi tệp phiên còn sót lại
+ * sau khi daemon chết (dọn luôn, không báo "đã ngắt" cho một phiên không tồn tại).
+ */
+export function requestCastStop({ daemonAlive = () => lockHolder() !== null } = {}) {
   if (!fs.existsSync(CAST_SESSION_FILE)) return false;
+  if (!daemonAlive()) {
+    clearCastSession();
+    return false;
+  }
   fs.mkdirSync(path.dirname(CAST_ACTION_FILE), { recursive: true });
   fs.writeFileSync(CAST_ACTION_FILE, JSON.stringify(CAST_STOP_ACTION), 'utf8');
   return true;
 }
 
-const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+export const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
   Width="500" SizeToContent="Height" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="NoResize"
   Topmost="True" ShowInTaskbar="True" WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" UseLayoutRounding="True">
  <Window.Resources>
@@ -147,12 +158,12 @@ const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xam
       <TextBlock Text="Thiết bị này đang gửi yêu cầu xem màn hình và thao tác chuột, bàn phím trên máy tính của bạn." Margin="0,6,0,0" FontSize="12.5" Foreground="#4B5563" TextWrapping="Wrap"/>
     </StackPanel>
    </Border>
-   <DockPanel Margin="0,22,0,0" LastChildFill="False">
-    <TextBlock x:Name="Countdown" VerticalAlignment="Center" FontSize="12" Foreground="#6B7280"/>
+   <DockPanel Margin="0,22,0,0" LastChildFill="True">
     <Button x:Name="Allow" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0" Margin="10,0,0,0"
             Background="#4E46E5" Foreground="White" BorderThickness="0" Content="_Cho phép"/>
     <Button x:Name="Reject" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0"
             Background="White" Foreground="#111827" BorderBrush="#C9CDD4" BorderThickness="1" Content="_Từ chối" IsCancel="True" IsDefault="True"/>
+    <TextBlock x:Name="Countdown" VerticalAlignment="Center" Margin="0,0,12,0" FontSize="12" Foreground="#6B7280" TextWrapping="Wrap"/>
    </DockPanel>
   </StackPanel>
  </Border>
@@ -161,6 +172,8 @@ const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xam
 const CONSENT_SCRIPT = [
   'Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase',
   'function D($n) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Environment]::GetEnvironmentVariable($n))) }',
+  // Đồng ý cho xem màn hình chỉ từ phím / chuột thật trên máy — không nhận cả thao tác từ phiên điều khiển từ xa khác (humanInput.mjs).
+  ...HUMAN_GUARD_PS,
   "$w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml](D 'AIVIN_CAST_XAML'))))",
   "$w.Title = D 'AIVIN_CAST_TITLE'",
   "$w.FindName('DeviceText').Text = D 'AIVIN_CAST_DEVICE'",
@@ -170,12 +183,12 @@ const CONSENT_SCRIPT = [
   "$script:result = 'No'; $script:closing = $false",
   '$tm = New-Object Windows.Threading.DispatcherTimer; $tm.Interval = [TimeSpan]::FromSeconds(1)',
   "function Finish($r) { if ($script:closing) { return }; $script:closing = $true; $script:result = $r; $tm.Stop(); $w.Close() }",
-  "$w.FindName('Allow').Add_Click({ Finish 'Yes' })",
+  "$w.FindName('Allow').Add_Click({ if (Test-Human) { Finish 'Yes' } else { $script:hintLeft = 3; $cd.Text = $script:hint } })",
   "$w.FindName('Reject').Add_Click({ Finish 'No' }); $w.FindName('Close').Add_Click({ Finish 'No' })",
   "$w.FindName('Head').Add_MouseLeftButtonDown({ $w.DragMove() })",
   "$script:left = [int]$env:AIVIN_CAST_SECONDS; $fmt = D 'AIVIN_CAST_COUNTDOWN'; $cd = $w.FindName('Countdown'); $cd.Text = $fmt -f $script:left",
-  "$tm.Add_Tick({ $script:left--; $cd.Text = $fmt -f $script:left; if ($script:left -le 0) { Finish 'Timeout' } })",
-  "$w.Add_ContentRendered({ $w.Activate(); [void]$w.FindName('Reject').Focus(); $tm.Start() })",
+  "$tm.Add_Tick({ $script:left--; if ($script:hintLeft -gt 0) { $script:hintLeft--; $cd.Text = $script:hint } else { $cd.Text = $fmt -f $script:left }; if ($script:left -le 0) { Finish 'Timeout' } })",
+  "$w.Add_ContentRendered({ Install-Guard $w; $w.Activate(); [void]$w.FindName('Reject').Focus(); $tm.Start() })",
   '[void]$w.ShowDialog(); $tm.Stop(); $script:result',
 ].join('\n');
 
@@ -201,11 +214,12 @@ export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutS
       ...process.env,
       AIVIN_CAST_XAML: b64(CONSENT_XAML),
       AIVIN_CAST_LOGO: AIVIN_LOGO_PNG_BASE64,
-      AIVIN_CAST_TITLE: b64('Aivin — Xác nhận chia sẻ màn hình'),
+      AIVIN_CAST_TITLE: b64(CAST_CONSENT_WINDOW_TITLE),
       AIVIN_CAST_DEVICE: b64(`Thiết bị yêu cầu: ${viewerDevice}`),
       AIVIN_CAST_COUNTDOWN: b64('Tự từ chối sau {0} giây'),
       AIVIN_CAST_SECONDS: String(timeoutSec),
       AIVIN_CAST_WARN: repeatedAfterBlock ? '1' : '0',
+      ...humanGuardEnv(null),
     };
 
     let child = null;

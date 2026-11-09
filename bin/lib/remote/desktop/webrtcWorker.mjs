@@ -187,6 +187,9 @@ export function createDesktopWebRtcWorker({
 
   function closeAll() {
     peers.clear();
+    // Phiên dừng lúc có người xem đang dựng WebRTC: trả "không dựng được" ngay, không để nơi gọi chờ đủ 30 s rồi báo trạng thái cho phiên đã chết.
+    for (const done of waiting.values()) done(false);
+    waiting.clear();
     if (!child) return;
     const proc = child;
     send({ t: 'closeAll' });

@@ -35,9 +35,28 @@ using System.Windows.Forms;
 namespace AivinDesktopCast {
   static class Native {
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, ushort bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll", EntryPoint = "mouse_event")] static extern void mouse_event_native(uint dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll", EntryPoint = "keybd_event")] static extern void keybd_event_native(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    // Dấu của phiên (humanInput.mjs): mọi thao tác tiến trình này bơm vào mang tag bí mật trong dwExtraInfo — hộp xác nhận của Aivin nhận ra
+    // thao tác của người đang điều khiển từ xa (đã được chủ máy đồng ý), phân biệt với SendInput / UI Automation của AI. Tham số dwExtraInfo
+    // của nơi gọi bị bỏ qua, luôn dùng tag.
+    public static UIntPtr InputTag = UIntPtr.Zero;
+    public static void mouse_event(uint dwFlags, int dx, int dy, int dwData, int dwExtraInfo) { mouse_event_native(dwFlags, dx, dy, dwData, InputTag); }
+    public static void keybd_event(byte bVk, ushort bScan, uint dwFlags, UIntPtr dwExtraInfo) { keybd_event_native(bVk, (byte)bScan, dwFlags, InputTag); }
+
+    /**
+     * Per-monitor v2 (Win10 1703+) → per-monitor (8.1) → system aware. Chỉ system aware thì máy nhiều màn hình khác tỷ lệ phóng (100 % + 150 %)
+     * bị Windows ảo hoá toạ độ ở màn hình phụ: ảnh chụp / con trỏ / click lệch nhau.
+     */
+    public static void UsePerMonitorDpi() {
+      try { if (SetProcessDpiAwarenessContext(new IntPtr(-4))) return; } catch { }
+      try { if (SetProcessDpiAwareness(2) == 0) return; } catch { }
+      try { SetProcessDPIAware(); } catch { }
+    }
     [DllImport("user32.dll")] public static extern short VkKeyScan(char ch);
     [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint code, uint mapType);
 
@@ -307,14 +326,14 @@ namespace AivinDesktopCast {
       Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
       try {
         var waited = System.Diagnostics.Stopwatch.StartNew();
-        while (!window.Started && waited.ElapsedMilliseconds < START_WAIT_MS) Thread.Sleep(10);
+        while (!window.Started && waited.ElapsedMilliseconds < START_WAIT_MS && CastHost.Running) Thread.Sleep(10);
         if (!window.Started) return;
         Thread.Sleep(80);
-        for (int i = 1; i <= MOVE_STEPS; i++) {
+        for (int i = 1; i <= MOVE_STEPS && CastHost.Running; i++) {
           Native.SetCursorPos(fromX + (toX - fromX) * i / MOVE_STEPS, fromY + (toY - fromY) * i / MOVE_STEPS);
           Thread.Sleep(MOVE_STEP_MS);
         }
-        for (int i = 0; i < HOVER_TICKS; i++) {
+        for (int i = 0; i < HOVER_TICKS && CastHost.Running; i++) {
           Native.SetCursorPos(toX + (i % 2 == 0 ? 1 : 0), toY);
           Thread.Sleep(HOVER_TICK_MS);
         }
@@ -742,9 +761,11 @@ namespace AivinDesktopCast {
     static long lastScreensMs = -SCREENS_REFRESH_MS;
 
     public static void Run(string argsJson) {
-      Native.SetProcessDPIAware();
+      Native.UsePerMonitorDpi();
       Native.timeBeginPeriod(1);
       var a = Out.Parse(argsJson);
+      long inputTag;
+      if (a.ContainsKey("input_tag") && long.TryParse(Convert.ToString(a["input_tag"]), out inputTag) && inputTag > 0 && inputTag <= 0xFFFFFFFFL) Native.InputTag = new UIntPtr((ulong)inputTag);
       currentMonitor = a.ContainsKey("monitor") ? Convert.ToInt32(a["monitor"]) : -1;
       targetMaxFps = a.ContainsKey("max_fps") ? Convert.ToInt32(a["max_fps"]) : 15;
       if (targetMaxFps < 1) targetMaxFps = 1;
@@ -763,6 +784,9 @@ namespace AivinDesktopCast {
       var inputThread = new Thread(ReadInputLoop);
       inputThread.IsBackground = true;
       inputThread.Start();
+      inputExecutor = new Thread(ExecuteInputLoop);
+      inputExecutor.IsBackground = true;
+      inputExecutor.Start();
 
       var readyMsg = Out.Msg("ready");
       readyMsg["monitor"] = currentMonitor;
@@ -849,6 +873,8 @@ namespace AivinDesktopCast {
         else if (!source.UsingDxgi) Thread.Sleep(1);
       }
       source.Dispose();
+      StopInput();
+      try { if (inputExecutor != null) inputExecutor.Join(2000); } catch { }
 
       var stoppedMsg = Out.Msg("stopped");
       Out.Send(stoppedMsg);
@@ -889,28 +915,50 @@ namespace AivinDesktopCast {
       Out.Send(frameMsg);
     }
 
+    /**
+     * Đọc lệnh từ stdin trên một luồng, thực thi trên luồng khác (ExecuteInputLoop). Trước đây đọc + thực thi chung một luồng: lệnh "stop"
+     * nằm sau các thao tác còn xếp hàng (một lần kéo thả, gõ dài…) nên chúng vẫn chạy hết sau khi chủ máy bấm ngắt. Nay đọc thấy "stop" (hoặc
+     * stdin đóng — daemon chết) là dừng ngay, bỏ phần còn xếp hàng.
+     */
+    static readonly Queue<Dictionary<string, object>> inputQueue = new Queue<Dictionary<string, object>>();
+    static Thread inputExecutor;
+
+    static void StopInput() {
+      running = false;
+      lock (inputQueue) { inputQueue.Clear(); Monitor.PulseAll(inputQueue); }
+    }
+
     static void ReadInputLoop() {
       try {
         string line;
         while (running && (line = Out.Stdin.ReadLine()) != null) {
           line = line.Trim();
           if (string.IsNullOrEmpty(line)) continue;
-          if (line == "stop") {
-            running = false;
-            break;
-          }
+          if (line == "stop") break;
           var cmd = Out.Parse(line);
           string op = cmd.ContainsKey("op") ? Convert.ToString(cmd["op"]) : "";
-          if (op == "stop") {
-            running = false;
-            break;
-          } else if (op == "input") {
-            HandleInput(cmd);
-          } else if (op == "config") {
-            HandleConfig(cmd);
-          } else if (op == "refresh") {
-            refreshRequested = true;
+          if (op == "stop") break;
+          lock (inputQueue) { inputQueue.Enqueue(cmd); Monitor.Pulse(inputQueue); }
+        }
+      } catch {
+      } finally {
+        StopInput();
+      }
+    }
+
+    static void ExecuteInputLoop() {
+      try {
+        while (true) {
+          Dictionary<string, object> cmd;
+          lock (inputQueue) {
+            while (running && inputQueue.Count == 0) Monitor.Wait(inputQueue, 500);
+            if (!running) break;
+            cmd = inputQueue.Dequeue();
           }
+          string op = cmd.ContainsKey("op") ? Convert.ToString(cmd["op"]) : "";
+          if (op == "input") HandleInput(cmd);
+          else if (op == "config") HandleConfig(cmd);
+          else if (op == "refresh") refreshRequested = true;
         }
       } catch {
         running = false;
@@ -1325,9 +1373,9 @@ namespace AivinDesktopCast {
         for (int i = start; i < end; i++) {
           int k = (i - start) * 2;
           inputs[k].type = Native.INPUT_KEYBOARD;
-          inputs[k].u.ki = new Native.KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = Native.KEYEVENTF_UNICODE };
+          inputs[k].u.ki = new Native.KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = Native.KEYEVENTF_UNICODE, dwExtraInfo = (IntPtr)(long)Native.InputTag.ToUInt64() };
           inputs[k + 1].type = Native.INPUT_KEYBOARD;
-          inputs[k + 1].u.ki = new Native.KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = Native.KEYEVENTF_UNICODE | Native.KEYEVENTF_KEYUP };
+          inputs[k + 1].u.ki = new Native.KEYBDINPUT { wVk = 0, wScan = text[i], dwFlags = Native.KEYEVENTF_UNICODE | Native.KEYEVENTF_KEYUP, dwExtraInfo = (IntPtr)(long)Native.InputTag.ToUInt64() };
         }
         Native.SendInput((uint)inputs.Length, inputs, size);
         start = end;

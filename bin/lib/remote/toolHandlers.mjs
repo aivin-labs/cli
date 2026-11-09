@@ -29,6 +29,7 @@ import { buildTransferTools } from './httpTransfer.mjs';
 import { safeGitArgv, safeGitEnv } from './gitSafe.mjs';
 import { buildMeetingTools } from './meeting/index.mjs';
 import { buildClipboardTools } from './clipboard.mjs';
+import { killWindowsTree } from './winTree.mjs';
 
 /**
  * Công cụ trên máy, chia gói theo năng lực phát hiện được (git chỉ có khi máy cài git, tìm nội dung dùng ripgrep nếu có…). Mỗi công cụ
@@ -356,8 +357,8 @@ function runProcess(cmd, argv, { cwd, signal, onOutput, env, maxOutput = MAX_EXE
     const killTree = () => {
       if (killed) return;
       killed = true;
-      // Shell đã thoát mà cháu còn chạy: trên Linux / macOS vẫn giết được cả nhóm tiến trình; Windows mất dấu cây, taskkill báo lỗi vô hại.
-      if (process.platform === 'win32') { if (child.exitCode === null) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }).on('error', () => undefined); }
+      // Shell đã thoát mà cháu còn chạy: Linux / macOS giết cả nhóm tiến trình; Windows lần theo PID cha (cả phần mồ côi — winTree.mjs).
+      if (process.platform === 'win32') killWindowsTree(child, startedAt);
       else { try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* đã thoát */ } } }
     };
     const onAbort = () => {

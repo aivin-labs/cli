@@ -4,6 +4,7 @@ import { DeviceErrorCode, ToolGroup } from './constants.mjs';
 import { DeviceToolError, agentEnv, assertCommandAllowed, displayPath, resolveInRoots } from './sandbox.mjs';
 import { accountEnv, withProcessCap } from './multiUser.mjs';
 import { hasPwsh } from './deviceProfile.mjs';
+import { killWindowsTree } from './winTree.mjs';
 
 /**
  * Tiến trình nền + đọc log thời gian thực (28/10/2026): `proc.start` chạy lệnh dài (dev server, build / test watch, `claude -p …`, tail log)
@@ -54,7 +55,7 @@ export function createProcessManager() {
 
   function killTree(p) {
     if (p.status !== 'running') return;
-    if (process.platform === 'win32') spawn('taskkill', ['/pid', String(p.child.pid), '/T', '/F'], { windowsHide: true });
+    if (process.platform === 'win32') killWindowsTree(p.child, p.startedAt);
     else { try { process.kill(-p.child.pid, 'SIGTERM'); } catch { try { p.child.kill('SIGTERM'); } catch { /* đã thoát */ } } }
   }
 
