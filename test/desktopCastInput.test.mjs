@@ -45,6 +45,49 @@ test('waitHumanIdle: AI chờ người thôi thao tác, có trần', async () =>
   assert.ok(t - start <= 750, 'không chờ quá trần');
 });
 
+test('tạm cầm lái: AI chờ tới khi người ngừng thao tác đủ lâu', async () => {
+  let t = 0;
+  const moves = new Map([[10_000, true], [20_000, true]]);
+  let gate;
+  gate = createCastInputGate({
+    now: () => t,
+    sleep: async (ms) => {
+      t += ms;
+      for (const at of moves.keys()) if (t >= at) { moves.delete(at); gate.accept({ action: 'move', x: 1, y: 1 }); }
+    },
+  });
+  gate.setHumanTakeover({ idleMs: 30_000, maxWaitMs: 120_000 });
+  assert.equal(gate.takeoverWaitMs(), 120_000);
+  assert.equal(await gate.waitHumanIdle({ idleMs: 1, maxWaitMs: 1 }), true);
+  assert.ok(t >= 50_000 && t < 51_000, `chờ 30 s sau thao tác cuối (20 s): ${t}`);
+  assert.equal(gate.takeoverWaitMs(), 0, 'hết hạn thì quyền tự về AI');
+});
+
+test('tạm cầm lái: người vẫn thao tác tới hết hạn chờ → báo chưa bấm được', async () => {
+  let t = 0;
+  let gate;
+  gate = createCastInputGate({ now: () => t, sleep: async (ms) => { t += ms; gate.accept({ action: 'move', x: 1, y: 1 }); } });
+  gate.setHumanTakeover({ idleMs: 30_000, maxWaitMs: 5_000 });
+  assert.equal(await gate.waitHumanIdle(), false);
+  assert.ok(t >= 5_000 && t < 5_500, `không chờ quá hạn: ${t}`);
+});
+
+test('tạm cầm lái: trả quyền hoặc huỷ bước thì thôi chờ ngay', async () => {
+  let t = 0;
+  const controller = new AbortController();
+  let gate;
+  gate = createCastInputGate({ now: () => t, sleep: async (ms) => { t += ms; if (t >= 1_000) controller.abort(); } });
+  gate.setHumanTakeover({ idleMs: 30_000, maxWaitMs: 120_000 });
+  assert.equal(await gate.waitHumanIdle({ signal: controller.signal }), false);
+  assert.ok(t < 1_500, 'huỷ thì dừng chờ');
+
+  t = 0;
+  gate = createCastInputGate({ now: () => t, sleep: async (ms) => { t += ms; if (t >= 1_000) gate.setHumanTakeover(null); } });
+  gate.setHumanTakeover({ idleMs: 30_000, maxWaitMs: 120_000 });
+  assert.equal(await gate.waitHumanIdle(), true);
+  assert.ok(t < 1_500, 'trả quyền thì AI làm tiếp ngay');
+});
+
 test('WebRTC: thao tác đi kênh input peer-to-peer, mang mã phiên của peer', { timeout: 20_000 }, async (t) => {
   let wrtc;
   try { wrtc = await import('@roamhq/wrtc'); } catch { return t.skip('chưa cài @roamhq/wrtc'); }
@@ -326,5 +369,30 @@ test('WebRTC Clipboard + Secure Desktop: đẩy hai chiều qua kênh điều kh
     { cmd: { action: 'paste', text: 'pasted from viewer', session_id: 'cast-9' }, viewerId: 'v1' },
     { cmd: { action: 'clipboard', text: 'sync only', session_id: 'cast-9' }, viewerId: 'v1' },
   ]);
+  device.closeAll();
+});
+
+test('WebRTC: kênh chuột không gửi lại, chỉ nhận di chuột, bỏ gói đến muộn', async () => {
+  const { runtime } = fakeRtcRuntime();
+  const channels = {};
+  const origin = runtime.RTCPeerConnection.prototype.createDataChannel;
+  runtime.RTCPeerConnection.prototype.createDataChannel = function (label, opts) {
+    const channel = origin.call(this, label, opts);
+    channels[label] = { channel, opts };
+    return channel;
+  };
+  const got = [];
+  const device = createDesktopWebRtc({ loadRuntime: async () => runtime, onInput: (m) => got.push(m) });
+  await device.start({ sessionId: 's', viewerId: 'v' });
+  const { channel, opts } = channels['aivin-desktop-pointer'];
+  assert.deepEqual(opts, { ordered: false, maxRetransmits: 0 });
+  const send = (m) => channel.onmessage({ data: JSON.stringify(m) });
+  send({ action: 'move', rx: 1, ry: 1, n: 2 });
+  send({ action: 'move', rx: 2, ry: 2, n: 1 });
+  send({ action: 'click', rx: 3, ry: 3, n: 3 });
+  send({ action: 'move', rx: 4, ry: 4, n: 4 });
+  assert.deepEqual(got.map((m) => m.rx), [1, 4]);
+  assert.equal(got[0].n, undefined);
+  assert.equal(got[0].session_id, 's');
   device.closeAll();
 });

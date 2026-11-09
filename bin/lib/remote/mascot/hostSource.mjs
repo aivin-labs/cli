@@ -691,9 +691,10 @@ function Wake($fromHover = $false) {
   }
   return $false
 }
+$script:remoteView = $false
 $script:dozeTimer = New-Object Windows.Threading.DispatcherTimer; $script:dozeTimer.Interval = [TimeSpan]::FromSeconds(3)
 $script:dozeTimer.Add_Tick({
-  if ($script:state -eq 'idle' -and -not $script:rig.Dozing -and -not $script:rig.Hover -and (E 'AskBox').Visibility -ne 'Visible' -and (E 'Panel').Visibility -ne 'Visible' -and ((Get-Date) - $script:lastActive).TotalSeconds -ge ${MASCOT_DOZE_SEC}) {
+  if (-not $script:remoteView -and $script:state -eq 'idle' -and -not $script:rig.Dozing -and -not $script:rig.Hover -and (E 'AskBox').Visibility -ne 'Visible' -and (E 'Panel').Visibility -ne 'Visible' -and ((Get-Date) - $script:lastActive).TotalSeconds -ge ${MASCOT_DOZE_SEC}) {
     # A yawn first, nodding off when yawn finishes (or on next tick).
     if (-not $script:yawned) { $script:yawned = $true; $script:rig.Play('yawn'); SetFace 'yawn'; $script:faceTimer.Stop(); $script:faceTimer.Interval = [TimeSpan]::FromSeconds(2.2); $script:faceTimer.Start() }
     elseif (-not $script:faceTimer.IsEnabled) { $script:rig.Doze($true); SetFace 'offline' }
@@ -961,6 +962,12 @@ function Handle($m) {
     'main' { if ($m.quiet) { SetText (E 'NowText') $m.text } else { ShowBubble $m.text $m.url } }
     'log' { LogEntry $m }
     'gui' { $script:guiHidden = [bool]$m.active; ApplyVisibility }
+    # Someone is viewing / controlling this computer: wave eyes for the whole session.
+    'remote_view' {
+      $script:remoteView = [bool]$m.on
+      if ($script:remoteView) { [void](Wake) }
+      $script:rig.RemoteWave($script:remoteView)
+    }
     'show' { $script:userHidden = $false; ApplyVisibility }
     # Daemon-driven reaction, e.g. 'wave' when the user comes back, or the mood of an answer's emoji (mood.mjs: its own face + time).
     'gesture' {

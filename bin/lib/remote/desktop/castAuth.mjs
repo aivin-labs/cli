@@ -3,75 +3,48 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { REMOTE_CONFIG_DIR } from '../constants.mjs';
 import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
+import { CastConsentDecision } from './castConsent.mjs';
 
 export const CAST_SESSION_FILE = path.join(REMOTE_CONFIG_DIR, 'desktop-cast-session.json');
 export const CAST_ACTION_FILE = path.join(REMOTE_CONFIG_DIR, 'desktop-cast-action.json');
 export const CAST_PERMISSIONS_FILE = path.join(REMOTE_CONFIG_DIR, 'cast-permissions.json');
 
+const CAST_STOP_ACTION = Object.freeze({ action: 'stop_and_block' });
+
 const b64 = (s) => Buffer.from(String(s ?? ''), 'utf8').toString('base64');
 
 function loadPermissions() {
   try {
-    if (!fs.existsSync(CAST_PERMISSIONS_FILE)) return { blockedViewers: [] };
-    const content = fs.readFileSync(CAST_PERMISSIONS_FILE, 'utf8');
-    const parsed = JSON.parse(content);
-    return parsed && Array.isArray(parsed.blockedViewers) ? parsed : { blockedViewers: [] };
+    const parsed = JSON.parse(fs.readFileSync(CAST_PERMISSIONS_FILE, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
-    return { blockedViewers: [] };
+    return {};
   }
 }
 
 function savePermissions(data) {
   try {
     fs.mkdirSync(path.dirname(CAST_PERMISSIONS_FILE), { recursive: true });
-    fs.writeFileSync(CAST_PERMISSIONS_FILE, JSON.stringify(data, null, 2), 'utf8');
+    fs.writeFileSync(CAST_PERMISSIONS_FILE, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 });
   } catch { }
 }
 
 /**
- * Kiểm tra xem người xem / thiết bị này có đang bị chặn hoặc cần xác nhận lại quyền cast không.
+ * Chủ máy vừa bấm ngắt: mọi phiên sau đều phải hỏi tới khi chủ máy bấm "Cho phép" một lần, kể cả chế độ không cần người ở máy.
+ * Khoá theo cả máy, không theo tên thiết bị: tên do trình duyệt tự khai và mã socket đổi sau mỗi lần nối nên chặn theo chúng lách được.
+ * Tệp từ bản cũ (`blockedViewers` còn phần tử) cũng tính là đang khoá.
  */
-export function isViewerBlocked({ viewerId, viewerDevice } = {}) {
-  const { blockedViewers = [] } = loadPermissions();
-  return blockedViewers.some((v) => {
-    if (v.viewerId && viewerId && v.viewerId === viewerId) return true;
-    if (v.viewerDevice && viewerDevice && v.viewerDevice === viewerDevice) return true;
-    return false;
-  });
+export function isCastLocked() {
+  const { locked, blockedViewers } = loadPermissions();
+  return locked === true || (Array.isArray(blockedViewers) && blockedViewers.length > 0);
 }
 
-/**
- * Thêm thiết bị vào danh sách chặn / thu hồi quyền cast.
- */
-export function blockViewer({ viewerId, viewerDevice } = {}) {
-  const data = loadPermissions();
-  const list = data.blockedViewers || [];
-  const filtered = list.filter((v) => {
-    if (viewerId && v.viewerId === viewerId) return false;
-    if (viewerDevice && v.viewerDevice === viewerDevice) return false;
-    return true;
-  });
-  filtered.push({
-    viewerId: viewerId || '',
-    viewerDevice: viewerDevice || '',
-    blockedAt: new Date().toISOString(),
-  });
-  data.blockedViewers = filtered;
-  savePermissions(data);
+export function lockCast({ viewerDevice = '' } = {}) {
+  savePermissions({ locked: true, lockedAt: new Date().toISOString(), lastViewerDevice: String(viewerDevice || '') });
 }
 
-/**
- * Bỏ chặn / cấp quyền cho thiết bị sau khi người dùng đã bấm đồng ý trên modal.
- */
-export function unblockViewer({ viewerId, viewerDevice } = {}) {
-  const data = loadPermissions();
-  if (!data.blockedViewers) return;
-  data.blockedViewers = data.blockedViewers.filter((v) => {
-    if (viewerId && v.viewerId === viewerId) return false;
-    if (viewerDevice && v.viewerDevice === viewerDevice) return false;
-    return true;
-  });
-  savePermissions(data);
+export function unlockCast() {
+  savePermissions({ locked: false });
 }
 
 /**
@@ -106,14 +79,29 @@ export function clearCastSession() {
  * Kiểm tra xem khay hệ thống có gửi lệnh ngắt / chặn thiết bị cast không.
  */
 export function checkCastAction() {
+  let content;
   try {
     if (!fs.existsSync(CAST_ACTION_FILE)) return null;
-    const content = fs.readFileSync(CAST_ACTION_FILE, 'utf8');
+    content = fs.readFileSync(CAST_ACTION_FILE, 'utf8');
     fs.unlinkSync(CAST_ACTION_FILE);
-    return JSON.parse(content);
   } catch {
     return null;
   }
+  // Có tệp nghĩa là chủ máy đã bấm ngắt: không đọc được nội dung thì vẫn phải ngắt, không được bỏ qua.
+  try {
+    const action = JSON.parse(content);
+    return action && typeof action === 'object' ? action : CAST_STOP_ACTION;
+  } catch {
+    return CAST_STOP_ACTION;
+  }
+}
+
+/** Gửi yêu cầu ngắt từ dòng lệnh, cùng đường với nút ở khay. Trả về `false` nếu không có phiên nào đang chạy. */
+export function requestCastStop() {
+  if (!fs.existsSync(CAST_SESSION_FILE)) return false;
+  fs.mkdirSync(path.dirname(CAST_ACTION_FILE), { recursive: true });
+  fs.writeFileSync(CAST_ACTION_FILE, JSON.stringify(CAST_STOP_ACTION), 'utf8');
+  return true;
 }
 
 const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -150,8 +138,8 @@ const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xam
             Background="Transparent" Foreground="#6B7280" ToolTip="Từ chối" IsTabStop="False"/>
    </DockPanel>
    <TextBlock Text="Cho phép xem và điều khiển màn hình máy tính?" Margin="0,20,0,0" FontSize="18" FontWeight="SemiBold" Foreground="#111827" TextWrapping="Wrap"/>
-   <Border Margin="0,12,0,0" HorizontalAlignment="Left" CornerRadius="10" Background="#FEF3C7" Padding="12,6">
-    <TextBlock Text="⚠  Thiết bị trước đó đã bị ngắt kết nối hoặc chưa được cấp quyền" Foreground="#92400E" FontSize="12.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
+   <Border x:Name="Warn" Margin="0,12,0,0" HorizontalAlignment="Left" CornerRadius="10" Background="#FEF3C7" Padding="12,6">
+    <TextBlock Text="⚠  Thiết bị này trước đó đã bị ngắt kết nối" Foreground="#92400E" FontSize="12.5" FontWeight="SemiBold" TextWrapping="Wrap"/>
    </Border>
    <Border Margin="0,14,0,0" CornerRadius="10" Background="#F4F6FA" BorderBrush="#E8ECF3" BorderThickness="1" Padding="14,12">
     <StackPanel>
@@ -176,6 +164,7 @@ const CONSENT_SCRIPT = [
   "$w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml](D 'AIVIN_CAST_XAML'))))",
   "$w.Title = D 'AIVIN_CAST_TITLE'",
   "$w.FindName('DeviceText').Text = D 'AIVIN_CAST_DEVICE'",
+  "if ($env:AIVIN_CAST_WARN -ne '1') { $w.FindName('Warn').Visibility = 'Collapsed' }",
   "$ms = New-Object IO.MemoryStream(, [Convert]::FromBase64String($env:AIVIN_CAST_LOGO)); $img = New-Object Windows.Media.Imaging.BitmapImage",
   "$img.BeginInit(); $img.StreamSource = $ms; $img.CacheOption = 'OnLoad'; $img.EndInit(); $w.FindName('Logo').Source = $img",
   "$script:result = 'No'; $script:closing = $false",
@@ -191,21 +180,21 @@ const CONSENT_SCRIPT = [
 ].join('\n');
 
 /**
- * Mở modal hộp thoại xác thực trên màn hình Windows hỏi người dùng có cho phép cast không.
- * Trả về true nếu người dùng chọn Cho phép, false nếu Từ chối hoặc hết giờ.
+ * Hỏi người ở máy trên chính màn hình Windows. Mặc định là từ chối: Enter, Esc, đóng hộp, hết giờ đều không cho xem.
+ * `repeatedAfterBlock`: hiện thêm dòng cảnh báo thiết bị từng bị ngắt. Trả về một giá trị của `CastConsentDecision`.
  */
-export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutSec = 30 } = {}) {
-  if (process.platform !== 'win32') return Promise.resolve(false);
+export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutSec = 45, repeatedAfterBlock = false, signal } = {}) {
+  if (process.platform !== 'win32') return Promise.resolve(CastConsentDecision.UNAVAILABLE);
   return new Promise((resolve) => {
     let out = '';
     let settled = false;
     let timer = null;
 
-    const done = (allowed) => {
+    const done = (answer) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      resolve(allowed);
+      resolve(answer);
     };
 
     const env = {
@@ -216,6 +205,7 @@ export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutS
       AIVIN_CAST_DEVICE: b64(`Thiết bị yêu cầu: ${viewerDevice}`),
       AIVIN_CAST_COUNTDOWN: b64('Tự từ chối sau {0} giây'),
       AIVIN_CAST_SECONDS: String(timeoutSec),
+      AIVIN_CAST_WARN: repeatedAfterBlock ? '1' : '0',
     };
 
     let child = null;
@@ -226,19 +216,20 @@ export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutS
         windowsHide: false,
       });
     } catch {
-      return done(false);
+      return done(CastConsentDecision.UNAVAILABLE);
     }
 
-    timer = setTimeout(() => {
-      try { child.kill(); } catch { }
-      done(false);
-    }, (timeoutSec + 5) * 1000);
+    const kill = () => { try { child.kill(); } catch { } };
+    signal?.addEventListener('abort', () => { kill(); done(CastConsentDecision.CANCELLED); }, { once: true });
+    timer = setTimeout(() => { kill(); done(CastConsentDecision.TIMEOUT); }, (timeoutSec + 5) * 1000);
 
     child.stdout?.on('data', (chunk) => { out += chunk; });
-    child.on('error', () => done(false));
+    child.on('error', () => done(CastConsentDecision.UNAVAILABLE));
     child.on('close', (code) => {
-      const allowed = code === 0 && /\bYes\b/.test(out);
-      done(allowed);
+      if (code === 0 && /\bYes\b/.test(out)) return done(CastConsentDecision.ALLOW);
+      if (/\bTimeout\b/.test(out)) return done(CastConsentDecision.TIMEOUT);
+      if (/\bNo\b/.test(out)) return done(CastConsentDecision.REJECTED);
+      return done(CastConsentDecision.UNAVAILABLE);
     });
   });
 }

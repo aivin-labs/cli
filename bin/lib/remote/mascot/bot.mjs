@@ -20,6 +20,8 @@ export const BOT_RIG = Object.freeze({
   earR: { x: 170.6, y: 97.3, w: 12, h: 33 },
   /** Mặt vẽ theo đơn vị gốc rồi phóng FACE_SCALE, tâm đặt hơi dưới tâm kính. */
   face: { x: 97.2, y: 90.5, scale: 1.6, eyeDx: 15, eyeY: -3.5, mouthY: 10.5 },
+  /** Mắt khi có người đang xem máy: đoạn sóng sin rộng ±halfWidth, biên độ amp, bước sóng length (đơn vị mặt), trôi hz vòng/giây. */
+  wave: { halfWidth: 9.5, amp: 4.2, length: 15, hz: 1.1, segments: 24, stroke: 3.6 },
   /**
    * Màn hình 3D khi đang làm (Viewport3D thật, phối cảnh): tấm chính trước ngực + hai tấm nhỏ hai bên quây quanh bot. Bot chăm chú nhìn
    * lần lượt từng màn (mắt + đầu hướng theo `look` / `head`, màn đang nhìn sáng lên), ở mỗi màn `dwell` giây (ngẫu nhiên trong khoảng).
@@ -78,7 +80,7 @@ export const BOT_FACES = Object.freeze({
   sheepish: { eyes: 'happy', mouth: 'hmm' },
 });
 
-export const BOT_EYES = Object.freeze(['open', 'focus', 'up', 'wide', 'happy', 'closed', 'sad', 'dizzy', 'wink', 'curious', 'star', 'droop']);
+export const BOT_EYES = Object.freeze(['open', 'focus', 'up', 'wide', 'happy', 'closed', 'sad', 'dizzy', 'wink', 'curious', 'star', 'droop', 'wave']);
 export const BOT_MOUTHS = Object.freeze(['smile', 'flat', 'hmm', 'open', 'grin', 'wobble', 'talk', 'frown', 'wail']);
 
 /**
@@ -116,6 +118,7 @@ const starEye = `<Path Data="M0,-6.5 Q1.2,-1.2 6.5,0 Q1.2,1.2 0,6.5 Q-1.2,1.2 -6
 export const BOT_SPINS = Object.freeze(['SpinL', 'SpinR']);
 
 /** Kiểu mắt: [trái, phải?] — thiếu phải thì dùng như trái. Mắt viên thuốc nào có tên Blink* thì chớp được. */
+const waveEye = (name) => `<Polyline x:Name="${name}" Points="${-BOT_RIG.wave.halfWidth},0 ${BOT_RIG.wave.halfWidth},0" ${glowStroke(BOT_RIG.wave.stroke)}/>`;
 const EYE_SHAPES = {
   open: [pill(10, 14, 'BlinkL'), pill(10, 14, 'BlinkR')],
   focus: [pill(10, 8, 'BlinkFL'), pill(10, 8, 'BlinkFR')],
@@ -131,6 +134,7 @@ const EYE_SHAPES = {
   wink: [`<Path Data="M-8,3 Q0,-8 8,3" ${glowStroke()} Fill="{x:Null}"/>`, pill(10, 14, 'BlinkWnkR')],
   curious: [pill(10, 8, 'BlinkCurL'), pill(12.5, 16, 'BlinkCurR')],
   star: [starEye],
+  wave: [waveEye('WaveL'), waveEye('WaveR')],
   // Buồn / xin lỗi: mắt thấp hơn, lông mày xếch lên ở phía trong (hai đầu gần nhau cao hơn).
   droop: [
     `<Canvas Canvas.Top="1.5">${pill(10, 11, 'BlinkDrL')}</Canvas><Path Data="M-6.5,-8 L4.5,-11.5" ${glowStroke(2.6)}/>`,

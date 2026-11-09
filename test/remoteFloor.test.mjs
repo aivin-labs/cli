@@ -47,7 +47,7 @@ test('luật tại máy: mặc định "risky", giá trị hỏng bị bỏ, reg
   assert.equal(loadLocalPolicy(path.join(os.tmpdir(), 'none-xyz.json')).confirm, ConfirmMode.RISKY);
   const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pol-')), 'p.json');
   fs.writeFileSync(f, JSON.stringify({ confirm: 'sometimes', blocked_commands: ['ok', '([bad'], confirm_timeout_sec: 3 }));
-  assert.deepEqual(loadLocalPolicy(f), { confirm: 'risky', deny_tools: [], blocked_commands: ['ok'], confirm_timeout_sec: 120 });
+  assert.deepEqual(loadLocalPolicy(f), { confirm: 'risky', deny_tools: [], blocked_commands: ['ok'], confirm_timeout_sec: 120, cast_consent: 'ask' });
 });
 
 test('lệnh policy: siết luật chạy ngay; nới luật không có terminal thật (agent gọi qua shell) bị từ chối', async () => {

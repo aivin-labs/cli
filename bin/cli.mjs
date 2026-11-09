@@ -7,7 +7,8 @@ import path from 'path';
 import inquirer from 'inquirer';
 import { spawn } from 'child_process';
 import axios from 'axios';
-import dotenv from 'dotenv';
+import { loadProjectEnv } from './lib/projectEnv.mjs';
+import { requestCastStop } from './lib/remote/desktop/castAuth.mjs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname } from 'path';
 import { createRequire } from 'module';
@@ -131,9 +132,8 @@ import {
 // didn't set them. `dotenv.config()` never overrides a variable that's already set, so a project's
 // own `.env` (or a real shell env var) always wins over the global context, exactly like before -
 // but nothing requires a project to have a `.env` at all anymore for the common single-context case.
-// `quiet: true` - otherwise dotenv prints an "injected env" tip line to stdout on every run, which
-// would corrupt `--json-output` mode (meant for clean, parseable JSON on stdout).
-dotenv.config({ quiet: true });
+// Chỉ các lệnh làm việc trên dự án plugin mới đọc `.env` (xem projectEnv.mjs).
+loadProjectEnv();
 
 {
   const selectedServer = process.env.AIVIN_BASE_URL
@@ -1448,6 +1448,17 @@ remoteCommand
   });
 
 remoteCommand
+  .command('disconnect')
+  .description('Cut off whoever is viewing or controlling this screen; the next session must be allowed on this computer')
+  .action(() => {
+    if (!requestCastStop()) {
+      console.log(chalk.gray('Không có ai đang xem màn hình máy này.'));
+      return;
+    }
+    console.log(chalk.yellow('⏹  Đã gửi lệnh ngắt. Phiên xem sau phải bấm "Cho phép" trên máy này.'));
+  });
+
+remoteCommand
   .command('mascot [action] [combo]')
   .description('The Aivin mascot floating on screen while the listener runs (Windows): on | off — no argument shows the current setting; hotkey [combo|off|default] — the key combination for voice (default Alt+Shift+Space; off turns off both keys), with --chat the one that opens the ask box to type (default Alt+Space)')
   .option('--chat', 'hotkey: show or set the key that opens the ask box instead of the voice key')
@@ -1537,7 +1548,7 @@ remoteCommand
 
 remoteCommand
   .command('policy [action] [value]')
-  .description('Rules enforced on this computer itself (Aivin cannot change them): which steps need a click on this computer, tools turned off, extra blocked commands')
+  .description('Rules enforced on this computer itself (Aivin cannot change them): which steps need a click on this computer, tools turned off, extra blocked commands, whether viewing this screen needs a click here (cast ask|unattended|off)')
   .action(async (action, value) => {
     try {
       await runPolicyCommand(action, value);

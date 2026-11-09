@@ -111,7 +111,8 @@ test('huỷ, người xem rời, im quá hạn, chủ máy dừng giữa chừng
   assert.deepEqual(parts(dir), []);
 
   await drop.message('v2', { t: 'begin', id: 'c', name: 'x', size: 9 });
-  await new Promise((r) => setTimeout(r, 80));
+  // Chờ theo điều kiện: chờ cứng 80 ms hụt khi cả bộ test chạy song song trên máy đang tải.
+  for (let i = 0; i < 300 && last(replies).t !== 'failed'; i++) await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(last(replies), { t: 'failed', id: 'c', reason: 'timeout' });
   assert.deepEqual(parts(dir), []);
 

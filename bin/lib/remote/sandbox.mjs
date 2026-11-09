@@ -182,8 +182,8 @@ export function agentEnv(env = process.env) {
   return { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...scrubEnv(env), [AGENT_CALL_ENV]: '1' };
 }
 
-const HUMAN_ONLY_REMOTE_COMMANDS = new Set(['start', 'pair', 'unpair', 'pause', 'resume', 'enable', 'disable', 'reset-id', 'do', 'forget-folder']);
-const HUMAN_ONLY_COMMANDS = new Set(['do', 'login', 'logout', 'uninstall']);
+const HUMAN_ONLY_REMOTE_COMMANDS = new Set(['start', 'pair', 'unpair', 'pause', 'resume', 'enable', 'disable', 'reset-id', 'do', 'forget-folder', 'policy', 'disconnect']);
+const HUMAN_ONLY_COMMANDS = new Set(['do', 'login', 'logout', 'uninstall', 'server', 'update']);
 
 /** Lệnh chỉ người ngồi trước máy được chạy. `parent` / `name`: lệnh cha + lệnh con của CLI. */
 export function assertHumanCommand(parent, name, env = process.env) {
@@ -212,7 +212,9 @@ const CATASTROPHIC_COMMANDS = [
 const AIVIN_DIR_SEGMENT = /(?:^|[\\/\s'"`~=:(;,|&])\.aivin(?:-release)?(?=[\\/\s'"`);,|&]|$)/i;
 
 /** Agent gọi chính CLI Aivin để đổi việc ghép máy / luật / giao việc mới. Khớp chuỗi — `assertHumanCommand` là chốt thứ hai trong tiến trình CLI. */
-const AIVIN_SELF_COMMAND = /\baivin(\.exe)?["']?\s+(remote\s+(pair|start|unpair|pause|resume|enable|disable|reset-id|do|forget-folder)\b|do\b|login\b|logout\b|uninstall\b|desktop\s+uninstall\b)/i;
+const AIVIN_SELF_COMMAND = /\baivin(\.exe)?["']?\s+(remote\s+(pair|start|unpair|pause|resume|enable|disable|reset-id|do|forget-folder|policy|disconnect)\b|do\b|login\b|logout\b|uninstall\b|desktop\s+uninstall\b)/i;
+/** `server` / `update` là từ thường hay xuất hiện sau chữ "aivin" trong nội dung lệnh: chỉ khớp khi đứng ở vị trí chạy lệnh. */
+const AIVIN_SERVER_OR_UPDATE = /(?:^|[;&|\n]\s*)(?:[\w.:~\\/-]*[\\/])?aivin(\.exe)?["']?\s+(server|update)\b/i;
 
 function mentionsProtectedDir(command) {
   if (AIVIN_DIR_SEGMENT.test(command)) return true;
@@ -228,7 +230,7 @@ export function assertCommandAllowed(command) {
   if (CATASTROPHIC_COMMANDS.some((re) => re.test(command))) {
     throw new DeviceToolError(DeviceErrorCode.BLOCKED_COMMAND, 'Command blocked by the device safety floor (destroys the whole system)');
   }
-  if (AIVIN_SELF_COMMAND.test(command)) {
+  if (AIVIN_SELF_COMMAND.test(command) || AIVIN_SERVER_OR_UPDATE.test(command)) {
     throw new DeviceToolError(DeviceErrorCode.BLOCKED_COMMAND, 'Command changes this computer\'s Aivin pairing or starts new Aivin work — only the person at the computer can do that');
   }
   if (mentionsProtectedDir(command)) {

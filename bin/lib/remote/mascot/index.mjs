@@ -47,7 +47,7 @@ export const MascotState = Object.freeze({
 });
 export const LogStatus = Object.freeze({ RUN: 'run', OK: 'ok', FAIL: 'fail', INFO: 'info', WARN: 'warn' });
 /** Lệnh gửi cửa sổ / sự kiện cửa sổ gửi về (một dòng JSON mỗi lệnh). */
-export const HostCommand = Object.freeze({ STATE: 'state', MAIN: 'main', LOG: 'log', GUI: 'gui', SHOW: 'show', QUIT: 'quit', OPEN_ASK: 'open_ask', QUICK_VOICE: 'quick_voice', VOICE_TOGGLE: 'voice_toggle', GESTURE: 'gesture', NOTIFY_FREQ: 'notify_freq' });
+export const HostCommand = Object.freeze({ STATE: 'state', MAIN: 'main', LOG: 'log', GUI: 'gui', SHOW: 'show', QUIT: 'quit', OPEN_ASK: 'open_ask', QUICK_VOICE: 'quick_voice', VOICE_TOGGLE: 'voice_toggle', GESTURE: 'gesture', NOTIFY_FREQ: 'notify_freq', REMOTE_VIEW: 'remote_view' });
 
 /** `aivin ui` (terminal khác) chạm tệp này → daemon đang chạy hiện linh vật + mở ô hỏi (mascot/ui.mjs). */
 export const MASCOT_SHOW_FILE = path.join(REMOTE_CONFIG_DIR, 'mascot-show');
@@ -271,6 +271,7 @@ export function createMascot({
   let lastPin = null;
   // Tệp thả vào bot đang chờ: cửa sổ dựng lại vẫn ôm thùng có số tệp.
   let lastFiles = null;
+  let lastRemoteView = null;
   // Đang nói chuyện bằng giọng (cửa sổ báo voice_start … voice_stop / daemon gửi voice_end): đổi ngôn ngữ chờ tới khi xong mới dựng lại.
   let voiceOn = false;
   let langRebuild = false;
@@ -283,6 +284,7 @@ export function createMascot({
     if (msg.t === AskCommand.CHOICES) lastChoices = msg;
     if (msg.t === AskCommand.PIN) lastPin = msg;
     if (msg.t === AskCommand.FILES) lastFiles = msg;
+    if (msg.t === HostCommand.REMOTE_VIEW) lastRemoteView = msg;
     if (msg.t === VoiceCommand.END) { voiceOn = false; if (langRebuild) timers.setTimeout(rebuildForLang, 0); }
     if (ready) return write(msg);
     if (msg.t === HostCommand.LOG) {
@@ -324,6 +326,7 @@ export function createMascot({
       write(lastPin);
     }
     if (lastFiles?.files?.length) write(lastFiles);
+    if (lastRemoteView?.on) write(lastRemoteView);
     if (commandOnReady) { write({ t: commandOnReady }); commandOnReady = null; }
   };
 
@@ -647,6 +650,7 @@ export function createMascot({
     },
         /** Có người đang xem + điều khiển màn hình máy này từ web (Desktop Scenecast) — chủ máy luôn biết. */
     remoteView(on, { device } = {}) {
+      send({ t: HostCommand.REMOTE_VIEW, on: !!on });
       if (on) {
         const devName = formatDeviceLabel(device, currentLang);
         const text = devName

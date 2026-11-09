@@ -189,6 +189,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     });
 
     let rl = readline.createInterface({ input: child.stdout });
+    let packetSeq = 0;
 
     rl.on('line', (line) => {
       let msg;
@@ -203,6 +204,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       } else if (msg.t === 'frame') {
         onFrame?.({
           sessionId: session.sessionId,
+          seq: ++packetSeq,
           image: msg.image,
           width: msg.width,
           height: msg.height,
@@ -219,6 +221,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       } else if (msg.t === 'meta') {
         onMeta?.({
           sessionId: session.sessionId,
+          seq: ++packetSeq,
           width: msg.width,
           height: msg.height,
           screenWidth: msg.screenWidth,

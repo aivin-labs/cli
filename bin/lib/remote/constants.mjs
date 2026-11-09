@@ -103,11 +103,13 @@ export const DeviceEvent = Object.freeze({
   DESKTOP_CAST_STATUS: 'device:desktop_cast_status',
   /** CLI → BE: ô có tiêu điểm sau cú nhấp có phải ô nhập chữ — cho người xem đường JPEG (WebRTC đi kênh thao tác). */
   DESKTOP_CAST_INPUT_FOCUS: 'device:desktop_cast_input_focus',
+  /** BE → CLI: người xem tạm cầm lái khi AI đang chạy / trả lại — `{ session_id, active, idle_ms, max_wait_ms }`. */
+  DESKTOP_CAST_TAKEOVER: 'device:desktop_cast_takeover',
 });
 
 /** Trạng thái phiên xem màn hình gửi BE (`device:desktop_cast_status`) — khớp BE `DesktopCastState`. */
 export const CastState = Object.freeze({
-  READY: 'ready', CONNECTED: 'connected', DEGRADED: 'degraded', STOPPED: 'stopped', REFUSED: 'refused', INPUT_BLOCKED: 'input_blocked',
+  READY: 'ready', CONNECTED: 'connected', DEGRADED: 'degraded', STOPPED: 'stopped', REFUSED: 'refused', INPUT_BLOCKED: 'input_blocked', AWAITING_CONSENT: 'awaiting_consent',
 });
 
 /** Loại báo chủ động (`device:notify`). */
@@ -212,6 +214,8 @@ export const DeviceErrorCode = Object.freeze({
   CANCELLED: 'CANCELLED',
   /** Bước có tác dụng đã bắt đầu thì daemon khởi động lại — không biết đã làm tới đâu, không tự làm lại. */
   INTERRUPTED: 'INTERRUPTED',
+  /** Bước CHƯA chạy (vd người đang tạm cầm lái từ web tới hết hạn chờ) — gửi lại an toàn. */
+  NOT_STARTED: 'NOT_STARTED',
   TOOL_UNKNOWN: 'TOOL_UNKNOWN',
   INVALID_ARGS: 'INVALID_ARGS',
   NOT_FOUND: 'NOT_FOUND',

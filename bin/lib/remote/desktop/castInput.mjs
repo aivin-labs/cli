@@ -6,7 +6,7 @@
 
 export const CAST_INPUT_ACTIONS = Object.freeze([
   'move', 'click', 'dblclick', 'rightclick', 'mousedown', 'mouseup', 'scroll', 'type', 'paste', 'clipboard', 'key', 'hotkey',
-  'paste_image', 'paste_file'
+  'paste_image'
 ]);
 
 export const CastInputRejection = Object.freeze({
@@ -67,12 +67,6 @@ export function sanitizeCastInput(raw, maxTypeChars = 2000) {
     if (raw.click) cmd.click = true;
     return cmd;
   }
-  if (action === 'paste_file') {
-    if (typeof raw.path !== 'string' || !raw.path) return null;
-    cmd.path = raw.path;
-    if (raw.click) cmd.click = true;
-    return cmd;
-  }
   if ((action === 'type' || action === 'paste' || action === 'clipboard') && !cmd.text) return null;
   if (action === 'key' && !cmd.key) return null;
   if (action === 'hotkey' && !cmd.keys) return null;
@@ -85,6 +79,7 @@ export function sanitizeCastInput(raw, maxTypeChars = 2000) {
  */
 export function createCastInputGate({ isPaused = () => false, isAiBusy = () => false, maxPerSec = 120, now = Date.now, sleep } = {}) {
   let lastHumanAt = null;
+  let takeover = null;
   let accepted = 0;
   let window = { start: 0, count: 0 };
   /** Nút chuột người xem đang giữ trên máy: gói nhả của chúng luôn được qua cổng, không thì nút kẹt xuống tới hết phiên. */
@@ -112,11 +107,37 @@ export function createCastInputGate({ isPaused = () => false, isAiBusy = () => f
     return { ok: true, cmd };
   }
 
-  async function waitHumanIdle({ idleMs = 1500, maxWaitMs = 3000 } = {}) {
+  /** Người xem bấm "Bạn" lúc AI đang chạy: `{ idleMs, maxWaitMs }` = bắt đầu tạm cầm lái, `null` = trả lại AI. */
+  function setHumanTakeover(opts) {
+    takeover = opts?.idleMs > 0 ? { idleMs: opts.idleMs, maxWaitMs: opts.maxWaitMs > 0 ? opts.maxWaitMs : opts.idleMs, at: now() } : null;
+  }
+
+  /** Còn đang tạm cầm lái không — người ngừng thao tác đủ lâu thì quyền tự về AI. */
+  function humanTakeoverHeld() {
+    if (!takeover) return false;
+    if (now() - Math.max(takeover.at, lastHumanAt ?? 0) < takeover.idleMs) return true;
+    takeover = null;
+    return false;
+  }
+
+  /** Bước GUI kế tiếp có thể phải chờ người tối đa bao lâu (0 = không ai đang cầm lái) — để xin BE lùi hạn của lời gọi. */
+  function takeoverWaitMs() { return humanTakeoverHeld() ? takeover.maxWaitMs : 0; }
+
+  /** `false` = AI chưa được bấm: bị huỷ khi đang chờ, hoặc người vẫn cầm lái tới hết `maxWaitMs` của lần tạm cầm lái. */
+  async function waitHumanIdle({ idleMs = 1500, maxWaitMs = 3000, signal } = {}) {
+    if (humanTakeoverHeld()) {
+      const takeoverDeadline = now() + takeover.maxWaitMs;
+      while (humanTakeoverHeld()) {
+        if (signal?.aborted || now() >= takeoverDeadline) return false;
+        await wait(250);
+      }
+    }
+    if (signal?.aborted) return false;
     const deadline = now() + maxWaitMs;
     while (lastHumanAt !== null && now() - lastHumanAt < idleMs && now() < deadline) {
       await wait(Math.min(250, Math.max(10, idleMs - (now() - lastHumanAt))));
     }
+    return !signal?.aborted;
   }
 
   /** Số thao tác đã nhận từ lần gọi trước (nhật ký phiên trên máy) — đọc xong đặt lại 0. */
@@ -125,5 +146,5 @@ export function createCastInputGate({ isPaused = () => false, isAiBusy = () => f
   /** Máy vừa nhả hết nút (`release_all`): AI sắp bấm hoặc người xem đã rời. Trả có đang giữ nút nào không để nơi gọi biết cần gửi lệnh nhả. */
   function takeHeldInput() { const had = heldButtons.size > 0; heldButtons.clear(); return had; }
 
-  return { accept, waitHumanIdle, takeAcceptedCount, takeHeldInput, lastHumanInputAt: () => lastHumanAt };
+  return { accept, waitHumanIdle, setHumanTakeover, takeoverWaitMs, takeAcceptedCount, takeHeldInput, lastHumanInputAt: () => lastHumanAt };
 }

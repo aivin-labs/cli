@@ -27,7 +27,12 @@ export const REMOTE_POLICY_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-policy.js
 
 export const ConfirmMode = Object.freeze({ NEVER: 'never', RISKY: 'risky', ALWAYS: 'always' });
 
-export const DEFAULT_LOCAL_POLICY = Object.freeze({ confirm: ConfirmMode.RISKY, deny_tools: [], blocked_commands: [], confirm_timeout_sec: 120 });
+/** Ai được xem + điều khiển màn hình: `ask` hỏi người ở máy mỗi phiên (mặc định), `unattended` không cần người ở máy, `off` tắt hẳn. */
+export const CastConsentMode = Object.freeze({ OFF: 'off', ASK: 'ask', UNATTENDED: 'unattended' });
+/** Số lớn hơn là chặt hơn. */
+export const CAST_CONSENT_RANK = Object.freeze({ [CastConsentMode.UNATTENDED]: 0, [CastConsentMode.ASK]: 1, [CastConsentMode.OFF]: 2 });
+
+export const DEFAULT_LOCAL_POLICY = Object.freeze({ confirm: ConfirmMode.RISKY, deny_tools: [], blocked_commands: [], confirm_timeout_sec: 120, cast_consent: CastConsentMode.ASK });
 
 /** Mức chặt của chế độ xác nhận — số lớn hơn là chặt hơn. */
 export const CONFIRM_RANK = Object.freeze({ [ConfirmMode.NEVER]: 0, [ConfirmMode.RISKY]: 1, [ConfirmMode.ALWAYS]: 2 });
@@ -126,6 +131,7 @@ function normalize(raw) {
     deny_tools: list(p.deny_tools),
     blocked_commands: list(p.blocked_commands).filter((re) => { try { new RegExp(re, 'i'); return true; } catch { return false; } }),
     confirm_timeout_sec: Number.isFinite(timeout) && timeout >= 15 && timeout <= 900 ? Math.round(timeout) : DEFAULT_LOCAL_POLICY.confirm_timeout_sec,
+    cast_consent: Object.hasOwn(CAST_CONSENT_RANK, String(p.cast_consent)) ? p.cast_consent : DEFAULT_LOCAL_POLICY.cast_consent,
   };
 }
 
@@ -167,7 +173,13 @@ function policyKey(keyFile, { create = false } = {}) {
   return key;
 }
 
-const signPolicy = (clean, key) => createHmac('sha256', key).update(JSON.stringify(normalize(clean))).digest('hex');
+/** Giá trị mặc định của trường mới không vào chữ ký: tệp luật đã ký từ bản CLI trước vẫn khớp. */
+function signedForm(clean) {
+  const { cast_consent: consent, ...rest } = normalize(clean);
+  return consent === DEFAULT_LOCAL_POLICY.cast_consent ? rest : { ...rest, cast_consent: consent };
+}
+
+const signPolicy = (clean, key) => createHmac('sha256', key).update(JSON.stringify(signedForm(clean))).digest('hex');
 
 function sealMatches(clean, seal, key) {
   if (typeof seal !== 'string' || !key) return false;
@@ -228,6 +240,7 @@ export function stricterPolicy(trusted, other) {
     deny_tools: [...new Set([...trusted.deny_tools, ...other.deny_tools])],
     blocked_commands: [...new Set([...trusted.blocked_commands, ...other.blocked_commands])],
     confirm_timeout_sec: trusted.confirm_timeout_sec,
+    cast_consent: CAST_CONSENT_RANK[other.cast_consent] > CAST_CONSENT_RANK[trusted.cast_consent] ? other.cast_consent : trusted.cast_consent,
   };
 }
 

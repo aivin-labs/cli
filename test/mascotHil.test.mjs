@@ -357,3 +357,22 @@ test('cửa sổ dựng lại / chưa sẵn sàng khi có câu hỏi chờ → g
   assert.ok(ts.includes('ask_choices') && ts.lastIndexOf('ask_pin') > ts.indexOf('ask_choices'));
   m.close();
 });
+
+test('có người đang xem máy: báo mắt sóng, cửa sổ linh vật khởi động lại vẫn giữ, hết phiên thì thôi', async () => {
+  const { m, host } = makeMascot();
+  m.connected?.();
+  const first = host.spawned[0];
+  first.send({ t: 'ready' });
+  await sleep(20);
+  m.remoteView(true, { device: 'Chrome' });
+  assert.deepEqual(first.sent.filter((c) => c.t === 'remote_view').at(-1), { t: 'remote_view', on: true });
+  first.kill();
+  await sleep(40);
+  const second = host.spawned[1];
+  second.send({ t: 'ready' });
+  await sleep(20);
+  assert.ok(second.sent.some((c) => c.t === 'remote_view' && c.on === true), 'cửa sổ mới vẫn phải báo đang có người xem');
+  m.remoteView(false);
+  assert.deepEqual(second.sent.filter((c) => c.t === 'remote_view').at(-1), { t: 'remote_view', on: false });
+  m.close?.();
+});

@@ -12,6 +12,9 @@ const MAX_INPUT_MESSAGE_BYTES = 25 * 1024 * 1024;
 /** Kênh tệp người xem kéo thả / dán vào màn hình (castFileDrop.mjs): tin cậy + đúng thứ tự, tách khỏi kênh thao tác để tệp lớn không làm trễ chuột. */
 export const FILE_CHANNEL = 'aivin-desktop-files';
 const MAX_FILE_CHUNK_BYTES = 256 * 1024;
+/** Kênh riêng cho vị trí chuột: không gửi lại, không giữ thứ tự — mất một gói thì gói sau đè lên, không bắt các thao tác sau xếp hàng chờ như kênh tin cậy. */
+export const POINTER_CHANNEL = 'aivin-desktop-pointer';
+const MAX_POINTER_MESSAGE_BYTES = 512;
 
 const MAX_CURSOR_SHAPES = 64;
 /** Thử nối lại khi peer hỏng hẳn (`failed`): dựng peer mới, cùng người xem; hết lượt thì ở lại JPEG. Peer nối được thì đặt lại. */
@@ -107,6 +110,7 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     const channel = pc.createDataChannel('aivin-desktop-frames', { ordered: false, maxRetransmits: 0 });
     const inputChannel = pc.createDataChannel(INPUT_CHANNEL, { ordered: true });
     const fileChannel = pc.createDataChannel(FILE_CHANNEL, { ordered: true });
+    const pointerChannel = pc.createDataChannel(POINTER_CHANNEL, { ordered: false, maxRetransmits: 0 });
     const VideoSource = wrtc?.nonstandard?.RTCVideoSource || wrtc?.default?.nonstandard?.RTCVideoSource;
     const AudioSource = wrtc?.nonstandard?.RTCAudioSource || wrtc?.default?.nonstandard?.RTCAudioSource;
     const MediaStream = wrtc?.MediaStream || wrtc?.default?.MediaStream;
@@ -118,7 +122,7 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     if (track) stream ? pc.addTrack(track, stream) : pc.addTrack(track);
     if (audioTrack) stream ? pc.addTrack(audioTrack, stream) : pc.addTrack(audioTrack);
     const peer = {
-      pc, channel, inputChannel, fileChannel,
+      pc, channel, inputChannel, fileChannel, pointerChannel, pointerSeq: 0,
       track, video: !!track,
       audioTrack, audio: !!audioTrack, audioEnabled: audio !== false,
       sessionId, viewerId, iceServers, videoBitrate, attempt, retryTimer: null, open: false, dropped: 0,
@@ -161,6 +165,17 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
       }
       // Mã phiên lấy từ peer (đã gắn lúc BE mời), không tin mã trong gói.
       onInput({ ...msg, session_id: peer.sessionId }, viewerId);
+    };
+    pointerChannel.onmessage = ({ data }) => {
+      const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
+      if (text.length > MAX_POINTER_MESSAGE_BYTES) return;
+      let msg;
+      try { msg = JSON.parse(text); } catch { return; }
+      // Chỉ nhận di chuột: nhấn, nhả, phím phải đi kênh tin cậy. Gói đến muộn hơn gói mới nhất thì bỏ.
+      if (msg?.action !== 'move' || !(msg.n > peer.pointerSeq)) return;
+      peer.pointerSeq = msg.n;
+      const { n: _n, ...cmd } = msg;
+      onInput({ ...cmd, session_id: peer.sessionId }, viewerId);
     };
     peers.set(viewerId, peer);
     channel.binaryType = 'arraybuffer';
@@ -352,6 +367,7 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     try { peer.channel.close(); } catch { /* already closed */ }
     try { peer.inputChannel?.close(); } catch { /* already closed */ }
     try { peer.fileChannel?.close(); } catch { /* already closed */ }
+    try { peer.pointerChannel?.close(); } catch { /* already closed */ }
     try { peer.track?.stop(); } catch { /* already stopped */ }
     try { peer.audioTrack?.stop(); } catch { /* already stopped */ }
     try { peer.pc.close(); } catch { /* already closed */ }

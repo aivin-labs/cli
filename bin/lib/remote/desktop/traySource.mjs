@@ -830,8 +830,8 @@ namespace AivinDesktop {
         Match mDev = Regex.Match(castTxt, "\"viewer_device\"\\s*:\\s*\"([^\"]+)\"");
         if (mDev.Success) viewerDevice = mDev.Groups[1].Value;
 
-        string actionJson = "{\"action\":\"stop_and_block\",\"viewer_id\":\"" + viewerId + "\",\"viewer_device\":\"" + viewerDevice + "\",\"requested_at\":\"" + DateTime.UtcNow.ToString("o") + "\"}\r\n";
-        File.WriteAllText(CastActionFile, actionJson, new UTF8Encoding(false));
+        // Tên thiết bị do trình duyệt khai, không được ghép vào chuỗi JSON: dấu ngoặc kép trong tên làm hỏng tệp và nút ngắt mất tác dụng.
+        File.WriteAllText(CastActionFile, "{\"action\":\"stop_and_block\"}\r\n", new UTF8Encoding(false));
 
         stopCastItem.Visible = false;
         stopCastSeparator.Visible = false;

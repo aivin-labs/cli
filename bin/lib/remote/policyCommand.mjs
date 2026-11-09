@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import readline from 'readline/promises';
-import { CONFIRM_RANK, ConfirmMode, DEFAULT_LOCAL_POLICY, REMOTE_POLICY_FILE, saveLocalPolicy, stricterPolicy, verifyLocalPolicy } from './localPolicy.mjs';
+import { CAST_CONSENT_RANK, CONFIRM_RANK, CastConsentMode, ConfirmMode, DEFAULT_LOCAL_POLICY, REMOTE_POLICY_FILE, saveLocalPolicy, stricterPolicy, verifyLocalPolicy } from './localPolicy.mjs';
 
 /**
  * `aivin remote policy [hành động] [giá trị]` — chủ máy đặt sàn luật tại máy (localPolicy.mjs). Siết luật chạy ngay; NỚI luật (bớt xác
@@ -14,12 +14,19 @@ const CONFIRM_TEXT = {
   [ConfirmMode.NEVER]: 'không hỏi trên máy — chỉ theo luật phía Aivin',
 };
 
+const CAST_TEXT = {
+  [CastConsentMode.ASK]: 'mỗi phiên xem / điều khiển màn hình phải bấm "Cho phép" trên máy',
+  [CastConsentMode.UNATTENDED]: 'xem / điều khiển màn hình KHÔNG cần người ở máy',
+  [CastConsentMode.OFF]: 'tắt hẳn xem / điều khiển màn hình',
+};
+
 function show(policy) {
   console.log(chalk.blue('🛡️  Luật tại máy này') + chalk.gray(` (${REMOTE_POLICY_FILE})`));
   console.log(`   Xác nhận trên máy: ${chalk.cyan(policy.confirm)} — ${CONFIRM_TEXT[policy.confirm]} (chờ tối đa ${policy.confirm_timeout_sec} s)`);
+  console.log(`   Xem màn hình:      ${chalk.cyan(policy.cast_consent)} — ${CAST_TEXT[policy.cast_consent]}`);
   console.log(`   Công cụ tắt:       ${policy.deny_tools.length ? policy.deny_tools.join(', ') : chalk.gray('không')}`);
   console.log(`   Lệnh chặn thêm:    ${policy.blocked_commands.length ? policy.blocked_commands.map((r) => `/${r}/`).join('  ') : chalk.gray('không')}`);
-  console.log(chalk.gray('   Đổi: aivin remote policy confirm <never|risky|always> · deny|allow <công cụ> · block|unblock "<regex>" · timeout <giây>'));
+  console.log(chalk.gray('   Đổi: aivin remote policy confirm <never|risky|always> · deny|allow <công cụ> · block|unblock "<regex>" · timeout <giây> · cast <ask|unattended|off>'));
 }
 
 /** Nới luật: chỉ người gõ trong terminal thật, và phải trả lời "có". */
@@ -84,8 +91,14 @@ export async function runPolicyCommand(action, value) {
       next.confirm_timeout_sec = Math.round(sec);
       break;
     }
+    case 'cast': {
+      if (!Object.hasOwn(CAST_CONSENT_RANK, v)) throw new Error('Dùng: aivin remote policy cast <ask|unattended|off>');
+      if (CAST_CONSENT_RANK[v] < CAST_CONSENT_RANK[policy.cast_consent]) await assertHumanLoosening(`Đổi xem màn hình từ "${policy.cast_consent}" sang "${v}": ${CAST_TEXT[v]}`);
+      next.cast_consent = v;
+      break;
+    }
     default:
-      throw new Error(`Không hiểu "${action}". Dùng: confirm | deny | allow | block | unblock | timeout`);
+      throw new Error(`Không hiểu "${action}". Dùng: confirm | deny | allow | block | unblock | timeout | cast`);
   }
   const saved = saveLocalPolicy(next);
   console.log(chalk.green('✅ Đã lưu — có hiệu lực ngay (công cụ tắt / bật lại vào danh mục ở lần khởi động daemon kế tiếp).'));

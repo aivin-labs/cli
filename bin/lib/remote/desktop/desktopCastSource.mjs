@@ -23,6 +23,8 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,6 +39,7 @@ namespace AivinDesktopCast {
     [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
     [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, ushort bScan, uint dwFlags, UIntPtr dwExtraInfo);
     [DllImport("user32.dll")] public static extern short VkKeyScan(char ch);
+    [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint code, uint mapType);
 
     // Gõ chữ: keybd_event chỉ mang được 1 byte mã quét (BYTE bScan) → chữ ngoài Latin-1 (ư ơ đ ạ ế…) bị cắt thành ký tự rác.
     // SendInput + KEYEVENTF_UNICODE mang đủ 16 bit mỗi đơn vị UTF-16.
@@ -125,6 +128,7 @@ namespace AivinDesktopCast {
     public const uint MOUSEEVENTF_WHEEL = 0x0800;
     public const uint MOUSEEVENTF_HWHEEL = 0x01000;
 
+    public const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
     public const uint KEYEVENTF_KEYUP = 0x0002;
     public const uint KEYEVENTF_UNICODE = 0x0004;
   }
@@ -164,11 +168,19 @@ namespace AivinDesktopCast {
     static readonly byte[] videoHeader = new byte[12];
     static byte[] audioPacket = new byte[12 + 1920];
 
+    /** Khung thô là toàn bộ màn hình: chỉ đúng tài khoản đang chạy mới mở được, không nhận kết nối qua mạng. */
+    static PipeSecurity OwnerOnly() {
+      var security = new PipeSecurity();
+      security.AddAccessRule(new PipeAccessRule(WindowsIdentity.GetCurrent().User, PipeAccessRights.FullControl, AccessControlType.Allow));
+      security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.NetworkSid, null), PipeAccessRights.FullControl, AccessControlType.Deny));
+      return security;
+    }
+
     public static void Start(string name) {
       var t = new Thread(() => {
         while (CastHost.Running) {
           try {
-            var p = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.None, 0, 8 * 1024 * 1024);
+            var p = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.None, 0, 8 * 1024 * 1024, OwnerOnly());
             p.WaitForConnection();
             lock (gate) { pipe = p; Connected = true; }
             while (CastHost.Running && p.IsConnected) Thread.Sleep(200);
@@ -233,6 +245,8 @@ namespace AivinDesktopCast {
 
   public static class CastScreen {
     static byte[] i420Raw;
+    static byte[] scaleRaw;
+    static byte[] scaleOut;
     static byte[] i420Out;
     static Bitmap cursorBuffer;
     static Bitmap scaleBuffer;
@@ -377,6 +391,51 @@ namespace AivinDesktopCast {
       return cursorBuffer;
     }
 
+    /** Song tuyến tính chia theo hàng trên nhiều nhân: GDI+ DrawImage chỉ chạy một nhân, đo 14 ms mỗi khung từ 1080p xuống 1280, là khâu đắt nhất của bộ quay. */
+    static void ScaleBilinear(Bitmap src, Bitmap dst) {
+      int sw = src.Width, sh = src.Height, dw = dst.Width, dh = dst.Height;
+      var sd = src.LockBits(new Rectangle(0, 0, sw, sh), ImageLockMode.ReadOnly, PixelFormat.Format32bppRgb);
+      try {
+        var dd = dst.LockBits(new Rectangle(0, 0, dw, dh), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+        try {
+          int sStride = Math.Abs(sd.Stride), dStride = Math.Abs(dd.Stride);
+          int sLen = sStride * sh, dLen = dStride * dh;
+          if (scaleRaw == null || scaleRaw.Length < sLen) scaleRaw = new byte[sLen];
+          if (scaleOut == null || scaleOut.Length < dLen) scaleOut = new byte[dLen];
+          byte[] raw = scaleRaw, output = scaleOut;
+          Marshal.Copy(sd.Scan0, raw, 0, sLen);
+          long xStep = ((long)(sw - 1) << 16) / Math.Max(1, dw - 1);
+          long yStep = ((long)(sh - 1) << 16) / Math.Max(1, dh - 1);
+          Parallel.For(0, dh, y => {
+            long fy = y * yStep;
+            int sy = (int)(fy >> 16);
+            int wy = (int)((fy >> 8) & 0xFF);
+            int row0 = sy * sStride;
+            int row1 = (sy + 1 < sh ? sy + 1 : sy) * sStride;
+            int o = y * dStride;
+            for (int x = 0; x < dw; x++, o += 4) {
+              long fx = x * xStep;
+              int sx = (int)(fx >> 16);
+              int wx = (int)((fx >> 8) & 0xFF);
+              int a = sx * 4;
+              int b = (sx + 1 < sw ? sx + 1 : sx) * 4;
+              for (int c = 0; c < 3; c++) {
+                int top = raw[row0 + a + c] * (256 - wx) + raw[row0 + b + c] * wx;
+                int bottom = raw[row1 + a + c] * (256 - wx) + raw[row1 + b + c] * wx;
+                output[o + c] = (byte)((top * (256 - wy) + bottom * wy) >> 16);
+              }
+              output[o + 3] = 255;
+            }
+          });
+          Marshal.Copy(output, 0, dd.Scan0, dLen);
+        } finally {
+          dst.UnlockBits(dd);
+        }
+      } finally {
+        src.UnlockBits(sd);
+      }
+    }
+
     public static Bitmap Scale(Bitmap src, int maxWidth) {
       if (src.Width <= maxWidth) return src;
       int h = (int)Math.Round(src.Height * (double)maxWidth / src.Width);
@@ -384,11 +443,7 @@ namespace AivinDesktopCast {
         if (scaleBuffer != null) scaleBuffer.Dispose();
         scaleBuffer = new Bitmap(maxWidth, h, PixelFormat.Format32bppRgb);
       }
-      using (var g = Graphics.FromImage(scaleBuffer)) {
-        g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
-        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
-        g.DrawImage(src, 0, 0, maxWidth, h);
-      }
+      ScaleBilinear(src, scaleBuffer);
       return scaleBuffer;
     }
 
@@ -464,8 +519,10 @@ namespace AivinDesktopCast {
   }
 
   public static class CastHost {
-    const long JPEG_SMALL_CHANGE_INTERVAL_MS = 66;
+    const long JPEG_SMALL_CHANGE_INTERVAL_MS = 200;
     const double JPEG_BIG_CHANGE_DIFF = 4.5;
+    const long JPEG_IDLE_REFRESH_MS = 8000;
+    const long SCREENS_REFRESH_MS = 2000;
     const int RATIO_SCALE = 65535;
     static volatile bool running = true;
     public static bool Running { get { return running; } }
@@ -481,6 +538,7 @@ namespace AivinDesktopCast {
     static volatile int targetMaxWidth = 1366;
     static volatile int targetQuality = 65;
     static bool lastSecureDesktop = false;
+    static long lastScreensMs = -SCREENS_REFRESH_MS;
 
     public static void Run(string argsJson) {
       Native.SetProcessDPIAware();
@@ -522,6 +580,8 @@ namespace AivinDesktopCast {
       bool changePending = false;
       int lastCursorSeq = -1;
       long lastSendMs = 0;
+      long lastJpegMs = 0;
+      bool jpegSettled = false;
       long lastAuxCheckMs = 0;
 
       while (running) {
@@ -550,7 +610,10 @@ namespace AivinDesktopCast {
           long nowMs = clock.ElapsedMilliseconds;
           bool forceKeepAlive = (nowMs - lastSendMs) >= 1000;
           bool refresh = refreshRequested;
-          if (refresh) refreshRequested = false;
+          if (refresh) {
+            refreshRequested = false;
+            lastScreensMs = -SCREENS_REFRESH_MS;
+          }
 
           bool jpegMode = jpegEnabled || !rawEnabled;
           bool sendChange = changePending;
@@ -562,9 +625,16 @@ namespace AivinDesktopCast {
             changePending = false;
             lastSendMs = nowMs;
             lastCursorSeq = cursorSeq;
-            if (jpegMode) lastJpegThumb = CastScreen.Thumb(source.Frame);
+            // Mỗi ảnh JPEG là nguyên màn hình đi qua máy chủ. Màn hình đứng yên chỉ gửi gói giữ nhịp không ảnh; sau lần đổi cuối gửi lại một ảnh phòng ảnh trước bị rơi (đường này không gửi lại), rồi thưa hẳn.
+            bool changed = sendChange || refresh;
+            bool withJpeg = jpegMode && (changed || !jpegSettled || nowMs - lastJpegMs >= JPEG_IDLE_REFRESH_MS);
+            jpegSettled = !changed;
+            if (withJpeg) {
+              lastJpegMs = nowMs;
+              lastJpegThumb = CastScreen.Thumb(source.Frame);
+            }
             long sendStartMs = clock.ElapsedMilliseconds;
-            SendFrame(source.Frame, cursorInFrame, jpegMode, nowMs, hostStats);
+            SendFrame(source.Frame, cursorInFrame, withJpeg, nowMs, hostStats);
             hostStats.AddLoad(clock.ElapsedMilliseconds - sendStartMs);
           }
         } catch (Exception ex) {
@@ -607,7 +677,11 @@ namespace AivinDesktopCast {
       frameMsg["screenX"] = currentBounds.X;
       frameMsg["screenY"] = currentBounds.Y;
       frameMsg["monitor"] = currentMonitor;
-      frameMsg["screens"] = CastScreen.GetScreens();
+      // Danh sách màn hình ít khi đổi: không gửi và không tra lại ở mọi khung.
+      if (nowMs - lastScreensMs >= SCREENS_REFRESH_MS) {
+        lastScreensMs = nowMs;
+        frameMsg["screens"] = CastScreen.GetScreens();
+      }
       frameMsg["ts"] = nowMs;
       frameMsg["stats"] = hostStats.Snapshot(nowMs);
       if (lastSecureDesktop) frameMsg["secureDesktop"] = true;
@@ -745,6 +819,20 @@ namespace AivinDesktopCast {
       }
     }
 
+    /**
+     * Phím thuộc cụm mở rộng phải gắn cờ extended. Thiếu cờ, Windows hiểu mũi tên / Home / End... là phím số bên phải:
+     * NumLock đang bật thì Shift bị huỷ để phím đó vẫn là di chuyển, nên Shift + mũi tên chỉ di chuyển, không bôi đen.
+     */
+    static bool IsExtendedKey(byte vk) {
+      return (vk >= 0x21 && vk <= 0x28) || vk == 0x2C || vk == 0x2D || vk == 0x2E
+        || vk == 0x5B || vk == 0x5C || vk == 0x5D || vk == 0x90 || vk == 0xA3 || vk == 0xA5;
+    }
+
+    static void SendKey(byte vk, bool up) {
+      uint flags = (IsExtendedKey(vk) ? Native.KEYEVENTF_EXTENDEDKEY : 0) | (up ? Native.KEYEVENTF_KEYUP : 0);
+      Native.keybd_event(vk, (byte)Native.MapVirtualKey(vk, 0), flags, UIntPtr.Zero);
+    }
+
     static List<byte> ExtractModifiers(Dictionary<string, object> cmd) {
       var list = new List<byte>();
       if (!cmd.ContainsKey("modifiers") || cmd["modifiers"] == null) return list;
@@ -760,14 +848,14 @@ namespace AivinDesktopCast {
 
     static void PressModifiers(List<byte> mods) {
       for (int i = 0; i < mods.Count; i++) {
-        Native.keybd_event(mods[i], 0, 0, UIntPtr.Zero);
+        SendKey(mods[i], false);
       }
       if (mods.Count > 0) Thread.Sleep(8);
     }
 
     static void ReleaseModifiers(List<byte> mods) {
       for (int i = mods.Count - 1; i >= 0; i--) {
-        Native.keybd_event(mods[i], 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+        SendKey(mods[i], true);
       }
     }
 
@@ -1066,14 +1154,18 @@ namespace AivinDesktopCast {
               byte vk = KeyNameToVk(Convert.ToString(keys[i]));
               if (vk != 0) vks.Add(vk);
             }
+            // Giữ tổ hợp thì trình duyệt lặp ~30 lần/giây: chậm hơn nhịp đó là lệnh dồn lại, nhả tay rồi vùng chọn vẫn chạy tiếp. Tổ hợp có Win giữ nhịp chậm vì shell xử lý chậm.
+            bool withWin = vks.Contains(0x5B) || vks.Contains(0x5C);
+            int stepMs = withWin ? 10 : 2;
+            int holdMs = withWin ? 40 : 12;
             for (int i = 0; i < vks.Count; i++) {
-              Native.keybd_event(vks[i], 0, 0, UIntPtr.Zero);
-              Thread.Sleep(10);
+              SendKey(vks[i], false);
+              Thread.Sleep(stepMs);
             }
-            Thread.Sleep(40);
+            Thread.Sleep(holdMs);
             for (int i = vks.Count - 1; i >= 0; i--) {
-              Native.keybd_event(vks[i], 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
-              Thread.Sleep(10);
+              SendKey(vks[i], true);
+              Thread.Sleep(stepMs);
             }
           }
         }
@@ -1157,9 +1249,9 @@ namespace AivinDesktopCast {
     static void HandleSpecialKey(string key) {
       byte vk = KeyNameToVk(key);
       if (vk != 0) {
-        Native.keybd_event(vk, 0, 0, UIntPtr.Zero);
+        SendKey(vk, false);
         Thread.Sleep(15);
-        Native.keybd_event(vk, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+        SendKey(vk, true);
       }
     }
   }

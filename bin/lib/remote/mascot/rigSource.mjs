@@ -41,6 +41,8 @@ const SCREENS = BOT_RIG.screens;
 const SP = BOT_RIG.sparks;
 const TR = BOT_RIG.tray;
 
+const WAVE = BOT_RIG.wave;
+
 export const RIG_CS = String.raw`
   public sealed class Motion {
     public readonly double Bob, BobHz, Breathe, Lean, HeadTilt, HeadY, Antenna, Glow, GlowPulse, GlowHz, Tint, TintPulse, TintHz, Scan, Scale, Opacity, LookX, LookY;
@@ -150,6 +152,10 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
     readonly Dictionary<string, System.Windows.UIElement> mouthEls = new Dictionary<string, System.Windows.UIElement>();
     readonly ScaleTransform eyeMorphL, eyeMorphR, mouthMorph;
     string eyesNow, eyesNext, mouthNow, mouthNext; double mouthAt;
+    readonly System.Windows.Shapes.Polyline waveL, waveR;
+    bool waveOn;
+    const double WAVE_HALF = ${n(WAVE.halfWidth)}, WAVE_AMP = ${n(WAVE.amp)}, WAVE_LEN = ${n(WAVE.length)}, WAVE_HZ = ${n(WAVE.hz)}, WAVE_EYE_DX = ${n(BOT_RIG.face.eyeDx)};
+    const int WAVE_SEGMENTS = ${WAVE.segments};
     readonly Spring eyeSq = new Spring(1), mouthSq = new Spring(1);
     const double MOUTH_LAG = 0.05;
     // Antenna light color: eases from the old state's color to the new one.
@@ -208,6 +214,7 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       faceBase = faceScale.ScaleX;
       foreach (var name in new[] { ${BOT_EYES.map((e) => `"${e}"`).join(', ')} }) eyeEls[name] = new[] { Get<System.Windows.UIElement>("Eyes_" + name + "_L"), Get<System.Windows.UIElement>("Eyes_" + name + "_R") };
       foreach (var name in new[] { ${BOT_MOUTHS.map((e) => `"${e}"`).join(', ')} }) mouthEls[name] = Get<System.Windows.UIElement>("Mouth_" + name);
+      waveL = Get<System.Windows.Shapes.Polyline>("WaveL"); waveR = Get<System.Windows.Shapes.Polyline>("WaveR");
       eyeMorphL = Get<ScaleTransform>("EyeMorphL"); eyeMorphR = Get<ScaleTransform>("EyeMorphR"); mouthMorph = Get<ScaleTransform>("MouthMorph");
       tint.Fill = tintBrush; halo.Fill = tintBrush;
       tray = Get<System.Windows.UIElement>("Tray"); trayArrow = Get<System.Windows.UIElement>("TrayArrow"); trayBase = Get<System.Windows.UIElement>("TrayBase"); trayNo = Get<System.Windows.UIElement>("TrayNo");
@@ -243,12 +250,30 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
     public void SetFace(string eyes, string mouth) {
       if (!eyeEls.ContainsKey(eyes) || !mouthEls.ContainsKey(mouth)) return;
       if (eyesNow == null) { eyesNow = eyes; ShowEyes(eyes); }
+      else if (waveOn) { eyesNow = eyes; eyesNext = null; } // Remote viewer: the eyes stay a wave; only remember the face to restore when the session ends.
       else if (eyesNext != null || eyes != eyesNow) eyesNext = eyes;
       if (mouthNow == null) { mouthNow = mouth; ShowMouth(mouth); }
       else if (mouthNext != null || mouth != mouthNow) { if (mouthNext == null) mouthAt = Now + MOUTH_LAG; mouthNext = mouth; }
     }
     void ShowEyes(string name) {
-      foreach (var kv in eyeEls) { var v = kv.Key == name ? Visibility.Visible : Visibility.Collapsed; foreach (var e in kv.Value) e.Visibility = v; }
+      string shown = waveOn ? "wave" : name;
+      foreach (var kv in eyeEls) { var v = kv.Key == shown ? Visibility.Visible : Visibility.Collapsed; foreach (var e in kv.Value) e.Visibility = v; }
+    }
+    /** Someone is viewing / controlling this computer: both eyes become one continuously moving sine wave, over any face, until the session ends. */
+    public void RemoteWave(bool on) {
+      if (on == waveOn) return;
+      if (on && dozing) Doze(false);
+      waveOn = on;
+      ShowEyes(eyesNow);
+    }
+    /** Phase follows the real position, so it reads as one wave running through both eyes. */
+    PointCollection WavePoints(double t, double eyeCenter) {
+      var points = new PointCollection(WAVE_SEGMENTS + 1);
+      for (int i = 0; i <= WAVE_SEGMENTS; i++) {
+        double x = -WAVE_HALF + 2 * WAVE_HALF * i / WAVE_SEGMENTS;
+        points.Add(new Point(x, WAVE_AMP * Math.Sin(2 * Math.PI * ((x + eyeCenter) / WAVE_LEN - WAVE_HZ * t))));
+      }
+      return points;
     }
     void ShowMouth(string name) {
       foreach (var kv in mouthEls) kv.Value.Visibility = kv.Key == name ? Visibility.Visible : Visibility.Collapsed;
@@ -272,7 +297,7 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
 
     /** Doze off (the window calls this after a long idle) or wake up: wake = perk up, antenna flick, a blink. */
     public void Doze(bool on) {
-      if (on == dozing) return;
+      if (on == dozing || (on && waveOn)) return;
       dozing = on; m = Motion.For(on ? "doze" : state);
       if (on) nextJerk = Now + 6 + rnd.NextDouble() * 5;
       else { perkAt = Now; antA.V += 150; blinkAt = Now; }
@@ -580,6 +605,7 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       double blink = 1;
       if (bu >= 0 && bu < 0.17) blink = bu < 0.06 ? 1 - 0.9 * (bu / 0.06) : (bu < 0.08 ? 0.1 : 0.1 + 0.9 * Math.Sin((bu - 0.08) / 0.09 * Math.PI / 2));
       foreach (var b in blinks) b.ScaleY = blink;
+      if (waveOn) { waveL.Points = WavePoints(t, -WAVE_EYE_DX); waveR.Points = WavePoints(t, WAVE_EYE_DX); }
       if (dz > 0) foreach (var r in spins) r.Angle = (dizU * 540) % 360;
 
       // 10) Face morph: eyes squash shut fast (~80 ms, no overshoot), swap kind while shut, spring open with a small overshoot (and a
