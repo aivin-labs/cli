@@ -4,6 +4,7 @@ import path from 'path';
 import axios from 'axios';
 import { createHash } from 'crypto';
 import { fetchWebUrl } from './context.mjs';
+import { defaultWebUrl } from './servers.mjs';
 import { startPreviewServer } from './localPreview.mjs';
 import { missionAuthHeaders, missionServerUrl, resolveWorkspace } from './workspace.mjs';
 import { spawn } from 'child_process';
@@ -21,7 +22,7 @@ import { mascotLang } from './remote/mascot/strings.mjs';
 
 export const OPEN_INDEX_FILE = path.join(os.homedir(), '.aivin', 'opened-files.json');
 const MAX_INDEX_ENTRIES = 500;
-const DEFAULT_WEB_URL = 'https://brain.aivin.cloud';
+const DEFAULT_WEB_URL = 'https://app.aivin.cloud';
 
 export const OpenDisplay = Object.freeze({ WINDOW: 'window', TAB: 'tab', NONE: 'none' });
 
@@ -175,7 +176,7 @@ function showUrl(url, mode) {
 }
 
 async function resolveWebUrl(serverUrl) {
-  return process.env.AIVIN_WEB_URL || (await fetchWebUrl(serverUrl)) || DEFAULT_WEB_URL;
+  return process.env.AIVIN_WEB_URL || (await fetchWebUrl(serverUrl)) || defaultWebUrl(serverUrl) || DEFAULT_WEB_URL;
 }
 
 /**

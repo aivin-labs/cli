@@ -58,7 +58,7 @@ export function openBrowser(url) {
 export async function browserLogin() {
   // Defaults to the production web app - override with AIVIN_WEB_URL only if you're pointing at a
   // local/dev/staging frontend instead.
-  const webBaseUrl = process.env.AIVIN_WEB_URL || 'https://brain.aivin.cloud';
+  const webBaseUrl = process.env.AIVIN_WEB_URL || 'https://app.aivin.cloud';
 
   const state = randomBytes(16).toString('hex');
   let resolveKey, rejectKey;

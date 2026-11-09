@@ -910,7 +910,7 @@ program
           // returns null - warn instead of silently opening the PRODUCTION web app's login page,
           // which would mint a key for the wrong server without any indication why.
           console.log(chalk.yellow(`⚠️  Couldn't reach ${resolvedBaseUrl} to resolve its web app URL - check the host is correct.`));
-          console.log(chalk.yellow(`   Falling back to the production web app (https://brain.aivin.cloud) - the key it mints will still be saved against ${resolvedBaseUrl}, likely NOT what you want.`));
+          console.log(chalk.yellow(`   Falling back to the production web app (https://app.aivin.cloud) - the key it mints will still be saved against ${resolvedBaseUrl}, likely NOT what you want.`));
         }
       }
 

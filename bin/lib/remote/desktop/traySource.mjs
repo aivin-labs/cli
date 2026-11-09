@@ -932,6 +932,9 @@ namespace AivinDesktop {
     static string PlatformUrl() {
       string api = CurrentServerUrl();
       api = CanonicalServerUrl(api);
+      string apiZone = null;
+      Uri apiUri;
+      if (Uri.TryCreate(api, UriKind.Absolute, out apiUri)) apiZone = AivinZone(apiUri.Host);
       try {
         ServicePointManager.SecurityProtocol = ServicePointManager.SecurityProtocol | SecurityProtocolType.Tls12;
         using (WebClient client = new WebClient()) {
@@ -942,13 +945,20 @@ namespace AivinDesktop {
           if (appUrl.Success) {
             string value = Regex.Unescape(appUrl.Groups[1].Value);
             Uri uri;
-            if (Uri.TryCreate(value, UriKind.Absolute, out uri) && uri.Scheme == Uri.UriSchemeHttps) return uri.ToString().TrimEnd('/');
+            // May chu Aivin chinh thuc chi duoc mo web cung goc ten mien (api.aivin.vn khong mo *.aivin.cloud).
+            if (Uri.TryCreate(value, UriKind.Absolute, out uri) && uri.Scheme == Uri.UriSchemeHttps && (apiZone == null || AivinZone(uri.Host) == apiZone)) return uri.ToString().TrimEnd('/');
           }
         }
       } catch { }
-      if (api == "https://api.aivin.vn") return "https://app.aivin.vn";
-      if (api == "https://api.aivin.cloud") return "https://brain.aivin.cloud";
-      return "https://brain.aivin.cloud";
+      if (apiZone == "aivin.vn") return "https://app.aivin.vn";
+      return "https://app.aivin.cloud";
+    }
+
+    static string AivinZone(string host) {
+      string value = host.ToLowerInvariant();
+      foreach (string zone in new string[] { "aivin.vn", "aivin.cloud" })
+        if (value == zone || value.EndsWith("." + zone, StringComparison.Ordinal)) return zone;
+      return null;
     }
 
     static string BrowserPath(string browser) {

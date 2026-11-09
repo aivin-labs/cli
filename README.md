@@ -243,7 +243,7 @@ my-plugin/
 | :--- | :--- | :--- |
 | `SDK_ENDPOINT` | SDK gRPC connection | `sdk.aivin.cloud:443` |
 | `AIVIN_BASE_URL` | API endpoints (`deploy`, `test`, `login`) | `https://api.aivin.cloud` |
-| `AIVIN_WEB_URL` | Web dashboard & browser login | `https://brain.aivin.cloud` |
+| `AIVIN_WEB_URL` | Web dashboard & browser login | `https://app.aivin.cloud` |
 | `LOCAL_TEST_PORT` | Local test HTTP port (`aivin start`) | `4001` |
 | `LOCAL_TEST_HOST` | Local test bind host | `127.0.0.1` |
 | `AIVIN_SANDBOX_WORKER` | Isolated thread execution | `false` |
