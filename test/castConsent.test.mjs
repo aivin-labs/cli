@@ -85,6 +85,69 @@ test('người xem rời lúc đang hỏi: huỷ, không cho bắt đầu', asyn
   assert.equal(await pending, D.CANCELLED);
 });
 
+/** Hộp hỏi chờ tới khi test trả lời; bị huỷ thì trả `CANCELLED` như hộp thật. */
+function heldDialog() {
+  let answerDialog;
+  const answer = ({ signal }) => new Promise((resolve) => {
+    answerDialog = resolve;
+    signal.addEventListener('abort', () => resolve(D.CANCELLED));
+  });
+  return { answer, click: (decision) => answerDialog(decision) };
+}
+const tick = () => new Promise((r) => setImmediate(r));
+
+test('người xem rời tạm lúc đang hỏi: hộp vẫn mở, bấm xong chưa phát, quay lại vào thẳng không hỏi nữa', async () => {
+  const dialog = heldDialog();
+  const { consent, asks } = setup({ answer: dialog.answer });
+  const first = consent.decide(req());
+  await tick();
+  consent.cancel({ sessionId: 's1', viewerId: 'v1', final: false, away: true });
+  await tick();
+  dialog.click(D.ALLOW);
+  assert.equal(await first, D.CANCELLED);
+  assert.equal(await consent.decide(req()), D.ALLOW);
+  assert.equal(asks.length, 1);
+});
+
+test('người xem quay lại khi hộp còn mở: dùng chung hộp đó, được báo đang chờ, bấm xong vào luôn', async () => {
+  const dialog = heldDialog();
+  const { consent, asks, waits } = setup({ answer: dialog.answer });
+  const first = consent.decide(req());
+  await tick();
+  consent.cancel({ sessionId: 's1', viewerId: 'v1', final: false, away: true });
+  const back = consent.decide(req({ viewerId: 'v2' }));
+  await tick();
+  dialog.click(D.ALLOW);
+  assert.equal(await first, D.CANCELLED);
+  assert.equal(await back, D.ALLOW);
+  assert.equal(asks.length, 1);
+  assert.equal(waits.length, 2);
+});
+
+test('rời tạm rồi phiên kết thúc hẳn: đóng hộp, không còn đồng ý nào', async () => {
+  const dialog = heldDialog();
+  const { consent, asks } = setup({ answer: dialog.answer });
+  const first = consent.decide(req());
+  await tick();
+  consent.cancel({ sessionId: 's1', viewerId: 'v1', final: false, away: true });
+  consent.cancel({ sessionId: 's1' });
+  assert.equal(await first, D.CANCELLED);
+  consent.forget('s1');
+  void consent.decide(req());
+  await tick();
+  assert.equal(asks.length, 2);
+  consent.cancelAll();
+});
+
+test('người xem rời hẳn (không phải rời tạm) lúc đang hỏi: vẫn đóng hộp như cũ', async () => {
+  const dialog = heldDialog();
+  const { consent } = setup({ answer: dialog.answer });
+  const first = consent.decide(req());
+  await tick();
+  consent.cancel({ sessionId: 's1', viewerId: 'v1', final: false });
+  assert.equal(await first, D.CANCELLED);
+});
+
 test('không cần người ở máy: cho ngay; tắt hẳn: từ chối, không hỏi', async () => {
   const on = setup({ mode: M.UNATTENDED });
   assert.equal(await on.consent.decide(req()), D.ALLOW);

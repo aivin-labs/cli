@@ -1355,7 +1355,7 @@ export async function startRemoteClient(options = {}) {
     });
   }));
   socket.on(DeviceEvent.DESKTOP_CAST_STOP, guarded(DeviceEvent.DESKTOP_CAST_STOP, (payload) => {
-    if (payload?.session_id) castConsent.cancel({ sessionId: payload.session_id, viewerId: payload.viewer_id, final: payload.final !== false });
+    if (payload?.session_id) castConsent.cancel({ sessionId: payload.session_id, viewerId: payload.viewer_id, final: payload.final !== false, away: payload.away === true });
     castProver.cancel(payload?.final !== false ? undefined : payload?.viewer_id);
     if (payload?.session_id && payload.session_id !== desktopCast.sessionId()) {
       // Phiên đã dừng ở máy (gián đoạn) mà máy chủ kết thúc hẳn: quên đồng ý đang giữ.

@@ -28,6 +28,8 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
   const pending = new Map();
   /** Khoá thiết bị đã được cho vào từng phiên — chủ máy bấm ngắt thì các thiết bị đó mất luôn quyền tin. */
   const sessionDevices = new Map();
+  /** Người xem rời tạm trong lúc hộp đang hỏi: mã người xem → mã phiên. Hộp vẫn mở, bấm xong thì nhớ đồng ý nhưng chưa phát cho người đã đi. */
+  const awayViewers = new Map();
 
   const approve = (k, sessionId, deviceKey) => {
     if (approved.size >= MAX_REMEMBERED) approved.clear();
@@ -49,7 +51,11 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
   function request({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked }) {
     const k = key(sessionId, viewerKey, viewerDevice);
     const open = pending.get(k);
-    if (open) return open.promise;
+    if (open) {
+      // Người xem quay lại khi hộp còn mở: báo lại để họ thấy "đang chờ" thay vì báo lỗi không nhận được hình.
+      onWaiting({ sessionId, viewerId, viewerDevice });
+      return open.promise;
+    }
     const controller = new AbortController();
     onWaiting({ sessionId, viewerId, viewerDevice });
     const canTrust = Boolean(deviceKey && trust?.accepts(deviceKey));
@@ -69,8 +75,19 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
     return promise;
   }
 
+  /** Đồng ý tới khi người xem đang rời tạm thì chưa phát: họ quay lại là `valid` cho vào thẳng. */
+  async function requestForViewer(options) {
+    const answer = await request(options);
+    return answer === CastConsentDecision.ALLOW && awayViewers.has(String(options.viewerId)) ? CastConsentDecision.CANCELLED : answer;
+  }
+
+  const clearAway = (sessionId) => {
+    for (const [viewer, session] of awayViewers) if (session === sessionId) awayViewers.delete(viewer);
+  };
+
   return {
     async decide({ sessionId, viewerId, viewerDevice = '', viewerKey = '', deviceKey = '', prove = null }) {
+      awayViewers.delete(String(viewerId));
       const mode = getMode();
       if (mode === CastConsentMode.OFF) return CastConsentDecision.DISABLED;
       const locked = isLocked();
@@ -91,24 +108,34 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
           try { trust.touch(deviceKey); } catch { /* chỉ là gia hạn */ }
           return CastConsentDecision.ALLOW;
         }
-        return request({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked: isLocked() });
+        return requestForViewer({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked: isLocked() });
       }
-      return request({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked });
+      return requestForViewer({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked });
     },
-    /** Người xem rời / huỷ trong lúc đang hỏi: đóng hộp, không bắt đầu chụp. */
-    cancel({ sessionId, viewerId, final = true }) {
+    /**
+     * Người xem rời / huỷ trong lúc đang hỏi: đóng hộp, không bắt đầu chụp. `away`: chỉ rời tạm (điện thoại tắt màn hình khi chủ máy quay sang
+     * bấm trên máy) — giữ hộp, không thì hộp biến mất ngay lúc chủ máy định bấm.
+     */
+    cancel({ sessionId, viewerId, final = true, away = false }) {
+      if (away && !final) {
+        if ([...pending.values()].some((open) => open.sessionId === sessionId)) awayViewers.set(String(viewerId), sessionId);
+        return;
+      }
+      if (final) clearAway(sessionId);
       for (const open of pending.values()) {
         if (open.sessionId === sessionId && (final || open.viewerId === viewerId)) open.controller.abort();
       }
     },
     /** Tạm dừng / tắt daemon / chủ máy bấm ngắt: đóng mọi hộp đang hỏi (bấm "Cho phép" muộn cũng không còn tác dụng). */
     cancelAll() {
+      awayViewers.clear();
       for (const open of pending.values()) open.controller.abort();
     },
     /** Phiên kết thúc hẳn: quên đồng ý. */
     forget(sessionId) {
       for (const k of keysOf(sessionId)) approved.delete(k);
       sessionDevices.delete(sessionId);
+      clearAway(sessionId);
     },
     /** Chủ máy bấm ngắt: mọi thiết bị đã vào phiên này mất quyền tin (phải gọi trước khi phiên bị quên). */
     revokeSessionTrust(sessionId) {
