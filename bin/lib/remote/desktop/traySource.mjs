@@ -217,6 +217,22 @@ namespace AivinDesktop {
     }
   }
 
+  // WinForms không tính Padding của mục vào bề rộng cửa sổ menu, nên mục rộng hơn cửa sổ; menu con lại đặt theo bề rộng mục nên bị hở xa menu cha.
+  class SubmenuItem : ToolStripMenuItem {
+    public SubmenuItem(string text) : base(text) { }
+
+    protected override Point DropDownLocation {
+      get {
+        Point location = base.DropDownLocation;
+        if (Owner == null) return location;
+        int overflow = Bounds.Right - Owner.ClientSize.Width;
+        // Menu con bật sang trái (sát mép phải màn hình) thì không dính phần thừa này.
+        if (overflow > 0 && location.X > Owner.PointToScreen(Bounds.Location).X) location.X -= overflow;
+        return location;
+      }
+    }
+  }
+
   class ModernMenuRenderer : ToolStripProfessionalRenderer {
     static readonly Color ClrBorder = Color.FromArgb(229, 230, 235);
     static readonly Color ClrHover = Color.FromArgb(242, 243, 245);
@@ -426,7 +442,8 @@ namespace AivinDesktop {
       mascot = Item(cfg.T("mascot"), delegate { ToggleMascot(); });
       pause = Item("", delegate { TogglePause(); });
       terminal = Item(cfg.T("terminal"), delegate { OpenTerminal(); });
-      serverMenu = Item(cfg.T("server"), delegate { });
+      serverMenu = new SubmenuItem(cfg.T("server"));
+      serverMenu.Padding = new Padding(16, 6, 24, 6);
       serverCloud = Item(cfg.T("serverCloud"), delegate { ChangeServer("https://api.aivin.cloud"); });
       serverVn = Item(cfg.T("serverVn"), delegate { ChangeServer("https://api.aivin.vn"); });
       serverLocal = Item(cfg.T("serverLocal"), delegate { ChangeServer("http://localhost:3001"); });
