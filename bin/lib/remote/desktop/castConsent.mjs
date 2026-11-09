@@ -2,7 +2,7 @@ import { CastConsentMode } from '../localPolicy.mjs';
 
 /** Kết quả hỏi; khác `ALLOW` / `CANCELLED` thì gửi nguyên giá trị làm lý do từ chối cho người xem. */
 export const CastConsentDecision = Object.freeze({
-  ALLOW: 'allow', DISABLED: 'cast_disabled', REJECTED: 'rejected_by_user', TIMEOUT: 'consent_timeout', UNAVAILABLE: 'consent_unavailable', CANCELLED: 'cancelled',
+  ALLOW: 'allow', ALLOW_ALWAYS: 'allow_always', DISABLED: 'cast_disabled', REJECTED: 'rejected_by_user', TIMEOUT: 'consent_timeout', UNAVAILABLE: 'consent_unavailable', CANCELLED: 'cancelled',
 });
 
 const MAX_REMEMBERED = 100;
@@ -18,11 +18,24 @@ const key = (sessionId, viewerKey, viewerDevice) => `${sessionId}\n${viewerKey |
  * Chủ máy đồng ý từng phiên, quyết định ngay trên máy nên máy chủ không trả lời thay được. Đồng ý có hiệu lực cho đúng phiên + đúng người xem đó
  * (người xem rớt mạng nối lại không hỏi lại). Phiên kết thúc hẳn (`forget`) là quên; phiên chỉ gián đoạn (`suspend`: máy rớt mạng) thì giữ thêm
  * `CONSENT_RESUME_MS`. Chủ máy vừa bấm ngắt thì `isLocked` đúng: luôn hỏi, kể cả chế độ không cần người ở máy.
+ *
+ * `trust` (castTrust.mjs): thiết bị người ở máy đã bấm "Luôn tin" vào thẳng nếu `prove()` chứng minh đúng khoá của nó; sai thì hỏi như thường.
+ * Chế độ `off` và trạng thái vừa bấm ngắt vẫn thắng quyền tin.
  */
-export function createCastConsent({ ask, getMode, isLocked = () => false, unlock = () => {}, onWaiting = () => {}, now = Date.now }) {
+export function createCastConsent({ ask, getMode, isLocked = () => false, unlock = () => {}, onWaiting = () => {}, now = Date.now, trust = null }) {
   /** khoá → hạn (Infinity khi phiên đang chạy). */
   const approved = new Map();
   const pending = new Map();
+  /** Khoá thiết bị đã được cho vào từng phiên — chủ máy bấm ngắt thì các thiết bị đó mất luôn quyền tin. */
+  const sessionDevices = new Map();
+
+  const approve = (k, sessionId, deviceKey) => {
+    if (approved.size >= MAX_REMEMBERED) approved.clear();
+    approved.set(k, Infinity);
+    if (!deviceKey) return;
+    if (!sessionDevices.has(sessionId)) sessionDevices.set(sessionId, new Set());
+    sessionDevices.get(sessionId).add(deviceKey);
+  };
 
   const valid = (k) => {
     const until = approved.get(k);
@@ -33,29 +46,31 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
   };
   const keysOf = (sessionId) => [...approved.keys()].filter((k) => k.startsWith(`${sessionId}\n`));
 
-  function request({ sessionId, viewerId, viewerDevice, viewerKey, locked }) {
+  function request({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked }) {
     const k = key(sessionId, viewerKey, viewerDevice);
     const open = pending.get(k);
     if (open) return open.promise;
     const controller = new AbortController();
     onWaiting({ sessionId, viewerId, viewerDevice });
-    const promise = new Promise((resolve) => resolve(ask({ viewerDevice, locked, signal: controller.signal })))
+    const canTrust = Boolean(deviceKey && trust?.accepts(deviceKey));
+    const promise = new Promise((resolve) => resolve(ask({ viewerDevice, locked, canTrust, signal: controller.signal })))
       .catch(() => CastConsentDecision.UNAVAILABLE)
       .then((answer) => {
         pending.delete(k);
-        if (answer === CastConsentDecision.ALLOW) {
-          if (approved.size >= MAX_REMEMBERED) approved.clear();
-          approved.set(k, Infinity);
-          if (locked) unlock();
+        if (answer !== CastConsentDecision.ALLOW && answer !== CastConsentDecision.ALLOW_ALWAYS) return answer;
+        approve(k, sessionId, deviceKey);
+        if (locked) unlock();
+        if (answer === CastConsentDecision.ALLOW_ALWAYS && canTrust) {
+          try { trust.add({ key: deviceKey, name: viewerDevice }); } catch { /* không lưu được: vẫn cho phiên này */ }
         }
-        return answer;
+        return CastConsentDecision.ALLOW;
       });
     pending.set(k, { promise, controller, sessionId, viewerId });
     return promise;
   }
 
   return {
-    async decide({ sessionId, viewerId, viewerDevice = '', viewerKey = '' }) {
+    async decide({ sessionId, viewerId, viewerDevice = '', viewerKey = '', deviceKey = '', prove = null }) {
       const mode = getMode();
       if (mode === CastConsentMode.OFF) return CastConsentDecision.DISABLED;
       const locked = isLocked();
@@ -66,7 +81,19 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
         approved.set(k, Infinity);
         return CastConsentDecision.ALLOW;
       }
-      return request({ sessionId, viewerId, viewerDevice, viewerKey, locked });
+      if (!locked && deviceKey && trust?.has(deviceKey)) {
+        const proven = await Promise.resolve(prove?.()).catch(() => false);
+        if (proven === null) return CastConsentDecision.CANCELLED;
+        // Trong lúc chờ chữ ký chủ máy có thể vừa tắt hẳn hoặc bấm ngắt.
+        if (getMode() === CastConsentMode.OFF) return CastConsentDecision.DISABLED;
+        if (proven === true && !isLocked()) {
+          approve(k, sessionId, deviceKey);
+          try { trust.touch(deviceKey); } catch { /* chỉ là gia hạn */ }
+          return CastConsentDecision.ALLOW;
+        }
+        return request({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked: isLocked() });
+      }
+      return request({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked });
     },
     /** Người xem rời / huỷ trong lúc đang hỏi: đóng hộp, không bắt đầu chụp. */
     cancel({ sessionId, viewerId, final = true }) {
@@ -81,6 +108,13 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
     /** Phiên kết thúc hẳn: quên đồng ý. */
     forget(sessionId) {
       for (const k of keysOf(sessionId)) approved.delete(k);
+      sessionDevices.delete(sessionId);
+    },
+    /** Chủ máy bấm ngắt: mọi thiết bị đã vào phiên này mất quyền tin (phải gọi trước khi phiên bị quên). */
+    revokeSessionTrust(sessionId) {
+      for (const deviceKey of sessionDevices.get(sessionId) || []) {
+        try { trust?.remove(deviceKey); } catch { /* đã khoá theo cả máy: phiên sau vẫn phải hỏi */ }
+      }
     },
     /** Phiên chỉ gián đoạn (máy rớt mạng): giữ đồng ý thêm `ms` để phát lại không phải hỏi lại. */
     suspend(sessionId, ms = CONSENT_RESUME_MS) {

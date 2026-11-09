@@ -356,6 +356,7 @@ namespace AivinDesktop {
     static readonly string StateFile = Path.Combine(Program.Home, "desktop", "tray-state.txt");
     static readonly string LogFile = Path.Combine(Program.Home, "remote-service.log");
     static readonly string CastSessionFile = Path.Combine(Program.Home, "desktop-cast-session.json");
+    static readonly string TrustedDevicesFile = Path.Combine(Program.Home, "cast-trusted-devices.json");
     static readonly string CastActionFile = Path.Combine(Program.Home, "desktop-cast-action.json");
     static readonly object logLock = new object();
 
@@ -381,6 +382,8 @@ namespace AivinDesktop {
     ToolStripMenuItem status, updateItem, open, connectCodeItem, quickChat, quickVoice, pause, startup, mascot, terminal, quit, serverMenu, serverCloud, serverVn, serverLocal;
     ToolStripSeparator quickSeparator, stopCastSeparator;
     ToolStripMenuItem stopCastItem;
+    ToolStripMenuItem trustedMenu;
+    string trustedShown = "";
     System.Windows.Forms.Timer timer;
     Control invoker;
     EventWaitHandle openEvent, quitEvent;
@@ -437,6 +440,12 @@ namespace AivinDesktop {
       serverMenu.DropDown.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
       serverMenu.DropDown.Padding = new Padding(2, 6, 2, 6);
       startup = Item(cfg.T("startup"), delegate { SetStartup(!StartupEnabled()); Refresh(); });
+      trustedMenu = Item(cfg.T("trustedDevices"), delegate { });
+      trustedMenu.Visible = false;
+      ToolStripDropDownMenu trustedDrop = trustedMenu.DropDown as ToolStripDropDownMenu; if (trustedDrop != null) { trustedDrop.ShowImageMargin = false; }
+      trustedMenu.DropDown.BackColor = Color.White;
+      trustedMenu.DropDown.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+      trustedMenu.DropDown.Padding = new Padding(2, 6, 2, 6);
       updateItem = Item("", delegate { CheckOrApplyUpdate(); });
 
       status = new ToolStripMenuItem();
@@ -463,6 +472,7 @@ namespace AivinDesktop {
         serverMenu,
         new ToolStripSeparator(),
         startup,
+        trustedMenu,
         updateItem,
         status,
         stopCastSeparator,
@@ -792,6 +802,8 @@ namespace AivinDesktop {
       // WinForms không tính đủ chỗ cho cột phím tắt khi menu tự vẽ chữ: tự giữ bề rộng tối thiểu để phím không bị cắt / đè lên tên mục.
       quickChat.Owner.MinimumSize = new Size(Math.Max(ShortcutRowWidth(quickChat), ShortcutRowWidth(quickVoice)), 0);
 
+      RefreshTrustedDevices(running);
+
       // Kiểm tra có thiết bị đang cast màn hình không — chỉ khi daemon còn chạy (tệp phiên có thể sót lại sau khi daemon chết).
       string castDevice = null;
       try {
@@ -819,6 +831,47 @@ namespace AivinDesktop {
         stopCastItem.Visible = false;
         stopCastSeparator.Visible = false;
       }
+    }
+
+    /** Danh sách chỉ để hiện và gỡ — daemon mới là bên kiểm chữ ký và cho vào. Rỗng / daemon không chạy thì ẩn cả mục, menu giữ gọn. */
+    void RefreshTrustedDevices(bool running) {
+      var rows = new List<string[]>();
+      try {
+        if (running && File.Exists(TrustedDevicesFile)) {
+          double nowMs = (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+          foreach (Match row in Regex.Matches(File.ReadAllText(TrustedDevicesFile), "\\{[^{}]*\\}")) {
+            Match key = Regex.Match(row.Value, "\"key\"\\s*:\\s*\"([A-Za-z0-9+/=]+)\"");
+            Match name = Regex.Match(row.Value, "\"name\"\\s*:\\s*\"([^\"]*)\"");
+            Match added = Regex.Match(row.Value, "\"added_at\"\\s*:\\s*\"([^\"]*)\"");
+            Match expires = Regex.Match(row.Value, "\"expires_at\"\\s*:\\s*([0-9]+)");
+            if (!key.Success || !expires.Success || double.Parse(expires.Groups[1].Value) < nowMs) continue;
+            DateTime when;
+            string date = DateTime.TryParse(added.Groups[1].Value, out when) ? when.ToString("dd/MM/yyyy") : "";
+            rows.Add(new string[] { key.Groups[1].Value, name.Groups[1].Value, date });
+          }
+        }
+      } catch { }
+
+      trustedMenu.Visible = rows.Count > 0;
+      var shown = new StringBuilder();
+      foreach (string[] row in rows) shown.Append(row[0]).Append('|');
+      if (shown.ToString() == trustedShown) return;
+      trustedShown = shown.ToString();
+
+      trustedMenu.DropDownItems.Clear();
+      foreach (string[] row in rows) {
+        string key = row[0];
+        trustedMenu.DropDownItems.Add(Item(cfg.T("trustedRemove").Replace("{device}", row[1]).Replace("{date}", row[2]),
+          delegate { SendTrustAction("{\"action\":\"untrust\",\"key\":\"" + key + "\"}"); }));
+      }
+      if (rows.Count > 1) {
+        trustedMenu.DropDownItems.Add(new ToolStripSeparator());
+        trustedMenu.DropDownItems.Add(Item(cfg.T("trustedRemoveAll"), delegate { SendTrustAction("{\"action\":\"untrust_all\"}"); }));
+      }
+    }
+
+    void SendTrustAction(string json) {
+      try { File.WriteAllText(CastActionFile, json + "\r\n", new UTF8Encoding(false)); } catch { }
     }
 
     void DisconnectAndBlockCast() {

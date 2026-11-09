@@ -206,13 +206,17 @@ test('hộp xác nhận Windows: cài chốt người thật, "Cho phép" phải
 test('hộp xác nhận / đồng ý: chữ dài cạnh nút không đẩy nút ra ngoài (nút giữ chỗ trước, chữ xuống dòng trong phần còn lại)', async () => {
   const { CONSENT_XAML } = await import('../bin/lib/remote/desktop/castAuth.mjs');
   const confirmXaml = Buffer.from(confirmCommand({ request: { reason: 'r', detail: 'd' }, timeoutSec: 30, platform: 'win32' }).env.AIVIN_C_XAML, 'base64').toString('utf8');
-  for (const xaml of [confirmXaml, CONSENT_XAML]) {
-    const row = xaml.slice(xaml.lastIndexOf('<DockPanel'), xaml.lastIndexOf('</DockPanel>'));
-    assert.match(row, /LastChildFill="True"/);
-    assert.ok(row.indexOf('x:Name="Allow"') < row.indexOf('x:Name="Reject"'));
-    assert.ok(row.indexOf('x:Name="Reject"') < row.indexOf('x:Name="Countdown"'));
-    assert.match(row, /x:Name="Countdown"[^>]*TextWrapping="Wrap"/);
-  }
+  const rowOf = (xaml) => xaml.slice(xaml.lastIndexOf('<DockPanel'), xaml.lastIndexOf('</DockPanel>'));
+  const confirmRow = rowOf(confirmXaml);
+  assert.match(confirmRow, /LastChildFill="True"/);
+  assert.ok(confirmRow.indexOf('x:Name="Allow"') < confirmRow.indexOf('x:Name="Reject"'));
+  assert.ok(confirmRow.indexOf('x:Name="Reject"') < confirmRow.indexOf('x:Name="Countdown"'));
+  assert.match(confirmRow, /x:Name="Countdown"[^>]*TextWrapping="Wrap"/);
+  // Hộp đồng ý: số đếm nằm trong nút Từ chối, lời nhắc ở hàng riêng dưới các nút nên không chen được vào hàng nút.
+  const consentRow = rowOf(CONSENT_XAML);
+  assert.ok(consentRow.indexOf('x:Name="Allow"') < consentRow.indexOf('x:Name="Reject"'));
+  assert.equal(consentRow.includes('x:Name="Hint"'), false);
+  assert.match(CONSENT_XAML, /x:Name="Hint"[^>]*TextWrapping="Wrap"/);
 });
 
 test('chốt người thật: tag 31 bit (Windows chỉ chuyển 32 bit thấp của dwExtraInfo tới hook), so đúng 32 bit thấp', () => {

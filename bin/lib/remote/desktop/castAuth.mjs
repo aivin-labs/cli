@@ -116,7 +116,7 @@ export function requestCastStop({ daemonAlive = () => lockHolder() !== null } = 
 }
 
 export const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-  Width="500" SizeToContent="Height" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="NoResize"
+  Width="540" SizeToContent="Height" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="NoResize"
   Topmost="True" ShowInTaskbar="True" WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" UseLayoutRounding="True">
  <Window.Resources>
   <Style x:Key="Btn" TargetType="Button">
@@ -158,13 +158,15 @@ export const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2
       <TextBlock Text="Thiết bị này đang gửi yêu cầu xem màn hình và thao tác chuột, bàn phím trên máy tính của bạn." Margin="0,6,0,0" FontSize="12.5" Foreground="#4B5563" TextWrapping="Wrap"/>
     </StackPanel>
    </Border>
-   <DockPanel Margin="0,22,0,0" LastChildFill="True">
+   <DockPanel Margin="0,22,0,0" LastChildFill="False">
     <Button x:Name="Allow" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0" Margin="10,0,0,0"
             Background="#4E46E5" Foreground="White" BorderThickness="0" Content="_Cho phép"/>
+    <Button x:Name="AllowAlways" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0" Margin="10,0,0,0"
+            Background="White" Foreground="#4E46E5" BorderBrush="#4E46E5" BorderThickness="1" Content="_Luôn tin thiết bị này"/>
     <Button x:Name="Reject" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0"
             Background="White" Foreground="#111827" BorderBrush="#C9CDD4" BorderThickness="1" Content="_Từ chối" IsCancel="True" IsDefault="True"/>
-    <TextBlock x:Name="Countdown" VerticalAlignment="Center" Margin="0,0,12,0" FontSize="12" Foreground="#6B7280" TextWrapping="Wrap"/>
    </DockPanel>
+   <TextBlock x:Name="Hint" Visibility="Collapsed" HorizontalAlignment="Right" Margin="0,10,0,0" FontSize="12" Foreground="#6B7280" TextWrapping="Wrap"/>
   </StackPanel>
  </Border>
 </Window>`;
@@ -182,21 +184,27 @@ const CONSENT_SCRIPT = [
   "$img.BeginInit(); $img.StreamSource = $ms; $img.CacheOption = 'OnLoad'; $img.EndInit(); $w.FindName('Logo').Source = $img",
   "$script:result = 'No'; $script:closing = $false",
   '$tm = New-Object Windows.Threading.DispatcherTimer; $tm.Interval = [TimeSpan]::FromSeconds(1)',
+  "function Show-Hint { $script:hintLeft = 3; $hintText.Text = $script:hint; $hintText.Visibility = 'Visible' }",
   "function Finish($r) { if ($script:closing) { return }; $script:closing = $true; $script:result = $r; $tm.Stop(); $w.Close() }",
-  "$w.FindName('Allow').Add_Click({ if (Test-Human) { Finish 'Yes' } else { $script:hintLeft = 3; $cd.Text = $script:hint } })",
+  "$w.FindName('Allow').Add_Click({ if (Test-Human) { Finish 'Yes' } else { Show-Hint } })",
+  // "Luôn tin" đi qua đúng chốt người thật như "Cho phép": AI hay phiên điều khiển từ xa không tự cấp quyền lâu dài được.
+  "$w.FindName('AllowAlways').Add_Click({ if (Test-Human) { Finish 'Always' } else { Show-Hint } })",
+  "if ($env:AIVIN_CAST_CAN_TRUST -eq '1') { $w.FindName('Allow').Content = D 'AIVIN_CAST_ALLOW_ONCE' } else { $w.FindName('AllowAlways').Visibility = 'Collapsed' }",
   "$w.FindName('Reject').Add_Click({ Finish 'No' }); $w.FindName('Close').Add_Click({ Finish 'No' })",
   "$w.FindName('Head').Add_MouseLeftButtonDown({ $w.DragMove() })",
-  "$script:left = [int]$env:AIVIN_CAST_SECONDS; $fmt = D 'AIVIN_CAST_COUNTDOWN'; $cd = $w.FindName('Countdown'); $cd.Text = $fmt -f $script:left",
-  "$tm.Add_Tick({ $script:left--; if ($script:hintLeft -gt 0) { $script:hintLeft--; $cd.Text = $script:hint } else { $cd.Text = $fmt -f $script:left }; if ($script:left -le 0) { Finish 'Timeout' } })",
+  // Hết giờ là từ chối, nên số đếm nằm ngay trên nút Từ chối.
+  "$script:left = [int]$env:AIVIN_CAST_SECONDS; $fmt = D 'AIVIN_CAST_COUNTDOWN'; $reject = $w.FindName('Reject'); $hintText = $w.FindName('Hint'); $reject.Content = $fmt -f $script:left",
+  "$tm.Add_Tick({ $script:left--; $reject.Content = $fmt -f $script:left; if ($script:hintLeft -gt 0) { $script:hintLeft-- } else { $hintText.Visibility = 'Collapsed' }; if ($script:left -le 0) { Finish 'Timeout' } })",
   "$w.Add_ContentRendered({ Install-Guard $w; $w.Activate(); [void]$w.FindName('Reject').Focus(); $tm.Start() })",
   '[void]$w.ShowDialog(); $tm.Stop(); $script:result',
 ].join('\n');
 
 /**
  * Hỏi người ở máy trên chính màn hình Windows. Mặc định là từ chối: Enter, Esc, đóng hộp, hết giờ đều không cho xem.
- * `repeatedAfterBlock`: hiện thêm dòng cảnh báo thiết bị từng bị ngắt. Trả về một giá trị của `CastConsentDecision`.
+ * `repeatedAfterBlock`: hiện thêm dòng cảnh báo thiết bị từng bị ngắt. `canTrust`: hiện thêm nút "Luôn tin thiết bị này".
+ * Trả về một giá trị của `CastConsentDecision`.
  */
-export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutSec = 45, repeatedAfterBlock = false, signal } = {}) {
+export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutSec = 45, repeatedAfterBlock = false, canTrust = false, signal } = {}) {
   if (process.platform !== 'win32') return Promise.resolve(CastConsentDecision.UNAVAILABLE);
   return new Promise((resolve) => {
     let out = '';
@@ -216,9 +224,11 @@ export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutS
       AIVIN_CAST_LOGO: AIVIN_LOGO_PNG_BASE64,
       AIVIN_CAST_TITLE: b64(CAST_CONSENT_WINDOW_TITLE),
       AIVIN_CAST_DEVICE: b64(`Thiết bị yêu cầu: ${viewerDevice}`),
-      AIVIN_CAST_COUNTDOWN: b64('Tự từ chối sau {0} giây'),
+      AIVIN_CAST_COUNTDOWN: b64('_Từ chối ({0}s)'),
       AIVIN_CAST_SECONDS: String(timeoutSec),
       AIVIN_CAST_WARN: repeatedAfterBlock ? '1' : '0',
+      AIVIN_CAST_CAN_TRUST: canTrust ? '1' : '0',
+      AIVIN_CAST_ALLOW_ONCE: b64('_Chỉ lần này'),
       ...humanGuardEnv(null),
     };
 
@@ -240,6 +250,7 @@ export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutS
     child.stdout?.on('data', (chunk) => { out += chunk; });
     child.on('error', () => done(CastConsentDecision.UNAVAILABLE));
     child.on('close', (code) => {
+      if (code === 0 && /\bAlways\b/.test(out)) return done(CastConsentDecision.ALLOW_ALWAYS);
       if (code === 0 && /\bYes\b/.test(out)) return done(CastConsentDecision.ALLOW);
       if (/\bTimeout\b/.test(out)) return done(CastConsentDecision.TIMEOUT);
       if (/\bNo\b/.test(out)) return done(CastConsentDecision.REJECTED);
