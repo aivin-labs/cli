@@ -7,7 +7,8 @@ const HOUR = 3_600_000;
 const MINUTE = 60_000;
 
 /**
- * Tự cập nhật trong `aivin remote start` (29/10/2026). Mỗi ~6 giờ (lần đầu sau 2–5 phút, rải ngẫu nhiên để các máy không cùng dội trang tải
+ * Tự cập nhật trong `aivin remote start` (29/10/2026). BE thấy trang tải có bản mới thì thúc qua `device:update` (`requestCheck`); ngoài ra mỗi
+ * ~1 giờ (05/11/2026, trước là 6 giờ; `latest.txt` chỉ vài byte — lưới an toàn khi BE không thúc được; lần đầu sau 2–5 phút, rải ngẫu nhiên để các máy không cùng dội trang tải
  * sau một lần phát hành) kiểm bản mới; có (và máy thuộc đợt phát hành, xem rollout.json) thì tải + kiểm chữ ký + thay tệp chạy ngay (tiến
  * trình đang chạy không bị ảnh hưởng). Rồi:
  * - chạy dưới trình giữ chạy thật (`supervised`, xem detectSupervisor ở autoStart.mjs): chờ máy yên `idleGraceMs` tính từ lần hoạt động cuối
@@ -24,7 +25,7 @@ const MINUTE = 60_000;
  */
 export function createAutoUpdater({
   enabled = true, supervised = false, isIdle = () => true, lastActivityAt = () => 0, onRestart = () => {}, say = () => {}, deviceId,
-  checkEveryMs = 6 * HOUR, firstCheckMs = 2 * MINUTE + Math.floor(Math.random() * 3 * MINUTE), tickMs = 30_000, idleGraceMs = 10 * MINUTE,
+  checkEveryMs = HOUR, firstCheckMs = 2 * MINUTE + Math.floor(Math.random() * 3 * MINUTE), tickMs = 30_000, idleGraceMs = 10 * MINUTE,
   retryMs = HOUR, urgentGapMs = 10 * MINUTE, urgentJitterMs = 5 * MINUTE,
   install = installUpdate, settings = loadUpdateSettings, installedNewer = installedNewerThanRunning, record = recordCheck, current = currentCliVersion(),
   now = Date.now, random = Math.random,
@@ -39,6 +40,7 @@ export function createAutoUpdater({
   let holdVersions = [];
   let urgent = false;
   let lastUrgentAt = -Infinity;
+  let lastPushAt = -Infinity;
   const notices = new Set();
   const noticeOnce = (key, text) => {
     if (notices.has(key)) return;
@@ -61,6 +63,14 @@ export function createAutoUpdater({
       nextCheckAt = now() + checkEveryMs;
       if (minVersion) noticeOnce(`min-off:${minVersion}`, `⚠️  Máy chủ cần aivin ${tagOf(minVersion)} trở lên (máy này ${tagOf(current)}), tự cập nhật đang tắt — chạy \`aivin update\`.`);
       return;
+    }
+    // Đã có bản mới chờ khởi động lại (cài ở lần kiểm trước / cửa sổ khác) → không kiểm / cài lại (02/11/2026: sự kiện UPDATE của máy chủ
+    // gọi checkNow cài chồng, đè `.prev`). Ngoại lệ: máy chủ đòi bản tối thiểu cao hơn bản đang chờ.
+    const waiting = ready || installedNewer();
+    if (waiting && !(minVersion && compareVersions(waiting, minVersion) < 0)) {
+      ready = waiting;
+      nextCheckAt = now() + jitter(checkEveryMs);
+      return { status: UpdateStatus.INSTALLED, latest: waiting, current: tagOf(current), already: true };
     }
     try {
       const res = await install({ deviceId, urgent: urgent && !!minVersion && compareVersions(current, minVersion) < 0, holdVersions });
@@ -115,7 +125,21 @@ export function createAutoUpdater({
 
   return {
     tick,
+    async checkNow({ urgent: isUrgent = true } = {}) {
+      urgent = isUrgent;
+      return check();
+    },
     setMinVersion,
+    /**
+     * BE báo có bản mới (`device:update`): dời lượt kiểm kế tiếp lên ngay — đi qua `tick` như mọi lượt (không chạy song song, có bản chờ thì không
+     * cài chồng, vẫn theo đợt phát hành). Tối đa một lần / `urgentGapMs`: BE lỗi / bị chiếm không dội được trang tải. false = bỏ qua.
+     */
+    requestCheck() {
+      if (!enabled || now() - lastPushAt < urgentGapMs) return false;
+      lastPushAt = now();
+      nextCheckAt = Math.min(nextCheckAt, now());
+      return true;
+    },
     /** Gợi ý từ ack của `device:hello` (`hello.cli`) — xem đầu tệp. */
     setServerHints(hints) {
       if (!hints || typeof hints !== 'object') return;

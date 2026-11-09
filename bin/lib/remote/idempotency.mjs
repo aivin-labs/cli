@@ -5,7 +5,8 @@ import { DeviceErrorCode } from './constants.mjs';
 /**
  * Chống làm trùng (28/10/2026): BE gắn `idem_key` cho mỗi bước có tác dụng (theo nhiệm vụ + lượt + bước + tham số). BE khởi động lại giữa
  * chừng → agentic chạy tiếp → lô bước dở được gửi lại: bước đã làm (hoặc đang làm) trả lại đúng kết quả cũ thay vì ghi / gửi / chạy lần hai.
- * Bước hỏng thì quên khoá — lần sau được chạy lại.
+ * Bước hỏng thì quên khoá — lần sau được chạy lại; trừ khi bị dừng GIỮA CHỪNG (hết giờ / huỷ sau khi đã bắt đầu, `ran` của scheduler) → lần
+ * gửi lại nhận `INTERRUPTED` thay vì làm lần hai.
  *
  * Sổ trên đĩa (29/10/2026, `file`): daemon khởi động lại (sập, máy khởi động lại, tự cập nhật) vẫn nhớ. Bước xong → trả kết quả cũ; bước
  * ĐANG chạy lúc daemon chết → `INTERRUPTED` (không biết đã làm tới đâu — không tự làm lần hai, Planner kiểm lại rồi mới làm).
@@ -35,21 +36,26 @@ const interruptedOutcome = () => ({
   duration_ms: 0,
 });
 
+/** Bước bị dừng giữa chừng (hết giờ / huỷ / tạm dừng) SAU khi đã bắt đầu: có thể đã làm một phần — lần gửi lại không chạy mù lần hai. */
+const STOPPED_MIDWAY = new Set([DeviceErrorCode.CALL_TIMEOUT, DeviceErrorCode.CANCELLED]);
+export const stoppedMidway = (outcome) => !outcome?.ok && outcome?.ran === true && STOPPED_MIDWAY.has(outcome.error_code);
+
+const stoppedOutcome = (outcome) => ({
+  ok: false,
+  error: `This step was stopped after it had started on this device (${outcome.error_code === DeviceErrorCode.CALL_TIMEOUT ? 'timed out' : 'cancelled'}) — it may have partly run. Check its effect before doing it again.`,
+  error_code: DeviceErrorCode.INTERRUPTED,
+  duration_ms: 0,
+});
+
 /** Sổ khoá trên đĩa, mỗi dòng một sự kiện `{ k, s, at, o? }`. Đọc: dòng sau đè dòng trước; `start` không có `done` / `fail` → bị ngắt. */
 export function createIdemLog(file, { now = () => Date.now() } = {}) {
   const entries = new Map();
   let lines = 0;
+  const pendingLines = [];
+  let writeChain = Promise.resolve();
+  let dirEnsured = false;
 
-  const write = (record) => {
-    try {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.appendFileSync(file, JSON.stringify(record) + '\n');
-      lines++;
-      if (lines > COMPACT_LINES) compact();
-    } catch { /* ổ đầy / không ghi được: chống trùng vẫn chạy trong bộ nhớ */ }
-  };
-
-  function compact() {
+  function compactSync() {
     const keep = [...entries.entries()].slice(-PERSIST_MAX);
     entries.clear();
     keep.forEach(([k, v]) => entries.set(k, v));
@@ -58,6 +64,35 @@ export function createIdemLog(file, { now = () => Date.now() } = {}) {
     fs.renameSync(tmp, file);
     lines = keep.length;
   }
+
+  async function compactAsync() {
+    const keep = [...entries.entries()].slice(-PERSIST_MAX);
+    entries.clear();
+    keep.forEach(([k, v]) => entries.set(k, v));
+    const tmp = `${file}.tmp`;
+    const body = keep.map(([k, v]) => JSON.stringify({ k, s: v.state, at: v.at, ...(v.outcome ? { o: v.outcome } : {}) }) + '\n').join('');
+    await fs.promises.writeFile(tmp, body);
+    await fs.promises.rename(tmp, file);
+    lines = keep.length;
+  }
+
+  const write = (record) => {
+    pendingLines.push(JSON.stringify(record) + '\n');
+    writeChain = writeChain.then(async () => {
+      if (!pendingLines.length) return;
+      const batch = pendingLines.splice(0, pendingLines.length);
+      try {
+        if (!dirEnsured) {
+          await fs.promises.mkdir(path.dirname(file), { recursive: true });
+          dirEnsured = true;
+        }
+        await fs.promises.appendFile(file, batch.join(''));
+        lines += batch.length;
+        if (lines > COMPACT_LINES) await compactAsync();
+      } catch { /* ổ đầy / không ghi được: chống trùng vẫn chạy trong bộ nhớ */ }
+    });
+    return writeChain;
+  };
 
   /** Đọc sổ cũ: trả các khoá còn hạn (đã xong / bị ngắt), viết gọn tệp. */
   function load() {
@@ -73,19 +108,20 @@ export function createIdemLog(file, { now = () => Date.now() } = {}) {
       if (r.s === IdemState.FAIL) continue;
       entries.set(r.k, { state: r.s === IdemState.START ? IdemState.INTERRUPTED : r.s, at: Number(r.at), ...(r.o ? { outcome: r.o } : {}) });
     }
-    try { compact(); } catch { /* giữ tệp cũ */ }
+    try { compactSync(); dirEnsured = true; } catch { /* giữ tệp cũ */ }
     return entries;
   }
 
   return {
     load,
-    started: (k) => { entries.set(k, { state: IdemState.START, at: now() }); write({ k, s: IdemState.START, at: now() }); },
+    flush: () => writeChain,
+    started: (k) => { entries.set(k, { state: IdemState.START, at: now() }); return write({ k, s: IdemState.START, at: now() }); },
     done: (k, outcome) => {
       const o = keptOutcome(outcome);
       entries.set(k, { state: IdemState.DONE, at: now(), outcome: o });
-      write({ k, s: IdemState.DONE, at: now(), o });
+      return write({ k, s: IdemState.DONE, at: now(), o });
     },
-    failed: (k) => { entries.delete(k); write({ k, s: IdemState.FAIL, at: now() }); },
+    failed: (k) => { entries.delete(k); return write({ k, s: IdemState.FAIL, at: now() }); },
   };
 }
 
@@ -122,14 +158,24 @@ export function createIdempotentRunner(run, isReadOnly, { onDuplicate, now = () 
       return hit.promise.then(markDeduplicated);
     }
     let marked = false;
-    const started = () => { if (!marked) { marked = true; log?.started(key); } };
+    const started = () => { if (!marked) { marked = true; void log?.started(key); } };
     if (!deferStart) started();
-    const promise = run(call, ...rest, ...(deferStart ? [{ started }] : []));
+    const rawPromise = run(call, ...rest, ...(deferStart ? [{ started }] : []));
+    const promise = rawPromise.then(async (r) => {
+      if (r.outcome.ok) await log?.done(key, r.outcome);
+      else if (stoppedMidway(r.outcome)) {
+        // Lần này trả đúng lỗi gốc; lần gửi lại cùng khoá nhận INTERRUPTED (như bước đang chạy lúc daemon chết).
+        const kept = stoppedOutcome(r.outcome);
+        seen.set(key, { promise: Promise.resolve({ tool: r.tool, outcome: kept }), at: t });
+        await log?.done(key, kept);
+      } else { seen.delete(key); await log?.failed(key); }
+      return r;
+    }, async (err) => {
+      seen.delete(key);
+      await log?.failed(key);
+      throw err;
+    });
     seen.set(key, { promise, at: t });
-    promise.then((r) => {
-      if (r.outcome.ok) log?.done(key, r.outcome);
-      else { seen.delete(key); log?.failed(key); }
-    }, () => { seen.delete(key); log?.failed(key); });
     return promise;
   };
 }

@@ -160,3 +160,13 @@ test('fs.copy giữ tệp nguồn, đích có sẵn cần overwrite, hoàn tác 
   assert.equal(fs.existsSync(p('bak/cfg.bak.json')), false);
   assert.equal(fs.existsSync(p('cfg.json')), true);
 });
+
+test('fs.copy từ chối thư mục bao trọn thư mục cấu hình Aivin (token / khoá / cookie)', async () => {
+  const home = process.env.AIVIN_REMOTE_HOME;
+  const root = path.dirname(home);
+  const env = { roots: [root], binaries: [], projects: [], undo: null };
+  const tools = toolMap(buildTools(env));
+  const dest = `copy-of-tmp-${Date.now()}`;
+  await assert.rejects(tools.get('fs.copy').handler({ sourcePath: '.', destinationPath: dest }, {}, env), (e) => e.code === 'PROTECTED_PATH');
+  assert.equal(fs.existsSync(path.join(root, dest)), false);
+});

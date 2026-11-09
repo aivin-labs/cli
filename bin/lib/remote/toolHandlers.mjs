@@ -1,15 +1,18 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import readline from 'readline';
 import { spawn } from 'child_process';
+import { StringDecoder } from 'string_decoder';
 import { DeviceErrorCode, IGNORED_DIRS, MemoryKind, ToolGroup } from './constants.mjs';
+import { isSecretPath } from './secretPaths.mjs';
 import {
-  DeviceToolError, assertCommandAllowed, containsProtectedPath, displayPath, isProtectedPath, isRootPath, protectedDirNamesUnder,
+  DeviceToolError, agentEnv, assertCommandAllowed, containsProtectedPath, displayPath, isProtectedPath, isRootPath, protectedDirNamesUnder,
   resolveEntryInRoots, resolveInRoots, scrubEnv,
 } from './sandbox.mjs';
 import { deleteMemoryItems, getMemoryItem, listMemoryItems, putMemoryItems, searchMemory } from './deviceMemory.mjs';
 import { extractDocText, isDocFile } from './docText.mjs';
+import { osFileSearch } from './osSearch.mjs';
+import { tokenize } from './textIndex.mjs';
 import { showOSNotification } from './notify.mjs';
 import { accountEnv, withProcessCap } from './multiUser.mjs';
 import { buildGuiTools } from './gui/index.mjs';
@@ -23,8 +26,10 @@ let sharedAgents = null;
 import { buildScheduleTools } from './schedule.mjs';
 import { buildWatchTools } from './deviceWatches.mjs';
 import { buildTransferTools } from './httpTransfer.mjs';
+import { safeGitArgv, safeGitEnv } from './gitSafe.mjs';
 import { buildMeetingTools } from './meeting/index.mjs';
 import { buildClipboardTools } from './clipboard.mjs';
+import { killWindowsTree } from './winTree.mjs';
 
 /**
  * Công cụ trên máy, chia gói theo năng lực phát hiện được (git chỉ có khi máy cài git, tìm nội dung dùng ripgrep nếu có…). Mỗi công cụ
@@ -49,6 +54,10 @@ const MAX_LIST_ENTRIES = 2000;
 const MAX_BATCH_ITEMS = 1000;
 const BATCH_CONCURRENCY = 8;
 const GREP_CONCURRENCY = 16;
+/** Lệnh thoát rồi mà ống ra còn mở (tiến trình nền giữ): chờ nốt đầu ra bấy nhiêu ms. */
+const EXIT_DRAIN_MS = 2000;
+/** Đã huỷ mà tiến trình chưa đóng hẳn: trả chỗ chạy lệnh sau bấy nhiêu ms. */
+const ABORT_SETTLE_MS = 3000;
 
 const str = (description) => ({ type: 'string', description });
 const num = (description) => ({ type: 'number', description });
@@ -77,16 +86,39 @@ async function looksBinary(abs) {
   }
 }
 
+/**
+ * Từng dòng của luồng, dòng dài quá `maxChars` bị cắt. Không dùng `readline`: dòng rất dài (log / JSON một dòng > 512 MB) ném `RangeError` ở
+ * nơi không bắt được, sập cả daemon (rà 02/11/2026).
+ */
+async function* boundedLines(stream, maxChars) {
+  let pending = '';
+  let overflowed = false;
+  for await (const chunk of stream) {
+    const parts = chunk.split('\n');
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!overflowed) yield `${pending}${parts[i]}`.replace(/\r$/, '').slice(0, maxChars);
+      pending = '';
+      overflowed = false;
+    }
+    if (!overflowed) pending += parts[parts.length - 1];
+    if (pending.length > maxChars) {
+      if (!overflowed) yield pending.slice(0, maxChars);
+      pending = '';
+      overflowed = true;
+    }
+  }
+  if (pending && !overflowed) yield pending.replace(/\r$/, '');
+}
+
 /** Đọc theo khoảng dòng bằng luồng — tệp lớn không phải nạp cả vào RAM. */
 async function readLines(abs, startLine, endLine, signal) {
   const stream = fs.createReadStream(abs, { encoding: 'utf8' });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   const lines = [];
   let n = 0;
   let bytes = 0;
   let truncatedByBytes = false;
   try {
-    for await (const line of rl) {
+    for await (const line of boundedLines(stream, MAX_READ_BYTES + 1)) {
       n++;
       if (n < startLine) continue;
       if (n > endLine) break;
@@ -96,7 +128,6 @@ async function readLines(abs, startLine, endLine, signal) {
       if (signal?.aborted) break;
     }
   } finally {
-    rl.close();
     stream.destroy();
   }
   throwIfAborted(signal);
@@ -223,10 +254,52 @@ async function fsList(args, ctx, env) {
   };
 }
 
-function fsFind(args, _ctx, env) {
+const withoutAbs = ({ abs: _abs, ...rest }) => rest;
+
+async function fsFind(args, _ctx, env) {
   if (!env.fileIndex) throw new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, 'File index not ready');
+  const query = requireArg(args.query, 'query');
+  const limit = Math.min(Number(args.limit) || 15, 100);
   // `vector`: BE tự gắn vector bge-m3 của câu hỏi (Planner chỉ viết query) → gộp xếp hạng ngữ nghĩa.
-  return { results: env.fileIndex.search(requireArg(args.query, 'query'), Math.min(Number(args.limit) || 15, 100), args.vector), stats: env.fileIndex.stats() };
+  const local = env.fileIndex.search(query, limit, args.vector);
+  // Chỉ mục cố ý bỏ nhiều thứ (thư mục gộp, kho code, ngoài thư mục nhà) và khớp BẤT KỲ từ nào → thiếu kết quả hoặc kết quả yếu (tốt nhất
+  // không chứa đủ các từ, hay chỉ ra thư mục gộp) thì hỏi thêm bộ tìm của hệ điều hành (khớp ĐỦ mọi từ) — "ảnh chụp màn hình 21/8/2026" ra
+  // đúng `Screenshot 2026-08-21 ….png` trong thư mục gộp thay vì 15 tệp chỉ trùng chữ "2026".
+  const weak = !coversQuery(local[0], query) || local.some((r) => r.type === 'folder');
+  if (env.osSearch === false || (local.length >= limit && !weak)) return { results: local.map(withoutAbs), stats: env.fileIndex.stats() };
+  const seen = new Set(local.map((r) => r.abs));
+  const osSearch = typeof env.osSearch === 'function' ? env.osSearch : osFileSearch;
+  const fromOs = (await osSearch(query, { roots: env.roots, limit }))
+    .filter((r) => !seen.has(r.abs))
+    .map((r) => ({ path: displayPath(env.roots, r.abs), ...(r.size !== undefined ? { size: r.size } : {}), modified: r.modified, source: 'os' }));
+  const results = weak ? [...fromOs, ...local.map(withoutAbs)] : [...local.map(withoutAbs), ...fromOs];
+  return { results: results.slice(0, limit), stats: env.fileIndex.stats() };
+}
+
+/** Kết quả chứa đủ mọi từ của câu hỏi (tên, đường dẫn, đoạn đầu — đã bỏ dấu). */
+function coversQuery(hit, query) {
+  if (!hit) return false;
+  const have = new Set(tokenize(`${hit.abs || hit.path} ${hit.preview || ''} ${hit.note || ''}`));
+  const words = tokenize(query);
+  return words.length > 0 && words.every((w) => have.has(w) || [...have].some((h) => h.startsWith(w)));
+}
+
+/** Thư mục làm việc người dùng chỉ ra (qua chat): lập chỉ mục đầy đủ ngay (kể cả code), theo dõi thay đổi; `remove` để bỏ. */
+async function fsIndexFolder(args, _ctx, env) {
+  if (!env.fileIndex) throw new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, 'File index not ready');
+  const abs = resolveInRoots(env.roots, requireArg(args.path, 'path'));
+  if (args.remove) {
+    const res = await env.fileIndex.removeFolder(abs);
+    return { folder: displayPath(env.roots, abs), removed: true, working_folders: res.folders.map((f) => displayPath(env.roots, f)) };
+  }
+  const stat = await fs.promises.stat(abs).catch(() => null);
+  if (!stat?.isDirectory()) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `Not a folder: ${displayPath(env.roots, abs)}`);
+  const res = await env.fileIndex.addFolder(abs);
+  return {
+    folder: displayPath(env.roots, abs), indexed_items: res.indexed, done: res.done,
+    working_folders: res.folders.map((f) => displayPath(env.roots, f)),
+    ...(res.done ? {} : { note: 'Still indexing in the background - fs.find already returns what is indexed so far.' }),
+  };
 }
 
 const PREVIEW_MAX_PATHS = 10;
@@ -258,7 +331,7 @@ async function fsPreview(args, ctx, env) {
 function runProcess(cmd, argv, { cwd, signal, onOutput, env, maxOutput = MAX_EXEC_OUTPUT, shell = false, runAs }) {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
-    const baseEnv = env || scrubEnv();
+    const baseEnv = env || agentEnv();
     const account = runAs ? { uid: runAs.uid, gid: runAs.gid } : {};
     // Thành viên máy tính tổ chức: trần số tiến trình theo uid (prlimit) — một người không fork bomb được cả container.
     if (runAs) [cmd, argv] = withProcessCap(cmd, argv);
@@ -266,22 +339,48 @@ function runProcess(cmd, argv, { cwd, signal, onOutput, env, maxOutput = MAX_EXE
     let stdout = '';
     let stderr = '';
     let killed = false;
-    const killTree = () => {
-      if (killed || child.exitCode !== null) return;
-      killed = true;
-      if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
-      else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
-    };
-    const onAbort = () => killTree();
-    signal?.addEventListener('abort', onAbort, { once: true });
-    child.stdout.on('data', (chunk) => { const t = chunk.toString(); if (stdout.length < maxOutput) stdout += t; onOutput?.('stdout', t); });
-    child.stderr.on('data', (chunk) => { const t = chunk.toString(); if (stderr.length < maxOutput) stderr += t; onOutput?.('stderr', t); });
-    child.on('error', (e) => { signal?.removeEventListener('abort', onAbort); reject(new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, `Cannot start process: ${e.message}`)); });
-    child.on('close', (code) => {
+    let settled = false;
+    const timers = [];
+    // Vào `run…` một lần duy nhất: `close` bình thường, hoặc hết giờ chờ khi tiến trình cháu còn giữ ống ra (`nohup server &`, `Start-Process`).
+    const settle = (code, extra = {}) => {
+      if (settled) return;
+      settled = true;
+      if (stdout.length < maxOutput) stdout += outDec.end();
+      if (stderr.length < maxOutput) stderr += errDec.end();
+      timers.forEach(clearTimeout);
       signal?.removeEventListener('abort', onAbort);
+      child.stdout.destroy();
+      child.stderr.destroy();
       if (signal?.aborted) return reject(signal.reason || new DeviceToolError(DeviceErrorCode.CANCELLED, 'Cancelled'));
-      resolve({ exitCode: code ?? -1, stdout, stderr, durationMs: Date.now() - startedAt, ...(stdout.length >= maxOutput || stderr.length >= maxOutput ? { outputTruncated: true } : {}) });
+      resolve({ exitCode: code ?? -1, stdout, stderr, durationMs: Date.now() - startedAt, ...extra, ...(stdout.length >= maxOutput || stderr.length >= maxOutput ? { outputTruncated: true } : {}) });
+    };
+    const killTree = () => {
+      if (killed) return;
+      killed = true;
+      // Shell đã thoát mà cháu còn chạy: Linux / macOS giết cả nhóm tiến trình; Windows lần theo PID cha (cả phần mồ côi — winTree.mjs).
+      if (process.platform === 'win32') killWindowsTree(child, startedAt);
+      else { try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* đã thoát */ } } }
+    };
+    const onAbort = () => {
+      killTree();
+      // Huỷ phải trả chỗ chạy lệnh dù cháu không chết được (trước đây giữ chỗ EXEC tới khi cháu tự thoát — 3 lệnh như vậy là kẹt mọi lệnh sau).
+      timers.push(setTimeout(() => settle(-1), ABORT_SETTLE_MS));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    // StringDecoder: chunk cắt giữa ký tự UTF-8 nhiều byte không thành `�` (chữ Việt / emoji ở biên chunk).
+    const outDec = new StringDecoder('utf8');
+    const errDec = new StringDecoder('utf8');
+    child.stdout.on('data', (chunk) => { const t = outDec.write(chunk); if (stdout.length < maxOutput) stdout += t; if (t) onOutput?.('stdout', t); });
+    child.stderr.on('data', (chunk) => { const t = errDec.write(chunk); if (stderr.length < maxOutput) stderr += t; if (t) onOutput?.('stderr', t); });
+    child.on('error', (e) => {
+      settled = true;
+      timers.forEach(clearTimeout);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, `Cannot start process: ${e.message}`));
     });
+    // Lệnh đã xong mà tiến trình nền nó để lại còn giữ ống ra: trả kết quả, tiến trình nền chạy tiếp (đúng ý `nohup … &`).
+    child.on('exit', (code) => { timers.push(setTimeout(() => settle(code, { backgroundKept: true }), EXIT_DRAIN_MS)); });
+    child.on('close', (code) => settle(code));
   });
 }
 
@@ -289,6 +388,8 @@ async function fsGrep(args, ctx, env) {
   const query = String(requireArg(args.query, 'query'));
   const abs = resolveInRoots(env.roots, args.path || '');
   const maxResults = Math.min(Number(args.maxResults) || 50, 500);
+  // Tìm từ thư mục cha không quét tệp bí mật (cổng duyệt phía BE chỉ thấy thư mục cha). Người gọi nêu đúng chỗ bí mật thì đã qua cổng duyệt.
+  const secretsAllowed = isSecretPath(abs);
   if (env.binaries?.includes('rg')) {
     // Loại thư mục cấu hình Aivin kể cả khi bật tìm tệp ẩn; lọc lại kết quả phía dưới phòng khi glob của người gọi lách được.
     const exclude = protectedDirNamesUnder(abs).flatMap((name) => ['-g', `!${name}`]);
@@ -299,6 +400,7 @@ async function fsGrep(args, ctx, env) {
     const matches = res.stdout.split(/\r?\n/).filter(Boolean).map((line) => {
       const m = line.match(/^(.*?):(\d+):(.*)$/);
       if (m && isProtectedPath(path.resolve(abs, m[1]))) return null;
+      if (m && !secretsAllowed && isSecretPath(path.resolve(abs, m[1]))) return null;
       return m ? { path: displayPath(env.roots, m[1]), line: Number(m[2]), text: m[3].slice(0, 300) } : { text: line.slice(0, 300) };
     }).filter(Boolean).slice(0, maxResults);
     return { engine: 'ripgrep', total: matches.length, matches };
@@ -328,6 +430,8 @@ async function fsGrep(args, ctx, env) {
     for (const e of entries) {
       const full = path.join(dir, e.name);
       if (isProtectedPath(full)) continue;
+      // Như ripgrep: bỏ tệp / thư mục ẩn (`.ssh`, `.aws`, `.env`…) — máy không có rg từng quét cả chúng.
+      if (!secretsAllowed && (e.name.startsWith('.') || isSecretPath(full))) continue;
       if (e.isDirectory()) { if (!IGNORED_DIRS.has(e.name) && !e.isSymbolicLink()) queue.push(full); continue; }
       if (e.isFile() && (!glob || glob.test(e.name))) files.push(full);
     }
@@ -449,8 +553,18 @@ async function fsCopy(args, _ctx, env) {
   const stat = await fs.promises.stat(src).catch(() => null);
   if (!stat) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `Not found: ${args.sourcePath}`);
   if (path.resolve(src) === path.resolve(dest)) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Source and destination are the same');
+  // Chép một thư mục BAO TRỌN `.aivin` (vd cả thư mục nhà) là đưa token / khoá ký / cookie ra chỗ đọc được — như fs.move / fs.delete.
+  if (containsProtectedPath(src)) throw new DeviceToolError(DeviceErrorCode.PROTECTED_PATH, 'Folder holds Aivin credentials and cannot be copied remotely');
+  // Đích bị XOÁ trước khi chép khi `overwrite`: đích là gốc được phép / thư mục chứa `.aivin` / thư mục chứa nguồn thì mất cả cây (rà 02/11/2026:
+  // chép `a.txt` vào `.` xoá sạch thư mục được phép).
+  if (isRootPath(env.roots, dest)) throw new DeviceToolError(DeviceErrorCode.ROOT_DENIED, 'Refusing to replace an allowed root folder');
+  if (containsProtectedPath(dest)) throw new DeviceToolError(DeviceErrorCode.PROTECTED_PATH, 'Folder holds Aivin credentials and cannot be replaced remotely');
+  const relToDest = path.relative(dest, src);
+  if (relToDest && !relToDest.startsWith('..') && !path.isAbsolute(relToDest)) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Destination contains the source — copy into a new path inside it instead');
   const exists = fs.existsSync(dest);
   if (exists && args.overwrite !== true) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Destination exists (set overwrite to replace it): ${args.destinationPath}`);
+  // Không hiểu kiểu `cp`: chép TỆP vào thư mục có sẵn không được thay cả thư mục đó.
+  if (exists && !stat.isDirectory() && fs.statSync(dest).isDirectory()) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Destination is a folder — give the full file path inside it: ${args.destinationPath}`);
   const undo = undoOf(args, env, 'copy');
   try {
     if (undo) await undo.ensureDir(path.dirname(dest));
@@ -580,9 +694,10 @@ async function systemInfo(_args, _ctx, env) {
   };
 }
 
+/** git chỉ đọc — không để cấu hình / hook / biến môi trường của kho chạy chương trình (gitSafe.mjs, 02/11/2026). */
 async function git(argv, args, ctx, env) {
   const cwd = resolveInRoots(env.roots, args.path || '');
-  const res = await runProcess('git', ['-C', cwd, ...argv], { cwd, signal: ctx.signal, maxOutput: 512 * 1024, runAs: env.runAs });
+  const res = await runProcess('git', safeGitArgv(cwd, argv), { cwd, signal: ctx.signal, maxOutput: 512 * 1024, runAs: env.runAs, env: safeGitEnv(scrubEnv()) });
   return { cwd: displayPath(env.roots, cwd), ...res };
 }
 
@@ -596,7 +711,7 @@ function contextRecall(args, _ctx, env) {
   return {
     memory: memory.search({ query, vector: args.vector, kinds: memoryKinds, limit }),
     procedures: memory.search({ query, vector: args.vector, kinds: [MemoryKind.PROCEDURE], limit: 3 }),
-    files: env.fileIndex ? env.fileIndex.search(query, 10, args.vector) : [],
+    files: env.fileIndex ? env.fileIndex.search(query, 10, args.vector).map(withoutAbs) : [],
     projects: env.projects || [],
   };
 }
@@ -622,8 +737,11 @@ export function buildTools(env) {
         sort: str('name | modified | size'), order: str('asc | desc'),
       }) },
     { name: 'fs.find', group: ToolGroup.FS_READ, read_only: true, handler: fsFind,
-      description: 'Instant search over the on-device file index: file names, path words, identifiers near the top of files and the opening text of documents (docx/xlsx/pptx/txt), ranked by words AND meaning. Describe the file in natural words ("office lease contract 2026"); results include size, modified date and a preview. Use to locate files before reading.',
+      description: 'Instant search over the on-device file index: file names, path words, identifiers near the top of files and the opening text of documents (docx/xlsx/pptx/txt), ranked by words AND meaning. Describe the file in natural words ("office lease contract 2026"); results include size, modified date and a preview. Bulk folders (screenshots, logs), app folders and code projects are one result each (type: folder - open them with fs.list / fs.grep). When the index has too few results, the operating system file search adds more (source: os). Use to locate files before reading.',
       input_schema: schema({ query: str('what the file is about, in natural words'), limit: num('max results, default 15') }, ['query']) },
+    { name: 'fs.index_folder', group: ToolGroup.FS_READ, read_only: true, handler: fsIndexFolder,
+      description: 'Make a folder a working folder: index it fully right now (including the code inside a git project) and keep it updated, so fs.find finds everything in it instantly. Call it when the user says where they work ("my project is in D:/work/shop", "work in this folder"). remove: true stops indexing it.',
+      input_schema: schema({ path: str('folder path'), remove: bool('stop treating it as a working folder') }, ['path']) },
     { name: 'fs.preview', group: ToolGroup.FS_READ, read_only: true, handler: fsPreview,
       description: 'Preview up to 10 files at once: size, modified date and their opening text (also inside docx/xlsx/pptx). Use to tell close candidates apart before choosing one.',
       input_schema: schema({ paths: { type: 'array', items: { type: 'string' }, description: 'file paths' }, maxChars: num('preview length per file, default 800') }, ['paths']) },
@@ -732,7 +850,7 @@ export function buildTools(env) {
   // Clipboard (chữ; Windows thêm ảnh + tệp đã copy) — máy cá nhân có màn hình.
   if (env.clipboard) tools.push(...buildClipboardTools(env.clipboard));
   // Máy tính tổ chức không lập chỉ mục tệp (nhiều người chung một máy) — Planner tìm bằng fs.list / fs.grep trong thư mục của mình.
-  return env.fileIndex ? tools : tools.filter((t) => t.name !== 'fs.find');
+  return env.fileIndex ? tools : tools.filter((t) => t.name !== 'fs.find' && t.name !== 'fs.index_folder');
 }
 
 /** Bảng tra theo tên cho bộ điều phối. */

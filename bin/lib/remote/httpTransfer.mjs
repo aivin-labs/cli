@@ -1,6 +1,7 @@
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
+import { Transform } from 'stream';
 import { pipeline } from 'stream/promises';
 import { DEVICE_API_PREFIX, DeviceErrorCode, ToolGroup } from './constants.mjs';
 import { DeviceToolError, displayPath, resolveInRoots } from './sandbox.mjs';
@@ -9,6 +10,8 @@ import { DeviceToolError, displayPath, resolveInRoots } from './sandbox.mjs';
 const DEVICE_TOKEN_HEADER = 'x-aivin-device-token';
 const TICKET_RE = /^[A-Za-z0-9_-]{43}$/;
 const PART_RETRIES = 2;
+/** Trần cỡ một tệp tải về qua HTTP thẳng (02/11/2026) — tránh đầy ổ khi vé / máy chủ trả dữ liệu không dứt. */
+export const MAX_DOWNLOAD_BYTES = 8 * 1024 ** 3;
 
 /**
  * Tệp lớn hơn trần socket đi HTTP thẳng giữa máy và kho Aivin (be DeviceDirectTransferService). Chỉ BE gọi (internal, Planner không thấy):
@@ -40,18 +43,38 @@ export function buildTransferTools({ serverUrl, deviceToken }) {
     return { path: displayPath(env.roots, abs), bytes: size, parts };
   }
 
+  /**
+   * Tải về (02/11/2026): ghi ra `<đích>.part` trước, đủ + đúng cỡ mới thay đích (bản cũ vào kho hoàn tác như fs.write) — trước đây ghi thẳng
+   * đè đích: đứt giữa chừng là tệp gốc bị cắt cụt, không lấy lại được, và không có trần dung lượng (đầy ổ).
+   */
   async function download(args, ctx, env) {
     if (env.runAs) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Direct transfer is not available on a shared computer');
     const abs = resolveInRoots(env.roots, args.path || '');
+    const limit = downloadLimit(args);
+    const expected = Number.isFinite(Number(args.size)) && args.size !== null && args.size !== '' ? Number(args.size) : null;
+    if (expected !== null && expected > limit) throw tooLarge(limit);
     await fs.promises.mkdir(path.dirname(abs), { recursive: true });
     const res = await axios.get(urlOf(args.ticket), { headers: headers(), signal: ctx.signal, responseType: 'stream', validateStatus: () => true });
     if (res.status !== 200) {
       res.data?.destroy?.();
       throw new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, `Download failed (HTTP ${res.status})`);
     }
-    await pipeline(res.data, fs.createWriteStream(abs), { signal: ctx.signal });
-    const bytes = (await fs.promises.stat(abs)).size;
-    return { path: displayPath(env.roots, abs), bytes };
+    if (Number(res.headers?.['content-length']) > limit) {
+      res.data?.destroy?.();
+      throw tooLarge(limit);
+    }
+    const part = `${abs}.part`;
+    let bytes = 0;
+    try {
+      await pipeline(res.data, byteCap(limit, (n) => { bytes = n; }), fs.createWriteStream(part), { signal: ctx.signal });
+      if (expected !== null && bytes !== expected) {
+        throw new DeviceToolError(DeviceErrorCode.EXECUTION_FAILED, `Download incomplete (${bytes} of ${expected} bytes) — the file was not changed`);
+      }
+    } catch (e) {
+      await fs.promises.rm(part, { force: true }).catch(() => undefined);
+      throw e;
+    }
+    return { path: displayPath(env.roots, abs), bytes, ...(await commitPart(part, abs, args, env)) };
   }
 
   return [
@@ -60,6 +83,44 @@ export function buildTransferTools({ serverUrl, deviceToken }) {
     { name: 'fs.download', group: ToolGroup.FS_WRITE, internal: true, handler: download,
       description: 'BE-only: download a large Aivin file over HTTP with a one-time ticket into a temporary file.', input_schema: { type: 'object', properties: {} } },
   ];
+}
+
+/** Trần một lần tải về: `args.max_bytes` (BE) chỉ được hạ, không vượt `MAX_DOWNLOAD_BYTES`. */
+function downloadLimit(args) {
+  const asked = Number(args?.max_bytes);
+  return asked > 0 ? Math.min(asked, MAX_DOWNLOAD_BYTES) : MAX_DOWNLOAD_BYTES;
+}
+
+const tooLarge = (limit) => new DeviceToolError(DeviceErrorCode.OUTPUT_TOO_LARGE, `File is larger than the ${Math.round(limit / 1024 ** 2)} MB limit for one download — nothing was written`);
+
+/** Đếm byte đi qua; quá `limit` → huỷ cả đường ống (tệp .part bị xoá ở nơi gọi). */
+function byteCap(limit, onCount) {
+  let seen = 0;
+  return new Transform({
+    transform(chunk, _enc, cb) {
+      seen += chunk.length;
+      onCount(seen);
+      if (seen > limit) return cb(tooLarge(limit));
+      cb(null, chunk);
+    },
+  });
+}
+
+/** Đổi `.part` thành đích: đích có sẵn → lưu bản cũ vào kho hoàn tác trước; tệp mới → ghi lại để hoàn tác thì bỏ đi. */
+async function commitPart(part, abs, args, env) {
+  const undo = env.undo ? env.undo.begin(args.undo_group, 'write') : null;
+  const exists = fs.existsSync(abs);
+  try {
+    const backup = exists ? await undo?.backupFile(abs) : undefined;
+    await fs.promises.rename(part, abs);
+    if (!exists) undo?.created(abs);
+    return { created: !exists, ...(exists && undo ? { previous_version_kept: !!backup } : {}) };
+  } catch (e) {
+    await fs.promises.rm(part, { force: true }).catch(() => undefined);
+    throw e;
+  } finally {
+    undo?.commit();
+  }
 }
 
 /** Một khúc = một PUT có Content-Length cố định (BE đối chiếu cỡ khúc theo vé; stream từ đĩa, không nạp cả khúc vào RAM). */

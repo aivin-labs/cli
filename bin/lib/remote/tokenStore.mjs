@@ -62,8 +62,8 @@ export function openToken(record) {
   if (record.device_token) return record.device_token;
   try {
     if (record.token_store === TokenStoreKind.DPAPI && record.token_enc) return run('powershell.exe', [...PS, DPAPI_UNPROTECT], record.token_enc) || null;
-    if (record.token_store === TokenStoreKind.KEYCHAIN) return run('/usr/bin/security', ['find-generic-password', '-a', record.device_id, '-s', SERVICE, '-w']) || null;
-    if (record.token_store === TokenStoreKind.LIBSECRET) return run('secret-tool', ['lookup', 'service', SERVICE, 'account', record.device_id]) || null;
+    if (record.token_store === TokenStoreKind.KEYCHAIN) return run('/usr/bin/security', ['find-generic-password', '-a', record.token_account || record.device_id, '-s', SERVICE, '-w']) || null;
+    if (record.token_store === TokenStoreKind.LIBSECRET) return run('secret-tool', ['lookup', 'service', SERVICE, 'account', record.token_account || record.device_id]) || null;
   } catch { /* không giải được */ }
   return null;
 }
@@ -71,7 +71,7 @@ export function openToken(record) {
 /** Xoá token khỏi kho hệ điều hành (DPAPI / tệp thường: xoá tệp là đủ). */
 export function forgetToken(record) {
   try {
-    if (record?.token_store === TokenStoreKind.KEYCHAIN) run('/usr/bin/security', ['delete-generic-password', '-a', record.device_id, '-s', SERVICE]);
-    if (record?.token_store === TokenStoreKind.LIBSECRET) run('secret-tool', ['clear', 'service', SERVICE, 'account', record.device_id]);
+    if (record?.token_store === TokenStoreKind.KEYCHAIN) run('/usr/bin/security', ['delete-generic-password', '-a', record.token_account || record.device_id, '-s', SERVICE]);
+    if (record?.token_store === TokenStoreKind.LIBSECRET) run('secret-tool', ['clear', 'service', SERVICE, 'account', record.token_account || record.device_id]);
   } catch { /* không có thì thôi */ }
 }

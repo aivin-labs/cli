@@ -58,7 +58,7 @@ function output(path, args) {
     return '';
   }
 }
-function notify(text) { try { sa.displayNotification(text, { withTitle: 'AIVIN Bot CLI' }); } catch (e) {} }
+function notify(text) { try { sa.displayNotification(text, { withTitle: 'AIVIN Bot' }); } catch (e) {} }
 
 function loadCfg() {
   var c = { exe: null, args: [], s: {}, extra: {} };
@@ -79,7 +79,9 @@ function T(k) { return cfg.s[k] || k; }
 
 // --- Trình giữ chạy ----------------------------------------------------------------------------------------------------------------
 
-var child = null, childPid = 0, childStarted = 0, nextStart = 0, delay = 10, pairing = false, quitting = false;
+// Listener sập: mở lại sau 2 s, rồi gấp đôi (tối đa 5 phút) nếu sập liên tục.
+var FIRST_DELAY = 2;
+var child = null, childPid = 0, childStarted = 0, nextStart = 0, delay = FIRST_DELAY, pairing = false, quitting = false;
 var wasPaired = exists(CREDS);
 var seenOpen = mtime(OPEN_REQ), seenQuit = mtime(QUIT_REQ);
 
@@ -128,9 +130,10 @@ function onChildExit() {
   var wasPairing = pairing;
   pairing = false;
   if (wasPairing && !exists(CREDS)) { notify(T('pairFailed')); return; }
-  if (rc === 0) { nextStart = Date.now() + 60000; return; }
+  // 0 = dừng có chủ đích (thu hồi, ghép lại, cửa sổ khác nhận việc): chờ ngắn; thoát 0 liền nhau (hai máy chung token) thì giãn dần.
+  if (rc === 0) { if (secs < 30) { backoff(); } else { delay = FIRST_DELAY; nextStart = Date.now() + FIRST_DELAY * 1000; } return; }
   if (rc === RESTART_CODE) { nextStart = Date.now() + 1000; return; }
-  if (secs > 300) delay = 10;
+  if (secs > 300) delay = FIRST_DELAY;
   backoff();
 }
 
@@ -193,7 +196,7 @@ function askCode() {
   var r;
   try {
     r = sa.displayDialog(T('pairPrompt'), {
-      defaultAnswer: '', buttons: [T('pairCancel'), T('pairOk')], defaultButton: T('pairOk'), cancelButton: T('pairCancel'), withTitle: 'AIVIN Bot CLI',
+      defaultAnswer: '', buttons: [T('pairCancel'), T('pairOk')], defaultButton: T('pairOk'), cancelButton: T('pairCancel'), withTitle: 'AIVIN Bot',
     });
   } catch (e) {
     return;
@@ -209,7 +212,7 @@ function askCode() {
 function openAivin() {
   if (quitting) return;
   if (!exists(CREDS)) { askCode(); return; }
-  if (!child && !lockHeld()) { nextStart = 0; delay = 10; tick(); }
+  if (!child && !lockHeld()) { nextStart = 0; delay = FIRST_DELAY; tick(); }
   try { item.button.performClick(null); } catch (e) {}
 }
 
@@ -241,7 +244,6 @@ function buildUi() {
       'onOpen:': { types: ['void', ['id']], implementation: function () { openAivin(); } },
       'onPause:': { types: ['void', ['id']], implementation: function () { togglePause(); } },
       'onStartup:': { types: ['void', ['id']], implementation: function () { setStartup(!startupEnabled()); refresh(); } },
-      'onFolder:': { types: ['void', ['id']], implementation: function () { task('/usr/bin/open', [HOME]).launch; } },
       'onQuit:': { types: ['void', ['id']], implementation: function () { quit(); } },
       'tick:': { types: ['void', ['id']], implementation: function () { try { tick(); } catch (e) { console.log('aivin tray: ' + e); } } },
       'applicationShouldHandleReopen:hasVisibleWindows:': { types: ['bool', ['id', 'bool']], implementation: function () { openAivin(); return false; } },
@@ -253,18 +255,17 @@ function buildUi() {
 
   item = $.NSStatusBar.systemStatusBar.statusItemWithLength($.NSVariableStatusItemLength);
   var img = $.NSImage.alloc.initWithContentsOfFile(LOGO);
-  if (img.isNil()) item.button.title = 'AIVIN Bot CLI';
+  if (img.isNil()) item.button.title = 'AIVIN Bot';
   else { img.size = $.NSMakeSize(18, 18); item.button.image = img; }
 
   menu = $.NSMenu.alloc.init;
   menu.autoenablesItems = false;
-  statusItem = addItem('AIVIN Bot CLI', null);
+  statusItem = addItem('AIVIN Bot', null);
   statusItem.enabled = false;
   menu.addItem($.NSMenuItem.separatorItem);
   openItem = addItem(T('connect'), 'onOpen:');
   pauseItem = addItem(T('pause'), 'onPause:');
   startupItem = addItem(T('startup'), 'onStartup:');
-  addItem(T('folder'), 'onFolder:');
   menu.addItem($.NSMenuItem.separatorItem);
   addItem(T('quit'), 'onQuit:');
   item.menu = menu;

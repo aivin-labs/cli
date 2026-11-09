@@ -4,6 +4,7 @@ import path from 'path';
 import { DeviceErrorCode, REMOTE_CONFIG_DIR } from './constants.mjs';
 import { DeviceToolError } from './sandbox.mjs';
 import { openToken, sealToken } from './tokenStore.mjs';
+import { notePolicySealed, policySealedNoted } from './credentials.mjs';
 
 /**
  * Sàn luật TẠI MÁY (29/10/2026). Trước đây máy tin BE gần như tuyệt đối: ngoài thư mục được phép + công tắc ngắt + vài lệnh thảm hoạ, mọi
@@ -26,7 +27,12 @@ export const REMOTE_POLICY_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-policy.js
 
 export const ConfirmMode = Object.freeze({ NEVER: 'never', RISKY: 'risky', ALWAYS: 'always' });
 
-export const DEFAULT_LOCAL_POLICY = Object.freeze({ confirm: ConfirmMode.RISKY, deny_tools: [], blocked_commands: [], confirm_timeout_sec: 120 });
+/** Ai được xem + điều khiển màn hình: `ask` hỏi người ở máy mỗi phiên (mặc định), `unattended` không cần người ở máy, `off` tắt hẳn. */
+export const CastConsentMode = Object.freeze({ OFF: 'off', ASK: 'ask', UNATTENDED: 'unattended' });
+/** Số lớn hơn là chặt hơn. */
+export const CAST_CONSENT_RANK = Object.freeze({ [CastConsentMode.UNATTENDED]: 0, [CastConsentMode.ASK]: 1, [CastConsentMode.OFF]: 2 });
+
+export const DEFAULT_LOCAL_POLICY = Object.freeze({ confirm: ConfirmMode.RISKY, deny_tools: [], blocked_commands: [], confirm_timeout_sec: 120, cast_consent: CastConsentMode.ASK });
 
 /** Mức chặt của chế độ xác nhận — số lớn hơn là chặt hơn. */
 export const CONFIRM_RANK = Object.freeze({ [ConfirmMode.NEVER]: 0, [ConfirmMode.RISKY]: 1, [ConfirmMode.ALWAYS]: 2 });
@@ -39,7 +45,10 @@ const POLICY_KEY_ACCOUNT = 'remote-policy-key';
  * Công cụ mang lệnh để chạy → tham số chứa lệnh. `gui.act`: chữ gõ vào cửa sổ (hộp Run, terminal đang mở) cũng là một cách chạy lệnh —
  * xét cùng mẫu lệnh rủi ro / luật chặn của chủ máy.
  */
-const COMMAND_ARG = Object.freeze({ 'shell.exec': 'command', 'proc.start': 'command', 'proc.write': 'text', 'sys.schedule': 'command', 'gui.act': 'text' });
+const COMMAND_ARG = Object.freeze({
+  'shell.exec': 'command', 'proc.start': 'command', 'proc.write': 'text', 'sys.schedule': 'command',
+  'gui.act': 'text', 'gui.do': 'value',
+});
 
 /** Công cụ luôn xét là rủi ro: gửi ra ngoài thay người dùng, cài việc chạy định kỳ (cách bám trụ kinh điển của mã độc). */
 // meeting.start: ghi âm micro + âm thanh máy — AI không tự bật ghi âm khi không ai ngồi trước máy biết (29/10/2026).
@@ -49,6 +58,43 @@ const ALWAYS_RISKY_REASON = {
   'sys.schedule': 'Đặt việc chạy định kỳ trên máy',
   'meeting.start': 'Ghi âm cuộc họp (micro + âm thanh máy) và chụp màn hình',
 };
+
+/**
+ * Công cụ NỘI BỘ (BE tự gọi, Planner không thấy) mà vẫn ghi tệp lên máy — xét rủi ro / hỏi xác nhận như `fs.write`, không được miễn như các
+ * công cụ nội bộ khác (đọc khúc tệp, ghi nhớ, báo…) (02/11/2026).
+ */
+const INTERNAL_WRITE_TOOLS = new Set(['fs.download']);
+
+/** Công cụ ghi tệp → tham số chứa đường ĐÍCH (`fs.move_many`: `moves[].to`). */
+const WRITE_TARGET_ARGS = Object.freeze({
+  'fs.write': 'path', 'fs.edit': 'path', 'fs.download': 'path', 'fs.copy': 'destinationPath', 'fs.move': 'destinationPath',
+});
+
+/**
+ * Chỗ TỰ CHẠY (02/11/2026): ghi tệp vào đây là cài được lệnh chạy khi đăng nhập / mở terminal / mở dự án — cùng loại bám trụ với `sys.schedule`
+ * nên buộc hỏi tại máy. Khớp trên đường dẫn đã chuẩn hoá (`/`, chữ thường); đường tương đối (theo thư mục nhà) cũng khớp.
+ */
+const AUTOSTART_PATH_PATTERNS = [
+  /\/start menu\/programs\/startup(\/|$)/, // Windows: thư mục Startup (người dùng / mọi người dùng)
+  /\/(windows)?powershell\/([^/]*_)?profile\.ps1$/, // hồ sơ PowerShell (chạy mỗi lần mở PowerShell)
+  /\/\.(bashrc|bash_profile|bash_login|profile|zshrc|zshenv|zprofile|zlogin|login|cshrc|tcshrc|xprofile|xinitrc)$/,
+  /\/\.config\/fish\/config\.fish$/,
+  /\/library\/(launchagents|launchdaemons)(\/|$)/, // macOS
+  /\/\.config\/(autostart|systemd\/user)(\/|$)/, // Linux desktop / systemd người dùng
+  /\/\.git\/hooks(\/|$)/, // chạy ở lần git commit / checkout kế tiếp
+  /\/\.vscode\/tasks\.json$/, // VS Code: task "runOn: folderOpen" chạy khi mở thư mục
+];
+
+/** Đường đích (trong tham số) rơi vào chỗ tự chạy — trả đường đó, không thì null. */
+export function autostartTarget(toolName, args = {}) {
+  const key = WRITE_TARGET_ARGS[toolName];
+  const targets = key ? [args?.[key]] : toolName === 'fs.move_many' && Array.isArray(args?.moves) ? args.moves.map((m) => m?.to) : [];
+  return targets.find((t) => {
+    if (typeof t !== 'string' || !t.trim()) return false;
+    const p = `/${t.trim().replace(/\\/g, '/').toLowerCase()}`;
+    return AUTOSTART_PATH_PATTERNS.some((re) => re.test(p));
+  }) || null;
+}
 
 /**
  * Lệnh có hậu quả khó lấy lại / chạm bảo mật — khớp chuỗi nên lách được (ghép chuỗi, mã hoá), nhưng chính các cách lách thông dụng
@@ -65,7 +111,9 @@ const RISKY_COMMAND_PATTERNS = [
   /\b(set|add)-mppreference\b/i, /\bdisable-?(windows)?defender/i, /\btakeown\b/i, /\bicacls\b[^|;]*\/grant/i,
   /\bchmod\s+(-[a-z]*r[a-z]*\s+)?[0-7]*7{2,}/i, /\bchown\s+-[a-z]*r/i, /\bsudo\b/i, /\brunas\b/i, /-verb\s+runas/i,
   // Kho mật khẩu / khoá đăng nhập
-  /\bcmdkey\b/i, /\bsecurity\s+(find|dump|export)-/i, /\bvaultcmd\b/i, /login data|cookies\.sqlite|keychain-db|\.ssh[\\/]id_/i,
+  /\bcmdkey\b/i, /\bsecurity\s+(find|dump|export)-/i, /\bvaultcmd\b/i, /login data|cookies\.sqlite|keychain-db|\.ssh[\\/]id_|\bid_(rsa|dsa|ecdsa|ed25519)\b/i,
+  // Gửi dữ liệu ra ngoài bằng lớp .NET / chép ra thư mục mạng (UNC) — không có cờ nào của curl để nhận ra
+  /\.upload(file|string|data|values)(async)?\s*\(/i, /(^|[\s"'=(])\\\\(?!localhost\\|127\.0\.0\.1\\|\?\\|\.\\)[\w.-]+\\/, /\bnet\s+use\b/i,
   // Tải về rồi chạy / chạy chuỗi mã hoá
   /\b(curl|wget)\b[^|;]*\|\s*(sudo\s+)?(ba|z)?sh\b/i, /\b(iwr|irm|invoke-webrequest|invoke-restmethod)\b[^|;]*\|\s*(iex|invoke-expression)\b/i,
   /\b(iex|invoke-expression)\b/i, /-e(nc(odedcommand)?)?\s+[a-z0-9+/=]{20,}/i, /\bbase64\s+(-d|--decode)\b[^|;]*\|\s*(ba|z)?sh\b/i,
@@ -83,6 +131,7 @@ function normalize(raw) {
     deny_tools: list(p.deny_tools),
     blocked_commands: list(p.blocked_commands).filter((re) => { try { new RegExp(re, 'i'); return true; } catch { return false; } }),
     confirm_timeout_sec: Number.isFinite(timeout) && timeout >= 15 && timeout <= 900 ? Math.round(timeout) : DEFAULT_LOCAL_POLICY.confirm_timeout_sec,
+    cast_consent: Object.hasOwn(CAST_CONSENT_RANK, String(p.cast_consent)) ? p.cast_consent : DEFAULT_LOCAL_POLICY.cast_consent,
   };
 }
 
@@ -124,7 +173,13 @@ function policyKey(keyFile, { create = false } = {}) {
   return key;
 }
 
-const signPolicy = (clean, key) => createHmac('sha256', key).update(JSON.stringify(normalize(clean))).digest('hex');
+/** Giá trị mặc định của trường mới không vào chữ ký: tệp luật đã ký từ bản CLI trước vẫn khớp. */
+function signedForm(clean) {
+  const { cast_consent: consent, ...rest } = normalize(clean);
+  return consent === DEFAULT_LOCAL_POLICY.cast_consent ? rest : { ...rest, cast_consent: consent };
+}
+
+const signPolicy = (clean, key) => createHmac('sha256', key).update(JSON.stringify(signedForm(clean))).digest('hex');
 
 function sealMatches(clean, seal, key) {
   if (typeof seal !== 'string' || !key) return false;
@@ -146,6 +201,7 @@ export function saveLocalPolicy(policy, file = REMOTE_POLICY_FILE, { keyFile = R
   fs.writeFileSync(file, JSON.stringify(signed, null, 2) + '\n', { mode: 0o600 });
   const record = key ? readKeyRecord(keyFile) : null;
   if (record) writeKeyRecord(keyFile, { ...record, policy: signed });
+  if (key) { try { notePolicySealed(); } catch { /* dấu bền chỉ để phát hiện bị xoá — xem createPolicyGuard */ } }
   return clean;
 }
 
@@ -167,7 +223,9 @@ export function verifyLocalPolicy(file = REMOTE_POLICY_FILE, { keyFile = REMOTE_
     raw = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (e) {
     const keyExists = fs.existsSync(keyFile);
-    return { policy: normalize(null), trusted: e?.code === 'ENOENT' && !keyExists, base: keyExists ? signedBackup(keyFile, policyKey(keyFile)) : null };
+    // `pristine`: không có tệp luật lẫn tệp khoá — có thể là chưa từng đặt luật, HOẶC cả hai vừa bị xoá (createPolicyGuard phân biệt).
+    const pristine = e?.code === 'ENOENT' && !keyExists;
+    return { policy: normalize(null), trusted: pristine, pristine, base: keyExists ? signedBackup(keyFile, policyKey(keyFile)) : null };
   }
   const policy = normalize(raw);
   const key = policyKey(keyFile);
@@ -182,6 +240,7 @@ export function stricterPolicy(trusted, other) {
     deny_tools: [...new Set([...trusted.deny_tools, ...other.deny_tools])],
     blocked_commands: [...new Set([...trusted.blocked_commands, ...other.blocked_commands])],
     confirm_timeout_sec: trusted.confirm_timeout_sec,
+    cast_consent: CAST_CONSENT_RANK[other.cast_consent] > CAST_CONSENT_RANK[trusted.cast_consent] ? other.cast_consent : trusted.cast_consent,
   };
 }
 
@@ -189,15 +248,33 @@ export function stricterPolicy(trusted, other) {
  * Luật daemon dùng (đọc lại mỗi lời gọi — chủ máy đổi ở cửa sổ khác thì có hiệu lực ngay). Tệp có chữ ký đúng → dùng và nhớ làm bản đúng;
  * tệp bị sửa ngoài `aivin remote policy` → chặt hơn của (bản có chữ ký gần nhất — chép trong tệp khoá, không có thì bản đúng daemon đã thấy,
  * tệp): siết thì nhận, nới thì bỏ. `onTamper(policy)` báo một lần mỗi lần nội dung tệp đổi.
+ *
+ * Xoá CẢ tệp luật lẫn tệp khoá (02/11/2026): trước đây trông y như "chưa từng đặt luật" → tin, luật về mặc định ngay cả khi daemon đang chạy.
+ * Nay daemon đã từng thấy luật có chữ ký (trong phiên này, hoặc theo dấu bền `sealedMarker` — mặc định ghi trong tệp ghép máy, credentials.mjs)
+ * thì coi trạng thái "không có gì" là bị can thiệp: giữ bản đúng gần nhất, báo `onTamper`. Giới hạn: daemon khởi động lại sau khi bị xoá cả
+ * ba (luật, khoá, dấu) thì không còn gì để phân biệt — nhưng xoá tệp ghép máy cũng làm máy mất kết nối với Aivin.
  */
-export function createPolicyGuard({ file = REMOTE_POLICY_FILE, keyFile = REMOTE_POLICY_KEY_FILE, onTamper } = {}) {
+export function createPolicyGuard({
+  file = REMOTE_POLICY_FILE, keyFile = REMOTE_POLICY_KEY_FILE, onTamper, sealedMarker = { seen: policySealedNoted, note: notePolicySealed },
+} = {}) {
+  const safe = (fn) => { try { return fn?.(); } catch { return undefined; } };
   const first = verifyLocalPolicy(file, { keyFile });
-  let lastTrusted = first.trusted ? first.policy : first.base || normalize(null);
+  let everSigned = (first.trusted && !first.pristine) || !!first.base || !!safe(sealedMarker?.seen);
+  const noteSigned = () => {
+    if (everSigned && safe(sealedMarker?.seen)) return;
+    everSigned = true;
+    safe(sealedMarker?.note);
+  };
+  if (first.trusted && !first.pristine) noteSigned();
+  let lastTrusted = first.trusted && !(first.pristine && everSigned) ? first.policy : first.base || normalize(null);
   let reported = null;
   return {
     read() {
-      const { policy, trusted, base } = verifyLocalPolicy(file, { keyFile });
+      const verdict = verifyLocalPolicy(file, { keyFile });
+      const { policy, base } = verdict;
+      const trusted = verdict.trusted && !(verdict.pristine && everSigned);
       if (trusted) {
+        if (!verdict.pristine && !everSigned) noteSigned();
         lastTrusted = policy;
         reported = null;
         return policy;
@@ -220,6 +297,7 @@ const commandOf = (toolName, args) => (COMMAND_ARG[toolName] ? String(args?.[COM
 export function riskReason(tool, args = {}) {
   if (ALWAYS_RISKY_TOOLS.has(tool.name)) return ALWAYS_RISKY_REASON[tool.name];
   if (tool.destructive && args.permanent === true) return 'Xoá hẳn, không lấy lại được';
+  if (autostartTarget(tool.name, args)) return 'Ghi vào chỗ tự chạy (khởi động máy / mở terminal / mở dự án)';
   const command = commandOf(tool.name, args);
   if (command && RISKY_COMMAND_PATTERNS.some((re) => re.test(command))) return 'Lệnh có thể thay đổi hệ thống hoặc cài đặt bảo mật';
   return null;
@@ -227,17 +305,23 @@ export function riskReason(tool, args = {}) {
 
 /**
  * Quyết định của sàn luật cho một lời gọi: `{ action: 'allow' }`, `{ action: 'confirm', reason }` hoặc ném `DeviceToolError` khi bị cấm.
- * Lời gọi nội bộ (BE tự dùng: đọc khúc tệp, ghi nhớ…) và chỉ đọc không bao giờ cần xác nhận.
+ * Lời gọi nội bộ (BE tự dùng: đọc khúc tệp, ghi nhớ…) và chỉ đọc không bao giờ cần xác nhận — nhưng phần CẤM (`deny_tools`, lệnh bị chặn) áp
+ * cho mọi công cụ, kể cả nội bộ (02/11/2026: trước đó daemon bỏ qua sàn luật với công cụ nội bộ). Công cụ nội bộ có ghi tệp
+ * (`INTERNAL_WRITE_TOOLS`) xét như `fs.write`.
  */
 export function evaluateLocalPolicy(policy, tool, args = {}) {
-  if (policy.deny_tools.includes(tool.name)) {
+  // gui.do is only a compact route into the same GUI actuator. A device owner who disabled the
+  // lower-level actuator must not get it back merely because a newer CLI advertised the fast path.
+  const deniedByAlias = tool.name === 'gui.do' && policy.deny_tools.includes('gui.act');
+  if (policy.deny_tools.includes(tool.name) || deniedByAlias) {
     throw new DeviceToolError(DeviceErrorCode.LOCAL_DENIED, `The owner of this computer turned off ${tool.name} here`);
   }
   const command = commandOf(tool.name, args);
   if (command && policy.blocked_commands.some((re) => new RegExp(re, 'i').test(command))) {
     throw new DeviceToolError(DeviceErrorCode.LOCAL_DENIED, 'Command blocked by a rule the owner of this computer set');
   }
-  if (tool.read_only || tool.internal || policy.confirm === ConfirmMode.NEVER) return { action: 'allow' };
+  const confirmExempt = tool.read_only || (tool.internal && !INTERNAL_WRITE_TOOLS.has(tool.name));
+  if (confirmExempt || policy.confirm === ConfirmMode.NEVER) return { action: 'allow' };
   if (policy.confirm === ConfirmMode.ALWAYS) return { action: 'confirm', reason: riskReason(tool, args) || 'Thay đổi trên máy (bạn đặt luật hỏi mọi việc)' };
   const reason = riskReason(tool, args);
   return reason ? { action: 'confirm', reason } : { action: 'allow' };
@@ -251,6 +335,7 @@ export function describeCall(tool, args = {}) {
   if (tool.name === 'office.outlook.send') return cut(`Tới: ${args.to || '?'} — ${args.subject || ''}`, 300);
   if (tool.name === 'meeting.start') return cut(`${args.title || 'Cuộc họp'}${args.then ? ` — sau đó: ${args.then}` : ''}`, 300);
   if (args.path) return cut(args.path, 300);
+  if (args.destinationPath) return cut(`${args.sourcePath || '?'} → ${args.destinationPath}`, 300);
   if (Array.isArray(args.paths)) return cut(args.paths.join(', '), 300);
   return tool.name;
 }

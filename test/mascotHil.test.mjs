@@ -8,6 +8,7 @@ import { PassThrough } from 'stream';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
 const { createMascotChat, ChatRole, AskCommand } = await import('../bin/lib/remote/mascot/ask.mjs');
+const { lucidePath } = await import('../bin/lib/remote/mascot/lucideIcons.mjs');
 const { createMascot, hostScript, HostCommand } = await import('../bin/lib/remote/mascot/index.mjs');
 const { MASCOT_XAML } = await import('../bin/lib/remote/mascot/hostSource.mjs');
 
@@ -22,13 +23,13 @@ function fakeSocket(reply) {
   };
 }
 
-function setup(reply = () => ({ ok: true })) {
+function setup(reply = () => ({ ok: true }), extra = {}) {
   const sent = [];
   const alerts = [];
   const pending = [];
   const socket = fakeSocket(reply);
   const chat = createMascotChat({
-    socket: () => socket, send: (c) => sent.push(c), lang: 'vi', onAlert: (a) => alerts.push(a), onPending: (on) => pending.push(on),
+    socket: () => socket, send: (c) => sent.push(c), lang: 'vi', onAlert: (a) => alerts.push(a), onPending: (on) => pending.push(on), ...extra,
   });
   return { chat, sent, socket, alerts, pending };
 }
@@ -52,7 +53,7 @@ test('Aivin hỏi lại trong lượt chat → hiện câu hỏi + nút, linh v�
   assert.deepEqual(pending, [true]);
 
   await chat.choose('team');
-  assert.deepEqual(socket.emitted[1].payload, { text: '', request_id: socket.emitted[1].payload.request_id, session_id: 's1', reply_id: 'm9', option_ids: ['team'], stream: true });
+  assert.deepEqual(socket.emitted[1].payload, { text: '', request_id: socket.emitted[1].payload.request_id, links: true, session_id: 's1', reply_id: 'm9', option_ids: ['team'], stream: true, blocks: true });
   assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text === 'Cả nhóm'), 'dòng của chủ máy là tên nút');
   assert.deepEqual(choices(sent).at(-1).options, []);
   assert.equal(chat.hasPending(), false);
@@ -92,7 +93,8 @@ test('câu hỏi đã hết hạn → báo bằng chữ của máy và bỏ nút
 });
 
 test('báo chủ động: một dòng ngắn "Xong: …" / "Lỗi: …" + bong bóng; cùng id (nối lại) không báo lần hai; loại lạ bỏ qua', () => {
-  const { chat, sent, alerts } = setup();
+  // Mức báo Max (2): mọi báo đều hiện — test này kiểm cách hiện, lọc theo mức xem mascotAsk.test.mjs.
+  const { chat, sent, alerts } = setup(undefined, { notifyFreq: 2 });
   chat.onNotify({ id: 'w1', kind: 'done', title: 'Tổng hợp doanh thu', text: 'Tổng 1,2 tỷ, tăng 8%.' });
   chat.onNotify({ id: 'w1', kind: 'done', title: 'Tổng hợp doanh thu', text: 'Tổng 1,2 tỷ, tăng 8%.' });
   chat.onNotify({ id: 'w2', kind: 'failed', title: 'Đồng bộ CRM', text: 'Hết hạn đăng nhập.' });
@@ -101,6 +103,13 @@ test('báo chủ động: một dòng ngắn "Xong: …" / "Lỗi: …" + bong b
   assert.ok(rows(sent).some((r) => r.role === ChatRole.ASSISTANT && r.text === 'Xong: Tổng hợp doanh thu\nTổng 1,2 tỷ, tăng 8%.'));
   assert.ok(rows(sent).some((r) => r.role === ChatRole.ERROR && r.text.startsWith('Lỗi: Đồng bộ CRM')));
   assert.equal(choices(sent).length, 0);
+});
+
+test('thông báo realtime kèm session_id hoặc url: kèm đường dẫn mở trình duyệt', () => {
+  const { chat, sent, alerts } = setup(undefined, { notifyFreq: 2 });
+  chat.onNotify({ id: 'n1', kind: 'done', title: 'Tác vụ xong', text: 'Đã xuất file', session_id: 'sess-123' });
+  assert.deepEqual(alerts, [{ kind: 'done', text: 'Xong: Đã xuất file', url: 'https://app.aivin.vn/?session_id=sess-123' }]);
+  assert.ok(rows(sent).some((r) => r.role === ChatRole.ASSISTANT && r.url === 'https://app.aivin.vn/?session_id=sess-123'));
 });
 
 test('câu trả lời đã rút gọn ghi "(chi tiết trên Aivin)"; hết giờ chờ (việc còn chạy) không báo "xong"', async () => {
@@ -123,7 +132,7 @@ test('câu chọn nhiều: nút báo multiple + icon của mục; xác nhận c�
   chat.onNotify({ id: 'n5', kind: 'needs_you', title: 'Chọn tệp', text: 'Gửi tệp nào?', session_id: 's5', question: MULTI });
   assert.deepEqual(choices(sent).at(-1), {
     t: AskCommand.CHOICES, multiple: true,
-    options: [{ id: 'a', text: 'Báo cáo', icon: 'FileText' }, { id: 'b', text: 'Hoá đơn' }, { id: 'c', text: 'Ảnh' }],
+    options: [{ id: 'a', text: 'Báo cáo', icon_path: lucidePath('FileText') }, { id: 'b', text: 'Hoá đơn' }, { id: 'c', text: 'Ảnh' }],
   });
   await chat.choose(['a', 'c', 'zz']);
   assert.equal(socket.emitted.length, 0, 'id lạ → không gửi');
@@ -144,6 +153,18 @@ test('câu chọn nhiều: nút báo multiple + icon của mục; xác nhận c�
   assert.equal(single.socket.emitted.length, 0);
 });
 
+test('nút lựa chọn / nút link vừa ô hỏi cả khi có thanh cuộn: icon ở mép phải không bị cắt', async () => {
+  const { CHOICE_ROW_WIDTH } = await import('../bin/lib/remote/mascot/askHostSource.mjs');
+  const widthWithScrollbar = 207;
+  const buttonPadding = 20;
+  assert.ok(CHOICE_ROW_WIDTH + buttonPadding <= widthWithScrollbar);
+  const ps = hostScript();
+  assert.ok(ps.includes(`$row.Width = ${CHOICE_ROW_WIDTH}`));
+  assert.ok(ps.includes(`$dock.MaxWidth = ${CHOICE_ROW_WIDTH}`));
+  // Icon ngang tâm dòng chữ đầu (cao 17): lề trên 3 từng làm icon lệch xuống 1,5 px.
+  assert.match(ps, /LucideIcon \$o\.icon_path 14 \$ink; \$i\.Margin = '8,2,0,0'/);
+});
+
 test('cửa sổ có hàng nút lựa chọn + lệnh ask_choices, bấm nút gửi sự kiện choose', () => {
   assert.match(MASCOT_XAML, /x:Name="Choices"/);
   const ps = hostScript();
@@ -154,15 +175,22 @@ test('cửa sổ có hàng nút lựa chọn + lệnh ask_choices, bấm nút g�
   assert.ok([...ps].every((c) => c.charCodeAt(0) < 128), 'host.ps1 giữ toàn ASCII');
 });
 
-test('thả tệp vào bot: hiện "📎 tên tệp", câu gõ kế tiếp mang đường dẫn đầy đủ; gửi xong thì bỏ tệp', async () => {
+test('thả tệp vào bot: chip đính kèm (không phải dòng chat), bỏ được bằng ×; câu gõ kế tiếp mang đường dẫn đầy đủ; gửi xong thì bỏ tệp', async () => {
   const { chat, sent, socket } = setup();
   const fileCounts = () => sent.filter((c) => c.t === 'ask_files').map((c) => c.n);
-  chat.attach(['C:/Users/a/Bao cao Q3.xlsx', 'D:/Hop dong/', 'C:/Users/a/Bao cao Q3.xlsx']);
-  assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text.startsWith('📎 Bao cao Q3.xlsx, Hop dong')));
-  // Thùng trong tay bot: số tệp thật (bỏ trùng) — cửa sổ đã tự cộng 3 lúc thả.
-  assert.deepEqual(fileCounts(), [2]);
+  const lastChips = () => sent.filter((c) => c.t === 'ask_files').at(-1).files;
+  chat.attach(['C:/Users/a/Bao cao Q3.xlsx', 'D:/Hop dong/', 'C:/Users/a/Bao cao Q3.xlsx', 'C:/tmp/anh.png']);
+  assert.equal(rows(sent).length, 0, 'tệp đính kèm không thành bong bóng chat');
+  // Thùng trong tay bot: số tệp thật (bỏ trùng) — cửa sổ đã tự cộng lúc thả.
+  assert.deepEqual(fileCounts(), [3]);
+  assert.deepEqual(lastChips().map((c) => [c.name, c.kind]), [['Bao cao Q3.xlsx', 'sheet'], ['Hop dong', 'folder'], ['anh.png', 'image']]);
+  assert.ok(lastChips().every((c) => c.icon_path && /^#[0-9A-F]{6}$/.test(c.ink) && /^#[0-9A-F]{6}$/.test(c.bg)));
+  chat.detach('C:/tmp/anh.png');
+  chat.detach('C:/khong-co.txt');
+  assert.deepEqual(fileCounts(), [3, 2], 'bấm × → bỏ đúng tệp đó; tệp lạ thì bỏ qua');
+  assert.deepEqual(lastChips().map((c) => c.path), ['C:/Users/a/Bao cao Q3.xlsx', 'D:/Hop dong/']);
   await chat.reply('tóm tắt rồi gửi sếp');
-  assert.deepEqual(fileCounts(), [2, 0], 'gửi đi → thùng cất đi');
+  assert.deepEqual(fileCounts(), [3, 2, 0], 'gửi đi → thùng cất đi');
   assert.equal(socket.emitted[0].payload.text, 'tóm tắt rồi gửi sếp\n\nTệp trên máy này:\n- C:/Users/a/Bao cao Q3.xlsx\n- D:/Hop dong/');
   assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text === 'tóm tắt rồi gửi sếp'), 'dòng của chủ máy chỉ là câu gõ');
   chat.onChatEvent({ request_id: socket.emitted[0].payload.request_id, kind: 'answer', text: 'ok' });
@@ -240,6 +268,11 @@ test('cửa sổ: thả tệp, theo dõi đi vắng, chơi với bot (lắc → 
   assert.match(ps, /\$script:rig\.Tray\('deny', \$script:files\)/);
   assert.match(ps, /PlayFace 'gulp' 'hello'/);
   assert.match(ps, /'ask_files' \{/);
+  // Chip tệp trong ô hỏi: nút × gửi detach; chỉ có tệp (chưa gõ) vẫn gửi được.
+  assert.match(MASCOT_XAML, /x:Name="AttachBar"/);
+  assert.match(ps, /function AttachChips\(\$chips\)/);
+  assert.match(ps, /Send @\{ t = 'detach'; path = \[string\]\$s\.CommandParameter \}/);
+  assert.match(ps, /-not \$text -and -not \$script:files/);
   assert.match(ps, /public void Tray\(string mode, int count\)/);
   assert.match(MASCOT_XAML, /x:Name="DropZone"/);
   assert.match(MASCOT_XAML, /x:Name="TrayCount"/);
@@ -284,7 +317,7 @@ test('nhiều việc cùng hỏi → xếp hàng: nút của câu đầu, dòng 
 
   chat.onChatEvent({ request_id: socket.emitted[0].payload.request_id, kind: 'answer', text: 'Đã gửi.' });
   await chat.reply('không');
-  assert.deepEqual(socket.emitted[1].payload, { text: 'không', request_id: socket.emitted[1].payload.request_id, session_id: 's2', reply_id: 'm2', option_ids: ['n'], stream: true });
+  assert.deepEqual(socket.emitted[1].payload, { text: 'không', request_id: socket.emitted[1].payload.request_id, links: true, session_id: 's2', reply_id: 'm2', option_ids: ['n'], stream: true, blocks: true });
   assert.equal(chat.hasPending(), false);
   assert.deepEqual(pending, [true, false]);
   assert.deepEqual(sent.filter((c) => c.t === 'ask_pin').at(-1), { t: 'ask_pin', on: false });
@@ -335,4 +368,23 @@ test('cửa sổ dựng lại / chưa sẵn sàng khi có câu hỏi chờ → g
   assert.ok(child.sent.some((c) => c.t === 'chat' && c.id === 'q-m9'));
   assert.ok(ts.includes('ask_choices') && ts.lastIndexOf('ask_pin') > ts.indexOf('ask_choices'));
   m.close();
+});
+
+test('có người đang xem máy: báo mắt sóng, cửa sổ linh vật khởi động lại vẫn giữ, hết phiên thì thôi', async () => {
+  const { m, host } = makeMascot();
+  m.connected?.();
+  const first = host.spawned[0];
+  first.send({ t: 'ready' });
+  await sleep(20);
+  m.remoteView(true, { device: 'Chrome' });
+  assert.deepEqual(first.sent.filter((c) => c.t === 'remote_view').at(-1), { t: 'remote_view', on: true });
+  first.kill();
+  await sleep(40);
+  const second = host.spawned[1];
+  second.send({ t: 'ready' });
+  await sleep(20);
+  assert.ok(second.sent.some((c) => c.t === 'remote_view' && c.on === true), 'cửa sổ mới vẫn phải báo đang có người xem');
+  m.remoteView(false);
+  assert.deepEqual(second.sent.filter((c) => c.t === 'remote_view').at(-1), { t: 'remote_view', on: false });
+  m.close?.();
 });

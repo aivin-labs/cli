@@ -11,6 +11,8 @@ import {
   DESKTOP_DIR, RUN_KEY, STARTUP_VALUE, TrayLaunch, installDesktop, isDesktopInstalled, launcherExePath, readSavedDaemonArgs, setStartupApproved,
   startMenuShortcutPath, startupState, uninstallDesktop,
 } from './desktop/index.mjs';
+import { fileAssociationsRegistered } from './desktop/fileAssociation.mjs';
+import { clearWorkFolderState } from './workFolder.mjs';
 import { installMacDesktop, isMacDesktopInstalled, macAgentPath, macAppPath, macStartupState, setMacStartup, uninstallMacDesktop } from './desktop/mac.mjs';
 import {
   hasLinuxDesktopSession, installLinuxDesktop, isLinuxDesktopInstalled, linuxAppEntryPath, linuxAutostartPath, linuxStartupState, linuxTrayAvailable,
@@ -406,11 +408,11 @@ function tryPosixDesktop(argv, launch) {
  * dụng + khay; (mặc định) khởi động cùng máy. Giữ đối số daemon của lần `aivin remote enable` trước; chưa có thì `remote start --quiet`
  * trần — daemon dùng thư mục / chế độ đã lưu lúc ghép máy.
  */
-export function installDesktopApp({ autostart = true, launch = true } = {}) {
+export function installDesktopApp({ autostart = true, launch = true, openPlatform = false } = {}) {
   const cli = cliLaunchCommand();
   if (process.platform === 'win32') {
     const argv = [...cli, 'remote', 'start', ...(readSavedDaemonArgs() || ['--quiet'])];
-    const res = installDesktop({ argv, rollback: supervisorRollbackPaths(cli), lang: mascotLang(), autostart, launch });
+    const res = installDesktop({ argv, rollback: supervisorRollbackPaths(cli), lang: mascotLang(), autostart, launch, launchMode: openPlatform ? TrayLaunch.OPEN : TrayLaunch.INSTALLED });
     if (autostart) {
       removeLegacyWindowsAutoStart();
       writeDaemonConfig({ rootDir: os.homedir(), filePath: RUN_ENTRY, method: 'run', nodeExec: cli[0] });
@@ -427,7 +429,11 @@ export function installDesktopApp({ autostart = true, launch = true } = {}) {
 
 /** `aivin desktop uninstall`: gỡ ứng dụng + mục khởi động (tiến trình daemon nó giữ cũng dừng). */
 export function uninstallDesktopApp() {
-  if (process.platform === 'win32') return uninstallDesktop();
+  if (process.platform === 'win32') {
+    const res = uninstallDesktop();
+    clearWorkFolderState();
+    return res;
+  }
   const desktop = POSIX_DESKTOP[process.platform];
   if (!desktop) return { removed: true };
   const res = desktop.uninstall();
@@ -440,7 +446,7 @@ export function desktopAppStatus() {
   if (process.platform === 'win32') {
     return {
       installed: isDesktopInstalled(), app: launcherExePath(), search: fs.existsSync(startMenuShortcutPath()) ? 'Start menu' : null,
-      startup: startupState(), tray: true,
+      startup: startupState(), tray: true, openWith: fileAssociationsRegistered(),
     };
   }
   const desktop = POSIX_DESKTOP[process.platform];

@@ -15,6 +15,8 @@ import { WINDOWS_HOST_CSHARP, WINDOWS_HOST_PS1 } from './windowsHostSource.mjs';
 
 const GUI_DIR = path.join(REMOTE_CONFIG_DIR, 'gui');
 const READY_TIMEOUT_MS = 60_000;
+/** PID các bản Excel / Word ẩn host đang giữ (officeHostSource.mjs) — host bị giết giữa chừng thì lần khởi động sau dọn (02/11/2026). */
+export const OFFICE_ORPHANS_FILE = path.join(GUI_DIR, 'office-orphans.txt');
 
 function hostFiles() {
   const hash = createHash('sha256').update(WINDOWS_HOST_CSHARP).update(WINDOWS_HOST_PS1).digest('hex').slice(0, 16);
@@ -54,7 +56,7 @@ export function createWindowsHost({ spawnImpl = spawn } = {}) {
     starting = new Promise((resolve, reject) => {
       const files = hostFiles();
       const c = spawnImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', files.ps1], {
-        env: { ...process.env, AIVIN_GUI_SRC: files.src, AIVIN_GUI_DLL: files.dll },
+        env: { ...process.env, AIVIN_GUI_SRC: files.src, AIVIN_GUI_DLL: files.dll, AIVIN_GUI_ORPHANS: OFFICE_ORPHANS_FILE },
         windowsHide: true,
       });
       child = c;
@@ -84,14 +86,21 @@ export function createWindowsHost({ spawnImpl = spawn } = {}) {
     return starting;
   }
 
-  /** Một lời gọi tới host. Huỷ (`signal`) giữa chừng → giết host (không có cách ngắt một lời gọi UI Automation đang chờ). */
+  /** Một lời gọi tới host. Huỷ (`signal`) giữa chừng: `wait_for` gửi `{ cancel: id }` để thoát vòng chờ mà không giết tiến trình host (giữ nguyên snapshot); lệnh khác treo thì giết host. */
   async function call(op, args = {}, { signal } = {}) {
     if (signal?.aborted) throw signal.reason;
     await start();
     if (signal?.aborted) throw signal.reason;
     const id = ++seq;
     return new Promise((resolve, reject) => {
-      const onAbort = () => { waiters.delete(id); reject(signal.reason); kill(); };
+      const onAbort = () => {
+        waiters.delete(id);
+        reject(signal.reason);
+        if (op === 'wait_for' && child?.stdin?.writable) {
+          try { child.stdin.write(`${JSON.stringify({ cancel: String(id) })}\n`); return; } catch { /* rơi xuống kill */ }
+        }
+        kill();
+      };
       signal?.addEventListener('abort', onAbort, { once: true });
       waiters.set(id, {
         resolve: (v) => { signal?.removeEventListener('abort', onAbort); resolve(v); },

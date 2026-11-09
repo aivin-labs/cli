@@ -4,7 +4,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { execFileSync, spawn } from 'child_process';
 import { DeviceErrorCode, REMOTE_CONFIG_DIR, ToolGroup } from './constants.mjs';
-import { DeviceToolError, resolveInRoots, scrubEnv } from './sandbox.mjs';
+import { DeviceToolError, agentEnv, resolveInRoots } from './sandbox.mjs';
 
 /**
  * Giao việc cho agent lập trình trên máy (30/10/2026) — Claude Code trước, Codex / Gemini / Aider… sau — bằng chế độ không giao diện của
@@ -200,7 +200,7 @@ export function createAgentRunner({ adapters = DEFAULT_AGENT_ADAPTERS, find = fi
       id: `${adapter.id}-${randomUUID().slice(0, 8)}`, agent: adapter.id, status: 'running', prompt, cwd, cwdShown: args.cwd || cwd, mode,
       session_id: resume, model: undefined, texts: [], tools: [], result: null, error: null, endedAt: 0, waiters: new Set(), child: null,
     };
-    const child = spawnImpl(binaryOf(adapter).bin, argv, { cwd, env: scrubEnv(process.env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawnImpl(binaryOf(adapter).bin, argv, { cwd, env: agentEnv(process.env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     j.child = child;
     jobs.set(j.id, j);
     let buf = '';

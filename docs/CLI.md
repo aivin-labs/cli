@@ -995,6 +995,22 @@ aivin login --api-key <key>
 
 Skips login entirely - just saves the given key to `~/.aivin/credentials`.
 
+## `aivin server`
+
+Choose which Aivin server this machine uses. The choice is stored in `~/.aivin/server.json`; CLI API login contexts and remote-device pairing tokens remain separate for each server.
+
+```bash
+aivin server                 # show the active server
+aivin server cloud           # production API (https://api.aivin.cloud)
+aivin server vn               # Vietnam API (https://api.aivin.vn)
+aivin server local            # localhost:3001
+aivin server local:3247       # localhost on a custom port
+aivin server https://host     # self-hosted server
+```
+
+`aivin server <target> --force` skips the confirmation before stopping a running remote connection. Installers use this when applying the environment selected by their download domain. Reinstalling from a different Aivin domain can require pairing the computer again on that server. Set `AIVIN_PRESERVE_SERVER=1` before reinstalling to keep the current server.
+
+Aivin-owned `*.aivin.cloud` and `*.aivin.vn` hosts resolve to their API host, while explicit API hosts are retained. Only localhost accepts HTTP. The tray menu also has Cloud, VN, and Local choices. Switching servers with a running daemon asks before stopping its current work; the tray then reconnects using that server?s saved pairing, or asks to pair if none exists. Pairing codes are server-specific, so include `--server` when a code was created on a non-default server.
 ## `aivin whoami`
 
 Shows which account is currently active on this machine - reads `~/.aivin/credentials` straight
@@ -1159,7 +1175,7 @@ aivin remote status | test | logs | reindex | enable | disable | reset-id
 - **Memory stays on this computer**: `~/.aivin/memory/<kind>.yaml` (edit by hand if you like) + `vectors.json`; the agent recalls it
   before planning and saves procedures that worked.
 - Env: `AIVIN_REMOTE_HOME` (config folder), `AIVIN_REMOTE_LIMIT_<GROUP>` (parallel limit per tool group: fs_read, fs_write, exec, git, system, memory).
-- **Stays up to date by itself**: the listener checks for a new release about every 6 hours (and right away when the Aivin server
+- **Stays up to date by itself**: the listener checks for a new release about every hour (and right away when the Aivin server
   asks for a newer minimum version). When started with the computer (`aivin remote enable`), it switches to the new release once the
   computer has had no remote work for 10 minutes; in a window you started yourself it only tells you to restart. If the new release
   crashes 3 times before it has run for 10 minutes, the previous release is put back and the bad one is skipped - by the auto-start
@@ -1208,6 +1224,26 @@ aivin remote status | test | logs | reindex | enable | disable | reset-id
   (`clipboard.write`). On Windows it can also read images and files copied in Explorer; on macOS (`pbpaste`) and Linux (`wl-paste`,
   `xclip` or `xsel`) only text. Anything a password manager marks private when copying (KeePass, 1Password, Bitwarden…) is never
   read. Windows' own clipboard history skips the same content.
+- **Controlling app windows** (Windows): when a job has no file, command or app API to go through (an accounting or ERP app, a
+  settings dialog, Save As), the agent can read and use app windows like you do.
+  - **How it sees:** it reads the window's accessibility tree, the same list of buttons, fields and menus that screen readers use
+    (`gui.observe`, `gui.find` for big windows). When an app draws its own interface and the tree is nearly empty, it takes a
+    screenshot and reads the text on it with Windows' built-in OCR, on this computer. Install the Vietnamese OCR language pack
+    (Settings → Time & language → Language & region → Vietnamese) for Vietnamese text.
+  - **How it acts:** clicks, fills fields, ticks boxes, picks list items, scrolls, presses shortcuts (`gui.act`), opens installed apps
+    or documents in the allowed folders (`gui.open_app`), and waits for a dialog or button to appear (`gui.wait_for`). It uses the
+    app's accessibility actions first, so most steps work while the window stays behind yours. Only when an app needs the real
+    mouse or keyboard does it bring the window to the front. Windows it opens are sent behind yours.
+  - **You stay in control:** touch the mouse or keyboard and the agent stops before its next real mouse/keyboard step and asks you.
+    The first time it controls a window (then at most every 5 minutes) you get a notification. `aivin remote pause` or the mascot's
+    "Pause AI" stops everything.
+  - **What it never does:** type into password fields, control password managers, UAC prompts, the lock screen or Windows Security,
+    or open programs and scripts by path. Unless the computer was started with `--full-access`, it also leaves terminals,
+    Registry Editor, Task Manager, code editors (VS Code, Cursor, JetBrains…) and agent apps (Claude, ChatGPT…) alone, because
+    typing commands there would get around the allowed folders.
+  - **When it asks first:** paying, deleting for good, signing out, or pressing Send / Post when you did not ask for it to be sent.
+    Other clicks don't ask, unless the agent's own rules say so.
+  - Excel, Word and Outlook go through the apps directly (`office.*`), without clicking. `--no-gui` turns window control off.
 
 ## `aivin ui`
 
@@ -1221,7 +1257,7 @@ Preview all eight mascot animations locally without pairing or starting the list
 aivin ui --demo
 ```
 
-Recording of the demo (idle, working, thinking, waiting, done, error, paused, offline): [media/aivin-mascot-states.mp4](media/aivin-mascot-states.mp4)
+Current live-interface capture of the real ask box, mascot, chat and attached-file states: [media/aivin-mascot-live.gif](media/aivin-mascot-live.gif)
 
 ## `aivin desktop`
 
@@ -1233,8 +1269,18 @@ the computer).
 ```bash
 aivin desktop install                 # app + search entry + start with the computer (on by default)
 aivin desktop install --no-autostart  # same, without starting with the computer
+aivin desktop install --open-platform # Windows: open the platform app window after install
 aivin desktop uninstall               # closes the app (and the listener it runs), removes all of it - `aivin` itself stays
 aivin desktop                         # status
+```
+
+On Windows, `install.ps1` asks how Aivin should start. The recommended choice (default: press Enter) creates Desktop and Start
+shortcuts, starts Aivin in the background with Windows, and opens the platform app window after setup. The other choices keep
+Aivin in the background without opening the platform, or open the platform once without enabling startup. Set
+`AIVIN_OPEN_PLATFORM=0` or `AIVIN_NO_AUTOSTART=1` to override the prompt for scripted installs. For example:
+
+```powershell
+$env:AIVIN_OPEN_PLATFORM='0'; irm https://get.aivin.vn/install.ps1 | iex
 ```
 
 | | Windows | macOS | Linux |
@@ -1244,7 +1290,7 @@ aivin desktop                         # status
 | Start with the computer | Task Manager → Startup apps | System Settings → General → Login Items | Startup Applications (GNOME) / Autostart (KDE) |
 
 - **The icon** is in colour while Aivin is taking work, grey when paused, stopped or not connected. Its menu: connect this computer
-  (asks for the code from Aivin), pause / resume work (the kill switch), start with the computer, open the `~/.aivin` folder, quit
+  (asks for the code from Aivin), pause / resume work (the kill switch), start with the computer, quit
   (which also stops the listener). On Windows, clicking the icon opens the mascot and its ask box.
 - **Keeps the listener running**: the app runs `aivin remote start --quiet` hidden. It restarts it when it crashes (after 10 s, then
   longer, up to 5 minutes), switches to a newly installed release right away (exit code 75), and puts the previous release back when a
@@ -1252,7 +1298,7 @@ aivin desktop                         # status
   once you close that window. Opening Aivin from the search again while it runs just opens it.
 - **Start with the computer** is one setting, whichever way you change it: the app's menu, `aivin remote enable` / `disable`, or the
   system settings in the table. `aivin remote disable` only switches it off, so it stays listed and can be switched back on there.
-  - Windows: an `Aivin` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, listed as "AIVIN Bot CLI" (publisher Aivin Labs); the Start menu entry has the same name.
+  - Windows: an `Aivin` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, listed as "AIVIN Bot" (publisher Aivin Labs); the Start menu entry has the same name.
     `Aivin.exe` is compiled on your computer by the C# compiler that comes with Windows (.NET Framework), so nothing is downloaded.
     If that compiler is blocked, `aivin remote enable` falls back to the "Aivin Remote" scheduled task (not shown in Task Manager).
   - macOS: the LaunchAgent `~/Library/LaunchAgents/com.aivin.remote.plist` opens `Aivin.app`, so Login Items lists it as "Aivin". If
@@ -1264,6 +1310,78 @@ aivin desktop                         # status
   just without an icon - connect it with `aivin remote start --code <code>` once.
 - Running `aivin remote enable` again replaces the scheduled task, Startup-folder script or older LaunchAgent / autostart entry made by
   older aivin versions.
+- **Open with AIVIN Bot** (Windows): install also adds "Open with AIVIN Bot" to the right-click menu (Windows 11: "Show more options")
+  and to "Open with" for `docx doc odt rtf xlsx xls xlsm ods csv pptx ppt odp pdf md txt` - see [`aivin open`](#aivin-open-files). Only
+  `HKCU\Software` is written (no admin). Windows doesn't let apps make themselves the default, so to open those files with a double-click
+  either pick Open with → AIVIN Bot → "Always", or run `aivin desktop defaults` to go straight to AIVIN Bot's page in Settings → Default
+  apps. For a whole company, `aivin desktop defaults --export-xml <file> [--all]` writes a file IT can push with the Group Policy "Set a
+  default associations configuration file" or Intune (`md txt csv` by default, `--all` adds Office formats).
+- **Share with AIVIN Bot** (Windows): right-click any file or folder (one or many) → "Share with AIVIN Bot", or Send to → AIVIN Bot.
+  The items are attached to the bot's chat box on screen, the same as dropping them on the mascot (see [`aivin share`](#aivin-share-paths)).
+- **Work here with AIVIN Bot** (Windows): right-click the empty space inside a folder, or the folder itself. The folder becomes the bot's
+  working folder: a chip above the chat box shows it, every question you type goes out with it, and it stays across restarts until you
+  click × on the chip. If the folder is outside the folders Aivin may use, a dialog on this computer asks first; once you allow it, Aivin can
+  read, write and run commands there. Take that back with `aivin remote forget-folder <path>`. Network folders can't be used. Live voice
+  conversations don't use the working folder.
+- Machines that installed Aivin earlier and only auto-update get all these menu items without reinstalling: each time `aivin remote start`
+  starts, it rebuilds `Aivin.exe` if its code changed, rewrites the registry entries if they changed or were removed, and adds the
+  Send to shortcut if it's missing.
+
+## `aivin uninstall` (Windows)
+
+Removes Aivin from this computer: the app and everything `aivin desktop uninstall` removes, the `aivin` command and its PATH entry, and this
+computer's connection to your account (device token, sign-in key). `aivin desktop install` also adds **AIVIN Bot** to Programs & Features and
+Settings → Apps, and uninstalling there does the same thing after asking whether to delete your data.
+
+```bash
+aivin uninstall                # asks first
+aivin uninstall --yes          # keeps your data in .aivin
+aivin uninstall --yes --delete-data
+```
+
+Your data in `.aivin` (the bot's memory, file copies kept for undo, browser sign-ins, logs) stays unless you choose to delete it; deleting cannot
+be undone. If you weren't signed in on this computer or the server can't be reached, the computer stays listed on your account as offline, with no
+token left here; revoke it in Aivin if you want it gone. An install from npm keeps the command: run `npm rm -g @aivin-labs/cli`.
+
+## `aivin share <paths...>`
+
+Attaches files or folders to the AIVIN Bot chat box on this computer, the same as dropping them on the mascot. Type your question and
+they go with it (up to 10 items). This needs `aivin remote start` running, and requests older than 2 minutes are dropped. On Windows,
+right-click → "Share with AIVIN Bot" does the same thing and also starts the tray app if it isn't running.
+
+## `aivin open <files...>`
+
+Opens files from this computer in your Aivin Drive: uploads each file to your personal workspace (or `--workspace <id>`) and opens it
+in the Aivin editor in your browser. The Drive copy is the one you work on from then on:
+
+- the **same content** opened again reopens the same Drive file (with whatever you changed there) - matched by sha256 in
+  `~/.aivin/opened-files.json`;
+- a file that **changed on this computer** is uploaded as a new Drive file - the earlier Drive copy is never overwritten.
+
+```bash
+aivin open contract.docx report.pdf
+aivin open budget.xlsx --workspace <id>
+aivin open notes.md --tab          # a normal browser tab instead of its own window
+aivin open notes.md --print        # print the Drive link instead of opening anything
+```
+
+Files open in their own window (no address bar or tabs) when your default browser is Chromium-based (Edge, Chrome, Brave), since that is
+where your Aivin sign-in lives. With any other default browser they open in a normal tab.
+
+**Not signed in (or the saved key was revoked): view only.** Nothing is uploaded to your Drive. `aivin open` serves a read-only page from
+this computer (`127.0.0.1`, random path) and keeps running until you close that window:
+
+- `.pdf`, `.md`, `.txt`, `.csv` are shown straight from this computer.
+- Office files (`docx doc odt rtf xlsx xls xlsm ods pptx ppt odp`) are converted to PDF by the Aivin server, which does not keep the
+  file. The page asks first; "Don't ask again on this computer" is saved in `~/.aivin/open-settings.json`. Servers that turned this off
+  answer "sign in to open it". The PDF is kept on this computer in `~/.aivin/preview-cache/` (by file content, up to 500 MB, unused
+  copies removed after 30 days), so opening the same unchanged file again shows it at once without sending anything.
+- **Sign in to edit and use AI** runs the browser sign-in of `aivin login`, uploads the file to your Drive and switches the same window to
+  the editor.
+
+Opened from Explorer, `Aivin.exe --open "<file>"` runs this command hidden (no console window) and shows a system notification while it
+uploads, or when it fails (e.g. not signed in - run `aivin login`). Needs a server that accepts CLI API keys on Drive upload (Aivin
+backend from 04/11/2026).
 
 ## `aivin update`
 
@@ -1465,8 +1583,8 @@ machine picks it up automatically - there's no per-project credential to manage.
 
 | Variable            | Used by                                          | Default                     | When you'd touch it                                          |
 | -------------------- | -------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------- |
-| `SDK_ENDPOINT`  | SDK calls, `aivin start`                   | `sdk.aivin.cloud:443`      | Point `main()`'s SDK calls at a local/dev/staging backend instead of production. Staging: `beta-sdk.aivin.vn:50052` (dedicated Cloudflare Tunnel TLS port - production goes through a load balancer on the standard 443 port instead, a different setup). |
-| `AIVIN_BASE_URL`     | `deploy`, `test`, `plugin make/convert/trigger`, `login --basic` | `https://api.aivin.cloud`    | Only for a self-hosted or staging instance. Staging: `https://beta-api.aivin.vn`. |
+| `SDK_ENDPOINT`  | SDK calls, `aivin start`                   | `sdk.aivin.cloud:443`      | Point `main()`'s SDK calls at a local/dev/staging backend instead of production. Staging: `sdk.aivin.vn:50052` (dedicated Cloudflare Tunnel TLS port - production goes through a load balancer on the standard 443 port instead, a different setup). |
+| `AIVIN_BASE_URL`     | `deploy`, `test`, `plugin make/convert/trigger`, `login --basic` | `https://api.aivin.cloud`    | Only for a self-hosted or staging instance. Staging: `https://api.aivin.vn`. |
 | `AIVIN_WEB_URL`      | `login` (browser flow)                             | `https://brain.aivin.cloud`  | Only for a self-hosted or staging instance.                   |
 | `LOCAL_TEST_PORT`    | `aivin start`                                       | `4001`                       | Only if `4001` is already taken on your machine.              |
 | `LOCAL_TEST_HOST`    | `aivin start`                                       | `127.0.0.1`                  | Loopback-only by default (`/invoke` has no auth) - only widen this if you deliberately want another device on your network to reach it. See [sdk repo's SECURITY.md](https://github.com/aivin-labs/AIVIN-SDK/blob/main/docs/SECURITY.md). |

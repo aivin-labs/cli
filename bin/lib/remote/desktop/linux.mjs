@@ -44,7 +44,7 @@ export function linuxDesktopEntry({ launcher = LINUX_LAUNCHER_FILE, icon = LOGO_
     '[Desktop Entry]',
     'Type=Application',
     'Version=1.0',
-    'Name=AIVIN Bot CLI',
+    'Name=AIVIN Bot',
     `Comment=${s.shortcut}`,
     `Exec=${desktopExecArg(launcher)}${autostart ? ' --autostart' : ''}`,
     `Icon=${icon}`,

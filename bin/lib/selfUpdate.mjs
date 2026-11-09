@@ -7,7 +7,7 @@ import {
 } from './update/constants.mjs';
 import { replaceBinary } from './update/binarySwap.mjs';
 import { downloadRelease, downloadRoot, fetchLatestVersion, fetchRollout, verifyStarts } from './update/download.mjs';
-import { loadUpdateSettings, recordInstalled, withUpdateLock } from './update/state.mjs';
+import { diskAheadOfRunning, loadUpdateSettings, recordInstalled, withUpdateLock } from './update/state.mjs';
 import { compareVersions, currentCliVersion, isStandaloneBinary, parseVersion, releaseAsset, rolloutBucket, tagOf, versionList } from './update/versions.mjs';
 
 /**
@@ -44,6 +44,12 @@ export async function installUpdate({
   const result = { current: tagOf(current), latest };
   if (!force && compareVersions(latest, current) <= 0) return { ...result, status: UpdateStatus.UP_TO_DATE };
   if (!binary) return { ...result, status: UpdateStatus.NOT_BINARY };
+  // Đĩa đã có đúng bản này (hoặc mới hơn) chờ khởi động lại → không tải / cài lại (02/11/2026: cài lại từng đè `.prev` bằng bản chưa chạy).
+  const alreadyOnDisk = () => {
+    const onDisk = diskAheadOfRunning({ target, current, file: markerFile });
+    return !force && onDisk && compareVersions(onDisk, latest) >= 0 ? { ...result, status: UpdateStatus.INSTALLED, already: true } : null;
+  };
+  if (alreadyOnDisk()) return alreadyOnDisk();
   if (!version && loadUpdateSettings(settingsFile).skip.includes(latest)) return { ...result, status: UpdateStatus.SKIPPED };
   if (!version && versionList(holdVersions).includes(latest)) return { ...result, status: UpdateStatus.HELD };
   if (check) return { ...result, status: UpdateStatus.AVAILABLE };
@@ -52,13 +58,17 @@ export async function installUpdate({
     if (rollout && rollout.version === latest && rolloutBucket(deviceId, latest) >= rollout.percent) return { ...result, status: UpdateStatus.DEFERRED };
   }
   return withUpdateLock(async () => {
+    // Cửa sổ khác vừa cài xong trong lúc chờ khoá.
+    const done = alreadyOnDisk();
+    if (done) return done;
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-update-'));
     try {
       const file = await downloadRelease({ root, version: latest, asset: releaseAsset(), destDir: tmp, signal, keys });
       await verify(file, latest);
       let backup;
       try {
-        backup = replaceBinary({ newFile: file, target });
+        // Tệp trên đĩa là bản chưa từng chạy → `.prev` (bản đang chạy) giữ nguyên làm chỗ tự lùi.
+        backup = replaceBinary({ newFile: file, target, keepBackup: !!diskAheadOfRunning({ target, current, file: markerFile }) });
       } catch (e) {
         throw new Error(`Không thay được ${target} (${e?.code || e?.message}) — cài lại bằng bộ cài: https://get.aivin.vn`, { cause: e });
       }

@@ -1,6 +1,20 @@
 # Aivin mascot
 
+<p align="center">
+  <img src="media/aivin-mascot-live.gif" alt="The live Aivin mascot ask box showing a conversation and the mascot" width="720" />
+</p>
+
 The Aivin mascot is the floating Windows interface for Aivin Remote. It shows what the agent is doing, accepts typed or spoken questions, and gives access to recent activity without opening the web app.
+
+The animation above is an enlarged capture of the real WPF ask box and mascot, cropped to remove excess space. It shows the live conversation and the mascot's file attachment states.
+
+## How it connects to Aivin
+
+![Aivin Remote architecture: the platform routes work to listeners on selected computers, which enforce local policy and return results](media/aivin-remote-architecture.svg)
+
+The mascot is a local interface to the Aivin listener running on the same computer. It sends typed questions, voice events and user choices to that listener; the listener maintains the authenticated outbound connection to Aivin Platform. Work coming back from the platform passes through local policy and approval checks before any tool or app is used. Status, questions and results then travel back over the same connection.
+
+This design supports multiple paired computers without exposing an inbound remote-control port. A chat or mission targets a selected computer, and each computer keeps its own identity, capabilities, policy and local execution boundary.
 
 ## Requirements
 
@@ -20,7 +34,7 @@ To show the mascot and open its ask box directly, run:
 aivin ui
 ```
 
-If the listener is not running, `aivin ui` starts it in the background. If the computer has not been paired, the command prints pairing instructions instead.
+If the listener is not running, `aivin ui` starts it in the background. If the computer has not been paired, click the Aivin system tray icon and choose **Sign in to connect**. Aivin opens the usual browser sign-in, links this computer, then starts the listener. The one-time pairing code remains available as a fallback from Aivin Web.
 
 ## Using the mascot
 

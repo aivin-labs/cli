@@ -4,9 +4,13 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { execFileSync, spawn } from 'child_process';
 import { REMOTE_CONFIG_DIR } from '../constants.mjs';
+import { lockHolder } from '../daemonLock.mjs';
 import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
+import { AIVIN_ICO_BASE64 } from './aivinIco.mjs';
 import { TRAY_CS } from './traySource.mjs';
 import { trayStrings } from './strings.mjs';
+import { associationStamp, ensureFileAssociations, ensureUninstallEntry, registerFileAssociations, registerUninstallEntry, unregisterFileAssociations, unregisterUninstallEntry } from './fileAssociation.mjs';
+import { currentCliVersion } from '../../selfUpdate.mjs';
 
 /**
  * Aivin trên màn hình Windows (29/10/2026): `Aivin.exe` (khay hệ thống + trình giữ chạy daemon, traySource.mjs) biên dịch trên máy, lối tắt
@@ -31,7 +35,7 @@ export function launcherExePath(env = process.env) {
 }
 
 /** Tên hiện ở Start menu / Task Manager → Startup apps (mô tả của Aivin.exe) / khay: "AIVIN Bot CLI" (30/10/2026; trước là "Aivin"). */
-export const DISPLAY_NAME = 'AIVIN Bot CLI';
+export const DISPLAY_NAME = 'AIVIN Bot';
 const startMenuDir = (env) => path.join(env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
 
 export function startMenuShortcutPath(env = process.env) {
@@ -39,8 +43,11 @@ export function startMenuShortcutPath(env = process.env) {
 }
 
 /** Lối tắt tên cũ ("Aivin.lnk") — dọn khi cài / gỡ để Start menu không có hai mục. */
+export function legacyStartMenuShortcutPaths(env = process.env) {
+  return [path.join(startMenuDir(env), 'Aivin.lnk'), path.join(startMenuDir(env), 'AIVIN Bot CLI.lnk')];
+}
 export function legacyStartMenuShortcutPath(env = process.env) {
-  return path.join(startMenuDir(env), 'Aivin.lnk');
+  return legacyStartMenuShortcutPaths(env)[0];
 }
 
 /** Mã C# của Aivin.exe cho thư mục cấu hình này (gắn cứng: lối tắt / khoá Run không mang biến môi trường AIVIN_REMOTE_HOME theo). */
@@ -72,6 +79,7 @@ export function pngToIco(png) {
  */
 export function launchConfigText({ argv, rollback = null, lang = 'en', extra = {}, platform = 'win32' }) {
   const clean = (v) => String(v).replace(/[\r\n]+/g, ' ');
+  if (!extra.version) { try { extra.version = currentCliVersion(); } catch {} }
   const lines = [`exe=${clean(argv[0])}`, ...argv.slice(1).map((a) => `arg=${clean(a)}`)];
   if (rollback) lines.push(`pending=${clean(rollback.pendingFile)}`, `rollback=${clean(rollback.rollbackFile)}`);
   for (const [key, value] of Object.entries(extra)) lines.push(`${key}=${clean(value)}`);
@@ -142,7 +150,7 @@ export function unregisterStartup() {
 
 // --- Biên dịch Aivin.exe + lối tắt Start menu ------------------------------------------------------------------------------------
 
-const SETUP_PS1 = `param([string]$Src, [string]$Ico, [string]$Out, [string]$Lnk, [string]$Target, [string]$Desc)
+const SETUP_PS1 = `param([string]$Src, [string]$Ico, [string]$Out, [string]$Lnk, [string]$Target, [string]$Desc, [string]$LnkArgs, [string]$DesktopLnkName, [string]$RemoveDesktopLnkName)
 $ErrorActionPreference = 'Stop'
 if ($Src) {
   $p = New-Object System.CodeDom.Compiler.CompilerParameters
@@ -153,15 +161,21 @@ if ($Src) {
   $r = (New-Object Microsoft.CSharp.CSharpCodeProvider).CompileAssemblyFromSource($p, [IO.File]::ReadAllText($Src, [Text.Encoding]::UTF8))
   if ($r.Errors.HasErrors) { $r.Errors | Where-Object { -not $_.IsWarning } | ForEach-Object { [Console]::Error.WriteLine($_.ToString()) }; exit 1 }
 }
-if ($Lnk) {
-  New-Item -ItemType Directory -Force -Path (Split-Path $Lnk) | Out-Null
-  $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Lnk)
+function New-AivinShortcut($Path) {
+  New-Item -ItemType Directory -Force -Path (Split-Path $Path) | Out-Null
+  $s = (New-Object -ComObject WScript.Shell).CreateShortcut($Path)
   $s.TargetPath = $Target
+  if ($LnkArgs) { $s.Arguments = $LnkArgs }
   $s.IconLocation = "$Target,0"
   $s.WorkingDirectory = Split-Path $Target
   $s.Description = $Desc
   $s.Save()
 }
+if ($Lnk) { New-AivinShortcut $Lnk }
+$shell = New-Object -ComObject WScript.Shell
+$desktopPath = $shell.SpecialFolders.Item('Desktop')
+if ($DesktopLnkName) { New-AivinShortcut (Join-Path $desktopPath $DesktopLnkName) }
+if ($RemoveDesktopLnkName) { Remove-Item -LiteralPath (Join-Path $desktopPath $RemoveDesktopLnkName) -Force -ErrorAction SilentlyContinue }
 `;
 
 function runSetup(params, dir) {
@@ -188,12 +202,13 @@ function cleanupOldLaunchers(exe) {
 
 /**
  * Biên dịch Aivin.exe khi chưa có / mã đổi. Bản cũ đang chạy (khoá tệp) thì đổi tên sang `.old-*` (Windows cho đổi tên tệp đang chạy) —
- * khay đang mở vẫn chạy bản cũ tới lần mở sau.
+ * khay đang mở chạy bản cũ tới khi không còn giữ daemon rồi tự mở lại từ tệp mới (TrayApp.SwapIfExeReplaced, traySource.mjs).
  */
 export function ensureLauncher({ exe = launcherExePath(), home = REMOTE_CONFIG_DIR, dir = DESKTOP_DIR, force = false } = {}) {
   const source = launcherSource(home);
-  const png = Buffer.from(AIVIN_LOGO_PNG_BASE64, 'base64');
-  const hash = createHash('sha256').update(source).update(png).digest('hex');
+  // .ico nhiều cỡ (16…256): một ảnh 64×64 duy nhất bị Windows co giãn → nhoè trên taskbar / Start (09/11/2026).
+  const icoBytes = Buffer.from(AIVIN_ICO_BASE64, 'base64');
+  const hash = createHash('sha256').update(source).update(icoBytes).digest('hex');
   fs.mkdirSync(dir, { recursive: true });
   const hashFile = path.join(dir, path.basename(SOURCE_HASH_FILE));
   let current = null;
@@ -205,7 +220,7 @@ export function ensureLauncher({ exe = launcherExePath(), home = REMOTE_CONFIG_D
   const src = path.join(dir, 'tray.cs');
   const ico = path.join(dir, 'aivin.ico');
   fs.writeFileSync(src, source);
-  fs.writeFileSync(ico, pngToIco(png));
+  fs.writeFileSync(ico, icoBytes);
   const out = `${exe}.new`;
   fs.rmSync(out, { force: true });
   runSetup({ Src: src, Ico: ico, Out: out }, dir);
@@ -217,9 +232,62 @@ export function ensureLauncher({ exe = launcherExePath(), home = REMOTE_CONFIG_D
   return { exe, built: true };
 }
 
-export function ensureStartMenuShortcut({ exe = launcherExePath(), lnk = startMenuShortcutPath(), lang = 'en', dir = DESKTOP_DIR } = {}) {
-  runSetup({ Lnk: lnk, Target: exe, Desc: trayStrings(lang).shortcut }, dir);
+export function ensureStartMenuShortcut({ exe = launcherExePath(), lnk = startMenuShortcutPath(), lang = 'en', args = '--platform', dir = DESKTOP_DIR } = {}) {
+  runSetup({ Lnk: lnk, Target: exe, LnkArgs: args, Desc: trayStrings(lang).shortcut }, dir);
   return lnk;
+}
+
+export function desktopShortcutName() {
+  return `${DISPLAY_NAME}.lnk`;
+}
+
+export function ensureDesktopShortcut({ exe = launcherExePath(), lang = 'en', args = '--platform', dir = DESKTOP_DIR } = {}) {
+  const name = desktopShortcutName();
+  runSetup({ DesktopLnkName: name, Target: exe, LnkArgs: args, Desc: trayStrings(lang).shortcut }, dir);
+  return name;
+}
+
+/** Lối tắt trong "Send to" (chuột phải → Send to → AIVIN Bot): Aivin.exe --share <các tệp> — một lần cho cả nhóm tệp đã chọn. */
+export function sendToShortcutPath(env = process.env) {
+  return path.join(env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Microsoft', 'Windows', 'SendTo', `${DISPLAY_NAME}.lnk`);
+}
+
+export function ensureSendToShortcut({ exe = launcherExePath(), lnk = sendToShortcutPath(), lang = 'en', dir = DESKTOP_DIR } = {}) {
+  runSetup({ Lnk: lnk, Target: exe, LnkArgs: '--share', Desc: trayStrings(lang).share }, dir);
+  return lnk;
+}
+
+const ASSOCIATION_STAMP_FILE = path.join(DESKTOP_DIR, 'associations.sha');
+const UNINSTALL_STAMP_FILE = path.join(DESKTOP_DIR, 'uninstall.sha');
+
+const uninstallEntryOptions = (exe) => ({ exe, version: String(currentCliVersion()).replace(/^v/, ''), location: path.dirname(exe) });
+
+/** Giữ các dòng khác của launch.cfg (lệnh daemon, tự lùi bản), chỉ thay chữ `s.*` — bản mới có thêm chữ mà khay đọc. Trả true khi có đổi. */
+export function refreshLaunchStrings(text, lang, platform = 'win32') {
+  const keep = String(text).split(/\r?\n/).filter((l) => l && !l.startsWith('s.'));
+  const strings = Object.entries(trayStrings(lang, platform)).map(([k, v]) => `s.${k}=${String(v).replace(/[\r\n]+/g, ' ')}`);
+  return [...keep, ...strings].join('\r\n') + '\r\n';
+}
+
+/**
+ * Daemon khởi động trên Windows (sau mỗi lần tự cập nhật): máy đã cài ứng dụng Aivin thì bắt kịp bản đang chạy mà không cần
+ * `aivin desktop install` — dựng lại Aivin.exe khi mã đổi (khay tự chuyển sang tệp mới khi rảnh), ghi lại "Mở bằng / Gửi cho AIVIN Bot"
+ * khi bộ khoá đổi hoặc bị xoá, thêm lối tắt Send to còn thiếu. Trả các việc đã làm.
+ */
+export function refreshDesktopIntegration({ lang = 'en' } = {}) {
+  if (process.platform !== 'win32' || !isDesktopInstalled()) return [];
+  const done = [];
+  const { exe, built } = ensureLauncher();
+  if (built) done.push('launcher');
+  if (built || !fs.existsSync(startMenuShortcutPath())) ensureStartMenuShortcut({ exe, lang, args: '--platform' });
+  if (built) ensureDesktopShortcut({ exe, lang, args: '--platform' });
+  if (ensureFileAssociations({ exe, lang, stampFile: ASSOCIATION_STAMP_FILE })) done.push('associations');
+  if (built || !fs.existsSync(sendToShortcutPath())) { ensureSendToShortcut({ exe, lang }); done.push('send_to'); }
+  if (ensureUninstallEntry({ ...uninstallEntryOptions(exe), stampFile: UNINSTALL_STAMP_FILE })) done.push('uninstall_entry');
+  const cfg = fs.readFileSync(LAUNCH_CONFIG_FILE, 'utf8');
+  const nextCfg = refreshLaunchStrings(cfg, lang);
+  if (nextCfg !== cfg) { fs.writeFileSync(LAUNCH_CONFIG_FILE, nextCfg); done.push('menu_text'); }
+  return done;
 }
 
 export function isDesktopInstalled() {
@@ -231,6 +299,37 @@ export function isDesktopInstalled() {
  * INSTALLED = vừa cài: chỉ hiện bong bóng gợi ý, không bật hộp nhập mã.
  */
 export const TrayLaunch = Object.freeze({ OPEN: 'open', AUTOSTART: 'autostart', INSTALLED: 'installed' });
+
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+function trayRunning() {
+  try {
+    const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq Aivin.exe', '/FI', `USERNAME eq ${os.userInfo().username}`, '/NH'], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+    return /Aivin\.exe/i.test(out);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Khay bản cũ đang chạy (vừa biên dịch bản mới): bảo nó thoát (dừng luôn listener nó giữ) và chờ — không thì bản mới mở lên gặp mutex
+ * một-bản-chạy, thoát im lặng, khay cũ chạy mã cũ tới lần đăng nhập sau.
+ */
+export function quitRunningTray({ exe = launcherExePath(), wait = sleepSync } = {}) {
+  if (!trayRunning()) return false;
+  try { execFileSync(exe, ['--quit'], { stdio: 'ignore', windowsHide: true, timeout: 10_000 }); } catch { /* không chạy */ }
+  for (let i = 0; i < 40 && trayRunning(); i++) wait(250);
+  return true;
+}
+
+/**
+ * Khay vẫn là bản này nhưng aivin vừa được cài lại / nâng bản: listener đang chạy vẫn giữ mã cũ trong bộ nhớ tới lần khởi động máy sau —
+ * dừng nó, khay mở lại bằng tệp mới sau ~2 s.
+ */
+function restartListener() {
+  const pid = lockHolder();
+  if (pid) try { process.kill(pid); } catch { /* vừa tự thoát */ }
+}
 
 export function launchTray({ exe = launcherExePath(), mode = TrayLaunch.OPEN } = {}) {
   const args = mode === TrayLaunch.OPEN ? [] : [`--${mode}`];
@@ -247,22 +346,44 @@ export function installDesktop({ argv, rollback = null, lang = 'en', autostart =
   fs.writeFileSync(LOGO_FILE, Buffer.from(AIVIN_LOGO_PNG_BASE64, 'base64'));
   const { exe, built } = ensureLauncher();
   const lnk = startMenuShortcutPath();
-  fs.rmSync(legacyStartMenuShortcutPath(), { force: true });
-  if (built || !fs.existsSync(lnk)) ensureStartMenuShortcut({ exe, lnk, lang });
+  for (const p of legacyStartMenuShortcutPaths()) fs.rmSync(p, { force: true });
+  ensureStartMenuShortcut({ exe, lnk, lang, args: '--platform' });
+  const desktopShortcut = ensureDesktopShortcut({ exe, lang, args: '--platform' });
   if (autostart) registerStartup(exe);
+  const openWith = registerOpenWith(exe, lang);
+  if (launch && built) quitRunningTray({ exe });
+  else if (launch) restartListener();
   if (launch) launchTray({ exe, mode: launchMode });
-  return { exe, shortcut: lnk, built, autostart: startupState().enabled };
+  return { exe, shortcut: lnk, desktopShortcut, built, autostart: startupState().enabled, openWith };
+}
+
+/** "Mở bằng / Gửi cho AIVIN Bot" (fileAssociation.mjs) + lối tắt Send to — lỗi registry không làm hỏng cả bước cài. */
+function registerOpenWith(exe, lang) {
+  let res;
+  try {
+    res = registerFileAssociations({ exe, lang });
+    try { fs.writeFileSync(ASSOCIATION_STAMP_FILE, associationStamp({ exe, lang })); } catch { /* daemon ghi lại lần sau */ }
+  } catch (e) {
+    res = { registered: false, error: String(e?.message || e).trim() };
+  }
+  try { ensureSendToShortcut({ exe, lang }); res.sendTo = true; } catch { res.sendTo = false; }
+  try { registerUninstallEntry(uninstallEntryOptions(exe)); res.uninstallEntry = true; } catch { res.uninstallEntry = false; }
+  return res;
 }
 
 /** Gỡ: đóng khay (dừng daemon nó đang giữ), xoá mục khởi động, lối tắt, Aivin.exe, desktop\. */
-export function uninstallDesktop({ wait = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) } = {}) {
+export function uninstallDesktop({ wait = sleepSync } = {}) {
   const exe = launcherExePath();
   if (fs.existsSync(exe)) {
     try { execFileSync(exe, ['--quit'], { stdio: 'ignore', windowsHide: true, timeout: 10_000 }); } catch { /* không chạy */ }
   }
   unregisterStartup();
+  unregisterFileAssociations();
+  unregisterUninstallEntry();
   fs.rmSync(startMenuShortcutPath(), { force: true });
-  fs.rmSync(legacyStartMenuShortcutPath(), { force: true });
+  try { runSetup({ RemoveDesktopLnkName: desktopShortcutName() }, DESKTOP_DIR); } catch { /* shortcut may already be gone or desktop unavailable */ }
+  fs.rmSync(sendToShortcutPath(), { force: true });
+  for (const p of legacyStartMenuShortcutPaths()) fs.rmSync(p, { force: true });
   for (let i = 0; i < 20 && fs.existsSync(exe); i++) {
     try { fs.rmSync(exe, { force: true }); } catch { wait(250); }
   }

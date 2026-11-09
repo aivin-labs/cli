@@ -2,6 +2,7 @@
 // máy, đồng bộ đám mây) không ký được gì khi không có mật khẩu. Mật khẩu: AIVIN_RELEASE_KEY_PASSPHRASE, không có thì hỏi trong terminal
 // (không hiện chữ). Không bao giờ ghi mật khẩu ra đĩa / log.
 import { createPrivateKey } from 'crypto';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 
 const MIN_PASSPHRASE = 12;
@@ -28,9 +29,16 @@ export function askSecret(prompt) {
     const onData = (chunk) => {
       for (const ch of chunk) {
         if (ch === '\r' || ch === '\n') return done();
-        if (ch === '\u0003') return done(new Error('Đã huỷ.'));
-        if (ch === '\u007f' || ch === '\b') value = value.slice(0, -1);
-        else value += ch;
+        if (ch === '\u0003') return done(new Error('Người dùng đã huỷ thao tác bằng phím tắt.'));
+        if (ch === '\u007f' || ch === '\b') {
+          if (value.length > 0) {
+            value = value.slice(0, -1);
+            process.stderr.write('\b \b');
+          }
+        } else {
+          value += ch;
+          process.stderr.write('*');
+        }
       }
     };
     stdin.on('data', onData);
@@ -51,8 +59,18 @@ export const encryptedPem = (privateKey, passphrase) => privateKey.export({ form
 export async function loadReleasePrivateKey(file) {
   const pem = fs.readFileSync(file, 'utf8');
   if (!isEncryptedPem(pem)) throw new Error(`Khoá ${file} chưa mã hoá — chạy \`node scripts/release-key.mjs encrypt "${file}"\` trước khi ký.`);
+  // On Windows, reuse a passphrase protected by the current user's DPAPI. This keeps
+  // the normal publish.bat flow one-click after the one-time cache setup.
+  const cachedFile = `${file}.passphrase.dpapi`;
+  let pass = process.env.AIVIN_RELEASE_KEY_PASSPHRASE;
+  if (pass === undefined && process.platform === 'win32' && fs.existsSync(cachedFile)) {
+    const encodedPath = Buffer.from(cachedFile, 'utf16le').toString('base64');
+    const ps = `$p=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encodedPath}')); $raw=Get-Content -Raw -LiteralPath $p; $raw=$raw -replace '\\s',''; $s=ConvertTo-SecureString $raw; $b=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($s); try {[Runtime.InteropServices.Marshal]::PtrToStringBSTR($b)} finally {[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b)}`;
+    pass = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', windowsHide: true }).trimEnd();
+  }
+  if (pass === undefined) pass = await readPassphrase();
   try {
-    return createPrivateKey({ key: pem, format: 'pem', passphrase: await readPassphrase() });
+    return createPrivateKey({ key: pem, format: 'pem', passphrase: pass });
   } catch (e) {
     throw new Error('Sai mật khẩu khoá ký.', { cause: e });
   }

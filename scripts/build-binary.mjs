@@ -33,7 +33,8 @@ const stubDevtools = {
 };
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const outDir = path.join(root, 'dist');
+// Keep local install experiments away from release assets already in dist/.
+const outDir = process.env.AIVIN_BINARY_OUT_DIR ? path.resolve(process.env.AIVIN_BINARY_OUT_DIR) : path.join(root, 'dist');
 const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 const sdkVersion = JSON.parse(fs.readFileSync(path.join(root, 'node_modules', '@aivin-labs', 'sdk', 'package.json'), 'utf8')).version;
 const wanted =process.argv.slice(2).length ? process.argv.slice(2) : Object.keys(TARGETS);
@@ -46,7 +47,9 @@ for (const key of wanted) {
   const outfile = path.join(outDir, target.file);
   const result = await Bun.build({
     entrypoints: [path.join(root, 'bin', 'cli.mjs')],
-    compile: { target: target.bun, outfile },
+    // Mặc định tệp chạy Bun tự nạp .env, .env.local, bunfig.toml của thư mục hiện tại trước khi mã CLI chạy: tệp lạ trong một repo vừa tải về sẽ
+    // đổi được máy chủ, tắt kiểm chứng chỉ, hoặc chạy script (`preload`). Biến của dự án plugin do projectEnv.mjs đọc có chọn lọc.
+    compile: { target: target.bun, outfile, autoloadDotenv: false, autoloadBunfig: false },
     minify: true,
     plugins: [stubDevtools],
     define: {

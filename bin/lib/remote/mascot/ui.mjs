@@ -6,6 +6,7 @@ import { isDesktopInstalled, launchTray } from '../desktop/index.mjs';
 import { loadDeviceCredentials } from '../credentials.mjs';
 import { lockHolder } from '../daemonLock.mjs';
 import { HostCommand, HostEvent, MASCOT_DIR, MascotState, loadMascotSettings, requestMascotShow, saveMascotSettings, writeHostFiles } from './index.mjs';
+import { Mood, MOOD_GESTURE, moodOf, SUBDUED_MOODS } from './mood.mjs';
 import { mascotLang } from './strings.mjs';
 
 /**
@@ -22,6 +23,24 @@ export const MASCOT_DEMO_STATES = Object.freeze([
   MascotState.IDLE, MascotState.WORKING, MascotState.THINKING, MascotState.WAITING,
   MascotState.DONE, MascotState.ERROR, MascotState.PAUSED, MascotState.OFFLINE,
 ]);
+/** Nét mặt theo emoji (mood.mjs) trong demo: mỗi mood một câu mẫu chỉ có emoji, đi qua `moodOf` như câu trả lời thật. */
+export const MASCOT_DEMO_MOODS = Object.freeze([
+  { mood: Mood.SAD, text: '😔' }, { mood: Mood.CRY, text: '😭' }, { mood: Mood.SHEEPISH, text: '😅' }, { mood: Mood.HAPPY, text: '😊' },
+  { mood: Mood.CELEBRATE, text: '🎉' }, { mood: Mood.SURPRISED, text: '😮' }, { mood: Mood.CURIOUS, text: '🤔' },
+]);
+/** `aivin ui --demo [--moods]`: cả trạng thái lẫn nét mặt, hoặc chỉ nét mặt. */
+export const DemoScope = Object.freeze({ ALL: 'all', MOODS: 'moods' });
+
+/** Một bước demo → lệnh cho cửa sổ. Nét mặt: như `alert` của daemon — buồn / ngượng về chờ việc, còn lại "xong" rồi cử chỉ. */
+function demoCommands(step) {
+  if (typeof step === 'string') return [{ t: HostCommand.STATE, state: step }, { t: HostCommand.MAIN, text: `Demo: ${step}` }];
+  const mood = moodOf(step.text);
+  return [
+    { t: HostCommand.STATE, state: SUBDUED_MOODS.has(mood) ? MascotState.IDLE : MascotState.DONE },
+    { t: HostCommand.MAIN, text: `Demo: ${step.mood} ${step.text}` },
+    { t: HostCommand.GESTURE, ...MOOD_GESTURE[mood] },
+  ];
+}
 
 const START_WAIT_MS = 20_000;
 const POLL_MS = 500;
@@ -70,7 +89,11 @@ export async function showMascotUi({ platform = process.platform, onStarting = (
 }
 
 /** Preview all visual states without pairing or starting the remote listener. The child + interval keep Node alive until the window closes or Ctrl+C. */
-export function showMascotDemo({ platform = process.platform, env = process.env, stateMs = 2600, deps = {} } = {}) {
+/**
+ * `onEarlyExit()`: cửa sổ thoát trước khi `ready` — thường vì linh vật thật của daemon đang giữ mutex (mỗi lúc một linh vật), lệnh demo
+ * báo thay vì im lặng như đang chạy.
+ */
+export function showMascotDemo({ platform = process.platform, env = process.env, stateMs = 3800, scope = DemoScope.ALL, onEarlyExit = () => {}, deps = {} } = {}) {
   if (platform !== 'win32') return UiResult.UNSUPPORTED;
   const d = { spawn, writeHostFiles, loadMascotSettings, setInterval, clearInterval, ...deps };
   let home;
@@ -81,21 +104,18 @@ export function showMascotDemo({ platform = process.platform, env = process.env,
     });
     let timer = null;
     let index = 0;
+    const steps = scope === DemoScope.MOODS ? MASCOT_DEMO_MOODS : [...MASCOT_DEMO_STATES, ...MASCOT_DEMO_MOODS];
     const send = (message) => {
       try { child.stdin.write(`${JSON.stringify(message)}\n`); } catch { /* preview window closed */ }
     };
-    const showState = () => {
-      const state = MASCOT_DEMO_STATES[index++ % MASCOT_DEMO_STATES.length];
-      send({ t: HostCommand.STATE, state });
-      send({ t: HostCommand.MAIN, text: `Demo: ${state}`, quiet: false });
-    };
+    const showState = () => demoCommands(steps[index++ % steps.length]).forEach(send);
     readline.createInterface({ input: child.stdout }).on('line', (line) => {
       let event;
       try { event = JSON.parse(line); } catch { return; }
       if (event.t === HostEvent.READY && !timer) { showState(); timer = d.setInterval(showState, stateMs); }
       if (event.t === HostEvent.OFF) { send({ t: HostCommand.QUIT }); child.stdin.end(); }
     });
-    child.on('close', () => { if (timer) d.clearInterval(timer); });
+    child.on('close', () => { if (timer) d.clearInterval(timer); else onEarlyExit(); });
     child.on('error', () => { if (timer) d.clearInterval(timer); });
     return UiResult.DEMO;
   } catch {

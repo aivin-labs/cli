@@ -1,8 +1,10 @@
 import { spawn } from 'child_process';
+import { StringDecoder } from 'string_decoder';
 import { DeviceErrorCode, ToolGroup } from './constants.mjs';
-import { DeviceToolError, assertCommandAllowed, displayPath, resolveInRoots, scrubEnv } from './sandbox.mjs';
+import { DeviceToolError, agentEnv, assertCommandAllowed, displayPath, resolveInRoots } from './sandbox.mjs';
 import { accountEnv, withProcessCap } from './multiUser.mjs';
 import { hasPwsh } from './deviceProfile.mjs';
+import { killWindowsTree } from './winTree.mjs';
 
 /**
  * Tiến trình nền + đọc log thời gian thực (28/10/2026): `proc.start` chạy lệnh dài (dev server, build / test watch, `claude -p …`, tail log)
@@ -27,9 +29,15 @@ const schema = (properties, required = []) => ({ type: 'object', properties, req
  * Chương trình + tham số chạy một dòng lệnh trong shell của máy. PowerShell 5.1 trả mã thoát 1 cho mọi lỗi của chương trình ngoài (mất mã
  * thật — `node` thoát 2 thành 1): bọc để trả đúng `$LASTEXITCODE`, lệnh PowerShell lỗi (không có mã) thì 1.
  */
+/**
+ * PowerShell 5 chạy không có console (daemon) ghi đầu ra theo bảng mã OEM (437/850…): chữ Việt thành `?` ngay tại máy, BE không cứu được
+ * (05/11/2026: `Tiếng Việt` → `Ti?ng Vi?t`, tên thư mục `Thư mục` → `Thu m?c`). Đặt UTF-8 (không BOM) cho cả console lẫn ống tới chương trình con.
+ */
+export const PS_UTF8_PREFIX = '$__aivinUtf8 = New-Object System.Text.UTF8Encoding($false); try { [Console]::OutputEncoding = $__aivinUtf8; [Console]::InputEncoding = $__aivinUtf8 } catch {}; $OutputEncoding = $__aivinUtf8; ';
+
 export function shellCommand(command, platform = process.platform) {
   if (platform === 'win32') {
-    const wrapped = `& {
+    const wrapped = `${PS_UTF8_PREFIX}& {
 ${command}
 }; if ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $?) { exit 1 }`;
     return [hasPwsh() ? 'pwsh.exe' : 'powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', wrapped]];
@@ -47,13 +55,14 @@ export function createProcessManager() {
 
   function killTree(p) {
     if (p.status !== 'running') return;
-    if (process.platform === 'win32') spawn('taskkill', ['/pid', String(p.child.pid), '/T', '/F'], { windowsHide: true });
+    if (process.platform === 'win32') killWindowsTree(p.child, p.startedAt);
     else { try { process.kill(-p.child.pid, 'SIGTERM'); } catch { try { p.child.kill('SIGTERM'); } catch { /* đã thoát */ } } }
   }
 
   /** Ghi log theo dòng vào bộ đệm vòng (giữ MAX_LINES dòng cuối); `cursor` tăng mãi để đọc tiếp không sót / không lặp. */
   function pushOutput(p, stream, chunk) {
-    const text = p.partial[stream] + chunk.toString();
+    // StringDecoder giữ byte dở của ký tự nhiều byte sang chunk sau (toString() từng chunk ra `Ti���ng`).
+    const text = p.partial[stream] + p.decoders[stream].write(chunk);
     const parts = text.split(/\r?\n/);
     p.partial[stream] = parts.pop();
     for (const line of parts) addLine(p, stream, line);
@@ -91,10 +100,10 @@ export function createProcessManager() {
     // Cần gõ vào (trả lời câu hỏi): PowerShell không chuyển stdin sang chương trình con → Windows chạy qua cmd.exe (chương trình con dùng
     // chung stdin, mã thoát giữ nguyên); nơi khác shell vốn đã chuyển.
     const interactive = !!args.interactive && process.platform === 'win32';
-    let [cmd, argv] = interactive ? ['cmd.exe', ['/d', '/s', '/c', `"${command}"`]] : shellCommand(command);
+    let [cmd, argv] = interactive ? ['cmd.exe', ['/d', '/s', '/c', `"chcp 65001 >nul & ${command}"`]] : shellCommand(command);
     const runAs = env.runAs;
     if (runAs) [cmd, argv] = withProcessCap(cmd, argv);
-    const baseEnv = scrubEnv();
+    const baseEnv = agentEnv();
     const child = spawn(cmd, argv, {
       cwd, env: runAs ? accountEnv(runAs, baseEnv) : baseEnv, windowsHide: true, detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'], windowsVerbatimArguments: interactive, ...(runAs ? { uid: runAs.uid, gid: runAs.gid } : {}),
@@ -102,13 +111,17 @@ export function createProcessManager() {
     const id = `p${++seq}`;
     const p = {
       id, owner: ownerOf(env), name: String(args.name || '').slice(0, 60) || undefined, command, cwdDisplay: displayPath(env.roots, cwd), child, status: 'running', exitCode: null,
-      startedAt: Date.now(), endedAt: 0, lines: [], cursor: 0, partial: { stdout: '', stderr: '' }, waiters: new Set(), exitWaiters: new Set(),
+      startedAt: Date.now(), endedAt: 0, lines: [], cursor: 0, partial: { stdout: '', stderr: '' },
+      decoders: { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }, waiters: new Set(), exitWaiters: new Set(),
     };
     procs.set(id, p);
     child.stdout.on('data', (c) => pushOutput(p, 'stdout', c));
     child.stderr.on('data', (c) => pushOutput(p, 'stderr', c));
+    // Ghi vào stdin đã đóng (EPIPE, sau `close`): không có listener là sập cả daemon.
+    child.stdin.on('error', (e) => addLine(p, 'stderr', `Cannot write to input: ${e.message}`));
     const finish = (code) => {
       if (p.status !== 'running') return;
+      for (const s of ['stdout', 'stderr']) p.partial[s] += p.decoders[s].end();
       for (const s of ['stdout', 'stderr']) if (p.partial[s]) { addLine(p, s, p.partial[s]); p.partial[s] = ''; }
       p.status = 'exited';
       p.exitCode = code ?? -1;
@@ -168,6 +181,7 @@ export function createProcessManager() {
     if (p.status !== 'running') throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Process ${p.id} has exited`);
     const text = String(args.text ?? '');
     assertCommandAllowed(text);
+    if (p.child.stdin.destroyed || p.child.stdin.writableEnded) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Input of process ${p.id} is already closed`);
     if (text) p.child.stdin.write(args.newline === false ? text : `${text}
 `);
     if (args.close) p.child.stdin.end();

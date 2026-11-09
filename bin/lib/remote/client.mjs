@@ -1,27 +1,33 @@
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import axios from 'axios';
 import chalk from 'chalk';
+import readline from 'readline/promises';
 import { io } from 'socket.io-client';
 import { DEFAULT_AIVIN_BASE_URL } from '../context.mjs';
+import { readActiveServer, resolveServerUrl as normalizeServerUrl, setActiveServer } from '../servers.mjs';
 import { logActivity } from './activityLog.mjs';
-import { DEFAULT_SCOPE_LIMITS, DEVICE_NAMESPACE, DeviceAccess, DeviceErrorCode, DeviceEvent, HoldPhase, MAX_RESULT_BYTES, PROTOCOL_VERSION, REMOTE_IDEM_FILE, REMOTE_OUTBOX_FILE, ServerFeature } from './constants.mjs';
+import { DEFAULT_SCOPE_LIMITS, DEVICE_NAMESPACE, KILL_SWITCH_FILE, REMOTE_CONFIG_DIR, CastState, DeviceAccess, DeviceErrorCode, DeviceEvent, HoldPhase, MAX_RESULT_BYTES, PROTOCOL_VERSION, REMOTE_IDEM_FILE, REMOTE_OUTBOX_FILE, ServerFeature, ToolGroup } from './constants.mjs';
 import { CallState, createCallLedger } from './callLedger.mjs';
+import { fallBackToPreviousToken, settleRotation } from './tokenRotation.mjs';
 import { configureProxy, proxyAgentFor } from './netProxy.mjs';
 import { createKeepAwake } from './keepAwake.mjs';
 import { createPolicyGuard, describeCall, evaluateLocalPolicy } from './localPolicy.mjs';
 import { ConfirmResult, createLocalConfirmer } from './localConfirm.mjs';
-import { clearDeviceCredentials, credentialsFromEnv, listDevices, loadDeviceCredentials, pairDevice, pairDeviceWithCode, readStoredTokenFresh, saveDeviceCredentials } from './credentials.mjs';
+import { clearDeviceCredentials, confirmServerCredentialMigration, credentialsFromEnv, listDevices, loadDeviceCredentials, pairDevice, pairDeviceWithCode, readStoredTokenFresh, saveDeviceCredentials } from './credentials.mjs';
 import { ensureMemoryLoaded, memoryStats, stopWatchingMemory, watchMemoryDir } from './deviceMemory.mjs';
 import { buildCatalog, buildDeviceProfile } from './deviceProfile.mjs';
 import { createFileIndex, indexRootsFor } from './fileIndexer.mjs';
 import { createScheduler } from './scheduler.mjs';
-import { acquireDaemonLock } from './daemonLock.mjs';
+import { acquireDaemonLock, lockHolder } from './daemonLock.mjs';
 import { randomUUID } from 'crypto';
 import { DeviceToolError, fullAccessRoots, isRemotePaused, setRemotePaused } from './sandbox.mjs';
-import { createMascot, HostEvent as MascotHostEvent } from './mascot/index.mjs';
+import { createMascot, HostEvent as MascotHostEvent, loadMascotSettings, saveMascotSettings } from './mascot/index.mjs';
 import { createMascotChat } from './mascot/ask.mjs';
 import { mascotLang } from './mascot/strings.mjs';
+import { refreshDesktopIntegration } from './desktop/index.mjs';
+import { WORK_FOLDER_CONFIRM_SEC, WorkFolderStatus, isAllowedWorkFolder, resolveWorkFolder, withExtraRoots, workFolderConfirmText } from './workFolder.mjs';
 import { showOSNotification } from './notify.mjs';
 import { createMeetingManager, watchMeetingRequests } from './meeting/index.mjs';
 import { createMediaHost, mediaSupported } from './meeting/recorder.mjs';
@@ -39,16 +45,27 @@ import { createScheduleManager } from './schedule.mjs';
 import { remoteDebuggingPage } from './dailyBrowser.mjs';
 import { HOME_BASE, SHARED_DIR, createMultiUserHost, isMultiUserMode } from './multiUser.mjs';
 import { createAutoUpdater } from './autoUpdate.mjs';
+import { createDesktopCastManager } from './desktop/desktopCast.mjs';
+import { createDesktopWebRtcWorker } from './desktop/webrtcWorker.mjs';
+import { CastInputRejection, createCastInputGate } from './desktop/castInput.mjs';
+import { createCastFileDrop, createDropBatches, FileDropReason, revealInExplorer } from './desktop/castFileDrop.mjs';
+import {
+  CAST_ACTION_FILE, askCastConsent, checkCastAction, clearCastSession, isCastLocked, lockCast, recordCastSession, unlockCast,
+} from './desktop/castAuth.mjs';
+import { CastConsentDecision, createCastConsent } from './desktop/castConsent.mjs';
+import { createCastTrust, createDeviceProver } from './desktop/castTrust.mjs';
+import { createConfirmBarrier } from './confirmBarrier.mjs';
+import { newInputTag } from './humanInput.mjs';
 import {
   BootAction, MAX_BOOTS_BEFORE_ROLLBACK, RESTART_EXIT_CODE, UPDATE_CONFIRM_AFTER_MS, UPDATE_ROLLED_BACK, checkBootAfterUpdate, cleanupRetired, clearStaleInstalledMarker,
   confirmUpdate, ingestSupervisorRollback, isStandaloneBinary, noteCleanExit, updateProfile,
 } from '../selfUpdate.mjs';
-import { detectSupervisor } from './autoStart.mjs';
+import { cliLaunchCommand, detectSupervisor } from './autoStart.mjs';
 
 const HEARTBEAT_MS = 20_000;
 // Nhịp nối lại tối đa. Máy cá nhân giãn tới 30 s (nhiều máy cùng dội BE lúc deploy). Cloud Computer (`--multi-user`): một socket / org qua
 // mạng nội bộ, BE có thể đang chờ máy nối về để giao việc — giãn 30 s (+50 % ngẫu nhiên) nghĩa là BE lên lại rồi vẫn chờ tới ~45 s (28/10/2026).
-const RECONNECT_DELAY_MAX_MS = 30_000;
+const RECONNECT_DELAY_MAX_MS = 10_000;
 const MULTI_USER_RECONNECT_DELAY_MAX_MS = 2_000;
 const STREAM_FLUSH_MS = 150;
 const STREAM_FLUSH_BYTES = 16 * 1024;
@@ -62,6 +79,19 @@ const RESULT_ACK_TIMEOUT_MS = 15_000;
 /** Tự cập nhật: báo BE "sắp khởi động lại để chuyển bản" (chờ ack tối đa bấy nhiêu), và máy dự kiến quay lại trong bấy nhiêu. */
 const RESTARTING_ACK_TIMEOUT_MS = 2_000;
 const RESTART_EXPECT_BACK_MS = 30_000;
+/**
+ * Mất kết nối máy chủ giữa phiên xem màn hình: giữ phiên bấy nhiêu lâu (người xem WebRTC vẫn xem được — kênh đi thẳng). Phải dài hơn nhịp nối
+ * lại tối đa (10 s + 50 % ngẫu nhiên) — trước đây 8 s nên gần như mỗi lần máy chủ deploy / mạng chập chờn là phiên bị giết.
+ */
+const CAST_DISCONNECT_GRACE_MS = 20_000;
+/** Nối lại khi phiên vẫn chạy: máy chủ phải mời phát lại / dừng phiên trong bấy nhiêu lâu, không thì phiên đã hết hạn ở máy chủ → dừng. */
+const CAST_RECONFIRM_MS = 20_000;
+/** Tiến trình quay sập: tự mở lại tối đa bấy nhiêu lần mỗi phút trước khi kết thúc phiên. */
+const CAST_MAX_RESTARTS_PER_MIN = 2;
+/** Lý do dừng chỉ là GIÁN ĐOẠN (phiên ở máy chủ còn, được mời phát lại): giữ đồng ý của chủ máy, không hỏi lại. */
+const CAST_RESUMABLE_REASONS = new Set(['disconnected']);
+/** Lý do dừng do chủ máy / daemon: đóng luôn mọi hộp xin xem đang mở. */
+const CAST_SHUTDOWN_REASONS = new Set(['paused', 'device_stopped', 'user_revoked']);
 
 /** Gom đoạn stdout/stderr của một lời gọi, đẩy lên theo nhịp (không bắn mỗi dòng một gói). */
 function createStreamer(socket, callId) {
@@ -118,10 +148,31 @@ function boundedResult(outcome) {
  * thì dùng `--server` (hoặc `--repair`).
  */
 export function resolveServerUrl(options, saved, env = process.env) {
-  const url = options.server || options.serverUrl
-    || (options.code ? undefined : (options.repair ? undefined : saved?.server_url) || env.AIVIN_BASE_URL)
+  const explicit = options.server || options.serverUrl;
+  const url = explicit || (options.code ? DEFAULT_AIVIN_BASE_URL : null)
+    || readActiveServer()
+    || (options.repair ? undefined : saved?.server_url)
+    || env.AIVIN_BASE_URL || env.AIVIN_SERVER
     || DEFAULT_AIVIN_BASE_URL;
-  return String(url).replace(/\/+$/, '');
+  return normalizeServerUrl(url);
+}
+
+/**
+ * Máy đang ghép với máy chủ khác: chuyển sang máy chủ mới là giao máy cho bên quản trị máy chủ đó → phải có người trả lời trong terminal (rà
+ * 02/11/2026). Không có terminal (lệnh do agent / script chạy) thì từ chối.
+ */
+async function confirmServerChange(saved, serverUrl) {
+  if (!saved?.server_url || saved.server_url === serverUrl) return;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(`Máy này đang kết nối với ${saved.server_url}. Chuyển sang ${serverUrl} chỉ làm được khi gõ lệnh trong cửa sổ terminal.`);
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question(chalk.yellow(`⚠️  Máy này đang kết nối với ${saved.server_url}. Chuyển sang ${serverUrl}? Máy chủ mới sẽ điều khiển được máy này. Gõ "co" để đồng ý: `));
+    if (!/^\s*(co|có|yes|y)\s*$/i.test(answer)) throw new Error('Đã huỷ — máy giữ kết nối cũ.');
+  } finally {
+    rl.close();
+  }
 }
 
 /**
@@ -129,16 +180,40 @@ export function resolveServerUrl(options, saved, env = process.env) {
  * không thì ghép mới bằng API key đang đăng nhập.
  */
 async function ensurePaired({ serverUrl, apiKey, code, roots, rootsGiven, name, repair, profile }) {
-  let creds = loadDeviceCredentials();
+  const current = loadDeviceCredentials();
+  await confirmServerChange(current, serverUrl);
+  setActiveServer(serverUrl);
+  let creds = loadDeviceCredentials(serverUrl);
   if (code) {
     creds = await pairDeviceWithCode({ serverUrl, code, roots, name, profile });
-  } else if (!creds || creds.server_url !== serverUrl || repair) {
+  } else if (!creds || repair) {
     creds = await pairDevice({ serverUrl, apiKey, roots, name, profile });
   } else if (rootsGiven && JSON.stringify(roots) !== JSON.stringify(creds.roots)) {
     creds.roots = roots;
     saveDeviceCredentials(creds);
   }
   return creds;
+}
+
+/**
+ * `aivin remote pair --code`: chỉ ghép máy, không nhận việc — bộ cài dùng khi đã có khay (khay thấy máy đã ghép là mở listener ngay,
+ * người dùng đóng được cửa sổ cài). Listener đang chạy bằng token cũ thì dừng nó để khay mở lại bằng token mới. Trả pid đã dừng (hoặc null).
+ */
+export async function pairWithCodeOnly(options) {
+  const saved = loadDeviceCredentials();
+  const serverUrl = resolveServerUrl(options, saved);
+  await confirmServerChange(saved, serverUrl);
+  configureProxy({ explicit: options.proxy });
+  const fullAccess = !options.dir && !!options.fullAccess;
+  const roots = (fullAccess ? fullAccessRoots() : [options.dir || process.cwd()]).map((r) => path.resolve(r));
+  const access = fullAccess ? DeviceAccess.FULL : DeviceAccess.FOLDERS;
+  const profile = { ...buildDeviceProfile(fullAccess ? [os.homedir()] : roots), roots, access };
+  const creds = await pairDeviceWithCode({ serverUrl, code: options.code, roots, name: options.name, profile });
+  setActiveServer(serverUrl);
+  saveDeviceCredentials({ ...creds, access });
+  const stale = lockHolder();
+  if (stale) try { process.kill(stale); } catch { /* vừa tự thoát */ }
+  return { creds, stopped: stale };
 }
 
 /**
@@ -152,8 +227,9 @@ export async function startRemoteClient(options = {}) {
   const envCreds = multiUser ? credentialsFromEnv() : null;
   if (multiUser && !envCreds) throw new Error('--multi-user cần AIVIN_DEVICE_TOKEN, AIVIN_DEVICE_ID và AIVIN_SERVER (máy tính tổ chức do Aivin cấp).');
   if (multiUser && process.platform === 'win32') throw new Error('--multi-user chỉ chạy trên Linux (container máy tính tổ chức).');
-  const saved = envCreds || loadDeviceCredentials();
-  const serverUrl = resolveServerUrl(options, saved);
+  const savedHint = envCreds || loadDeviceCredentials();
+  const serverUrl = resolveServerUrl(options, savedHint);
+  const saved = envCreds || loadDeviceCredentials(serverUrl);
   // Trước mọi lời gọi mạng (ghép máy cũng đi qua proxy).
   const proxy = configureProxy({ explicit: options.proxy });
   const apiKey = options.apiKey ?? process.env.API_KEY;
@@ -162,7 +238,7 @@ export async function startRemoteClient(options = {}) {
   // Nhiều người dùng: mỗi thành viên toàn quyền trong vùng của mình (thư mục nhà + thư mục chung) — gốc thật đặt theo từng lời gọi.
   const fullAccess = multiUser || (!rootsGiven && (!!options.fullAccess || (!options.code && saved?.access === DeviceAccess.FULL)));
   const roots = multiUser ? [HOME_BASE, SHARED_DIR] : fullAccess ? fullAccessRoots()
-    : rootsGiven ? [path.resolve(options.dir)] : (saved?.access !== DeviceAccess.FULL && saved?.roots?.length ? saved.roots : [process.cwd()]);
+    : withExtraRoots(rootsGiven ? [path.resolve(options.dir)] : (saved?.access !== DeviceAccess.FULL && saved?.roots?.length ? saved.roots : [process.cwd()]), saved?.extra_roots);
   // Dò dự án + chỉ mục tệp chỉ trong thư mục nhà khi toàn quyền — quét cả ổ C: là hàng trăm nghìn tệp hệ thống vô ích.
   const scanRoots = multiUser ? [] : fullAccess ? [os.homedir()] : roots;
   const quiet = !!options.quiet;
@@ -232,17 +308,18 @@ export async function startRemoteClient(options = {}) {
     creds.roots = profile.roots;
     saveDeviceCredentials(creds);
   }
-  if (options.code) say(chalk.green(`✅ Đã kết nối máy "${creds.name}" với tài khoản Aivin của bạn — quay lại Aivin để chọn máy này.`));
+  if (options.code) say(chalk.green(`✅ Đã kết nối máy "${creds.name}" với tài khoản ${creds.account || 'Aivin của bạn'} — quay lại Aivin để chọn máy này.`));
   ensureMemoryLoaded();
   watchMemoryDir();
   const fileIndex = multiUser ? null : createFileIndex(indexRootsFor(roots, fullAccess));
-  const useDailyBrowser = options.separateBrowser !== true;
+  const useDailyBrowser = options.dailyBrowser === true;
   const browserTunnels = browser ? createBrowserTunnels({ serverUrl, deviceToken: () => creds.device_token, browser, useDailyBrowser, say: (m) => say(chalk.cyan(m)) }) : null;
-  // Một tiến trình host chung cho giao diện + Office (chỉ dựng khi lời gọi đầu tiên cần).
-  const winHost = guiProfile || officeApps.length ? createWindowsHost() : null;
+  // Tiến trình host riêng cho giao diện và cho Office COM (chỉ dựng khi lời gọi đầu tiên cần) — một lệnh COM treo / bị huỷ không làm mất snapshot giao diện.
+  const guiHost = guiProfile ? createWindowsHost() : null;
+  const officeHost = officeApps.length ? createWindowsHost() : null;
   // Không nói cửa sổ mà focus đang ở linh vật (chủ máy vừa gõ vào ô hỏi) → cửa sổ họ đang dùng lúc hỏi (mascot/ask.mjs).
   const gui = guiProfile ? createGuiController({
-    fullAccess, host: winHost, say: (m) => say(chalk.magenta(m)),
+    fullAccess, host: guiHost, say: (m) => say(chalk.magenta(m)),
     defaultWindow: () => (mascot.pid() ? { avoid_pid: mascot.pid(), fallback: mascotChat?.userWindow()?.window } : null),
   }) : null;
   // Kho hoàn tác (xoá → thùng rác của kho, ghi đè → giữ bản cũ). Máy tính tổ chức: công cụ tệp chạy dưới tài khoản thành viên, không có kho.
@@ -254,6 +331,20 @@ export async function startRemoteClient(options = {}) {
     enabled: !multiUser && options.keepAwake !== false && process.env.AIVIN_REMOTE_KEEP_AWAKE !== '0',
     say: (m) => say(chalk.gray(`   ${m}`)),
   });
+  // Phiên xem + điều khiển màn hình: giữ cả màn hình sáng — chỉ xem không thao tác thì máy không tự khoá giữa phiên (màn hình khoá không mở
+  // lại được từ xa).
+  const castAwake = createKeepAwake({
+    enabled: !multiUser && options.keepAwake !== false && process.env.AIVIN_REMOTE_KEEP_AWAKE !== '0',
+    display: true, startDelayMs: 0, idleMs: 5_000,
+    say: (m) => say(chalk.gray(`   ${m}`)),
+  });
+  let castAwakeHeld = false;
+  const holdCastAwake = (on) => {
+    if (on === castAwakeHeld) return;
+    castAwakeHeld = on;
+    if (on) castAwake.hold();
+    else castAwake.release();
+  };
   let procAwake = false;
   const syncProcAwake = () => {
     const running = !!processes.hasRunning?.();
@@ -273,7 +364,7 @@ export async function startRemoteClient(options = {}) {
   // Ghi chú cuộc họp + chụp màn hình (meeting/) — Windows, máy cá nhân; tắt: --no-meetings / AIVIN_REMOTE_MEETINGS=0.
   const media = !multiUser && mediaSupported() && options.meetings !== false && process.env.AIVIN_REMOTE_MEETINGS !== '0' ? createMediaHost() : null;
   const meetings = media ? createMeetingManager({
-    roots, media, lang: mascotLang(),
+    roots, media, lang: mascotLang(process.env, process.platform, creds?.lang),
     say: (m) => say(chalk.cyan(m)),
     notify: showOSNotification,
     isPaused: isRemotePaused,
@@ -301,22 +392,48 @@ export async function startRemoteClient(options = {}) {
       return ack?.ok ? { ok: true } : { ok: false, error: ack?.error || 'failed' };
     },
   }) : null;
-  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: winHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer, meetings, media, clipboard: multiUser ? null : createClipboard() };
+  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: officeHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer, meetings, media, clipboard: multiUser ? null : createClipboard() };
   const host = multiUser ? createMultiUserHost({ baseEnv: env, say: (m) => say(chalk.gray(m)) }) : null;
   host?.start();
   const tools = buildTools(env);
   const byName = toolMap(tools);
   // Công cụ chủ máy tắt (`aivin remote policy deny`) không vào danh mục — Planner không lập kế hoạch với nó (gọi tới vẫn bị chặn ở sàn luật).
   const deniedTools = new Set(policyGuard.read().deny_tools);
+  if (deniedTools.has('gui.act')) deniedTools.add('gui.do');
   const { catalog, hash } = buildCatalog(tools.filter((t) => !deniedTools.has(t.name)));
   const confirmer = multiUser ? null : createLocalConfirmer();
   // Nhiều người dùng: thêm trần song song theo từng thành viên — một người không chiếm hết chỗ của cả tổ chức.
   const scheduler = createScheduler(multiUser ? { scopeLimits: DEFAULT_SCOPE_LIMITS } : undefined);
+  const earlyDrops = [];
+  let earlyWorkDir = null;
+  let announceProfile = null;
+  const applyWorkDir = (dir) => { if (mascotChat) mascotChat.setWorkDir(dir); else earlyWorkDir = dir; };
+  /** Chủ máy đồng ý mở thêm thư mục: có hiệu lực ngay (công cụ đọc env.roots lúc gọi), báo BE hồ sơ mới, lưu cho các lần chạy sau. */
+  const grantRoot = (dir) => {
+    roots.push(dir);
+    profile.roots.push(dir);
+    creds.roots = profile.roots;
+    creds.extra_roots = [...new Set([...(creds.extra_roots || []), dir])];
+    saveDeviceCredentials(creds);
+    logActivity({ type: 'folder_allowed', path: dir, by: 'owner_confirm' });
+    say(chalk.cyan(`   Đã cho phép thêm thư mục: ${dir}`));
+    void announceProfile?.();
+  };
+  const chooseWorkFolder = async (dir) => {
+    const res = await resolveWorkFolder(dir, {
+      roots,
+      confirm: async (folder) => (await confirmer.ask({ ...workFolderConfirmText(folder, mascotLang(process.env, process.platform, creds?.lang)), timeoutSec: WORK_FOLDER_CONFIRM_SEC })) === ConfirmResult.ALLOW,
+    });
+    if (res.status === WorkFolderStatus.DENIED) return void mascotChat?.workDirDenied(res.path);
+    if (res.status === WorkFolderStatus.NEEDS_ROOT) grantRoot(res.path);
+    applyWorkDir(res.path);
+  };
   // Linh vật trên màn hình (mascot/): việc chính đang làm + nhật ký chi tiết; nút tạm dừng = công tắc ngắt. Máy tính tổ chức: không có.
   const mascot = createMascot({
-    enabled: !multiUser && options.mascot !== false && process.env.AIVIN_MASCOT !== '0',
-    onPause: () => setRemotePaused(true),
-    onResume: () => setRemotePaused(false),
+    enabled: !multiUser && options.mascot !== false && process.env.AIVIN_MASCOT !== '0', lang: creds?.lang,
+    // Nút tạm dừng trên linh vật: hiệu lực ngay (huỷ việc, dừng xem màn hình), không chờ lượt kiểm định kỳ.
+    onPause: () => { setRemotePaused(true); checkPauseNow(); },
+    onResume: () => { setRemotePaused(false); checkPauseNow(); },
     say: (m) => say(chalk.gray(`   ${m}`)),
     // Ô hỏi của linh vật: gõ / nói → lượt chat trên Aivin qua socket của máy (mascot/ask.mjs, dựng sau khi có socket).
     // Gõ khi Aivin đang hỏi lại → là câu trả lời; nút lựa chọn → trả lời đúng lựa chọn đó.
@@ -324,8 +441,15 @@ export async function startRemoteClient(options = {}) {
     onChoose: (id) => { void mascotChat?.choose(id); },
     onCancel: () => { void mascotChat?.cancel(); },
     onNewChat: () => { void mascotChat?.newChat(); },
+    onOpenTool: (msg) => { void mascotChat?.openTool(msg); },
+    onNotifyFreq: (val) => { mascotChat?.setNotifyFreq(val); },
     // Thả tệp vào bot → đi kèm câu gõ kế tiếp.
-    onDrop: (files) => mascotChat?.attach(files),
+    // "Gửi cho AIVIN Bot" từ Explorer có thể tới trước khi ô hỏi dựng xong (daemon vừa được khay mở) → giữ lại, dựng xong thì đính.
+    onDrop: (files) => (mascotChat ? mascotChat.attach(files) : earlyDrops.push(...files)),
+    // "Làm việc ở đây với AIVIN Bot": thư mục ngoài quyền thì hỏi chủ máy trước (workFolder.mjs).
+    onWorkFolder: (dir) => { void chooseWorkFolder(dir).catch((e) => say(chalk.yellow(`⚠️  Không đặt được thư mục làm việc: ${e?.message || e}`))); },
+    // Bấm × trên chip tệp trong ô hỏi → bỏ tệp đó.
+    onDetach: (file) => mascotChat?.detach(file),
     // Nói chuyện trực tiếp: mic / loa ở cửa sổ, phiên thoại realtime trên BE (mascot/ask.mjs).
     onVoice: (msg) => {
       if (!mascotChat) return;
@@ -337,7 +461,253 @@ export async function startRemoteClient(options = {}) {
     },
   });
   if (isRemotePaused()) mascot.paused(true);
+  // Máy cài ứng dụng Aivin rồi chỉ tự cập nhật: bắt kịp Aivin.exe + "Mở bằng / Gửi cho AIVIN Bot" của bản này (biên dịch vài giây → chạy sau).
+  if (!multiUser && process.platform === 'win32') {
+    const refresh = setTimeout(() => {
+      try {
+        const done = refreshDesktopIntegration({ lang: mascotLang() });
+        if (done.length) say(chalk.gray(`   Ứng dụng Aivin trên máy: đã cập nhật ${done.join(', ')}`));
+      } catch (e) {
+        say(chalk.yellow(`⚠️  Chưa cập nhật được ứng dụng Aivin trên máy (Mở bằng / Gửi cho AIVIN Bot): ${String(e?.message || e).trim()}`));
+      }
+    }, 10_000);
+    refresh.unref?.();
+  }
+  const desktopCast = createDesktopCastManager();
+  // Công cụ GUI ghi của AI đang chạy → thao tác từ xa của người bị bỏ (và AI chờ người thôi thao tác trước khi bấm, xem handleCall).
+  let aiGuiBusy = 0;
+  const castGate = createCastInputGate({ isPaused: isRemotePaused, isAiBusy: () => aiGuiBusy > 0 });
+  let castBlockedNoticeAt = 0;
+  const emitCastStatus = (payload) => { if (socket?.connected) socket.emit(DeviceEvent.DESKTOP_CAST_STATUS, payload); };
+  /** Thao tác từ xa (qua máy chủ hoặc kênh WebRTC) — qua cổng chặn rồi mới xuống tiến trình điều khiển. */
+  const applyRemoteInput = (raw, viewerId) => {
+    const sessionId = desktopCast.sessionId();
+    if (!sessionId || (raw?.session_id && raw.session_id !== sessionId)) return;
+    const viewer = viewerId || (typeof raw?.viewer_id === 'string' ? raw.viewer_id : '');
+    const res = castGate.accept(raw, viewer);
+    if (res.ok) return desktopCast.sendInput(res.cmd);
+    // Chỉ báo khi AI đang bấm: FE hiện "AI đang thao tác" cho mọi `input_blocked`, báo cả OTHER_VIEWER là nói sai cho người xem.
+    if (res.reason !== CastInputRejection.AI_ACTIVE || Date.now() - castBlockedNoticeAt < 2000) return;
+    castBlockedNoticeAt = Date.now();
+    emitCastStatus({ session_id: sessionId, viewer_id: viewer || undefined, state: CastState.INPUT_BLOCKED, reason: res.reason });
+  };
+  /** Một người xem rời: chỉ nhả nút người đó còn giữ (người khác đang kéo không bị nhả theo). */
+  const releaseViewerInput = (viewerId) => {
+    for (const button of castGate.releaseViewer(viewerId)) desktopCast.sendInput({ action: 'mouseup', button });
+  };
+  /** AI sắp bấm / người xem rời giữa lúc đang kéo: nhả nút + phím bổ trợ trên máy, gói nhả của người xem có thể không bao giờ tới. */
+  const releaseCastInput = () => { if (castGate.takeHeldInput()) desktopCast.sendInput({ action: 'release_all' }); };
+  const castTrust = createCastTrust();
+  const castProver = createDeviceProver({ send: emitCastStatus });
+  const castConsent = createCastConsent({
+    trust: castTrust,
+    ask: ({ viewerDevice, locked, canTrust, signal }) => askCastConsent({ viewerDevice: viewerDevice || 'Thiết bị từ xa', repeatedAfterBlock: locked, canTrust, signal }),
+    getMode: () => policyGuard.read().cast_consent,
+    isLocked: isCastLocked,
+    unlock: unlockCast,
+    onWaiting: ({ sessionId, viewerId, viewerDevice }) => {
+      say(chalk.yellow(`  ⚠️  Thiết bị "${viewerDevice || viewerId}" xin xem màn hình — chờ bấm "Cho phép" trên máy này`));
+      emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.AWAITING_CONSENT });
+    },
+  });
+  const castDropBatches = createDropBatches();
+  const castFileDrop = createCastFileDrop({
+    reply: (viewerId, msg) => desktopWebRtc.replyFile(viewerId, msg),
+    checkAllowed: () => (isRemotePaused() ? FileDropReason.PAUSED : aiGuiBusy > 0 ? FileDropReason.AI_ACTIVE : null),
+    onSaved: ({ viewerId, path: file, name, bytes, reveal, paste, image, drop, batch, last, x, y, rx, ry }) => {
+      say(chalk.cyan(`  📥 Đã nhận tệp từ web: ${file}`));
+      logActivity({ type: 'desktop_cast_file', id: desktopCast.sessionId(), name, bytes });
+      if (drop) {
+        const paths = castDropBatches.add({ viewerId, batch, path: file, last });
+        // Kiểm lại lúc thả: chủ máy có thể vừa tạm dừng, AI có thể vừa bắt đầu bấm trong lúc tệp đang truyền.
+        if (paths && !isRemotePaused() && aiGuiBusy === 0) desktopCast.sendInput({ action: 'drop_files', paths, x, y, rx, ry });
+      } else if (paste) {
+        // Như thả: chủ máy vừa tạm dừng / AI vừa bắt đầu bấm trong lúc tệp đang truyền → không dán (con trỏ đang là của AI).
+        if (isRemotePaused() || aiGuiBusy > 0) return void emitCastStatus({ session_id: desktopCast.sessionId(), state: CastState.PASTE_FAILED });
+        desktopCast.sendInput({
+          action: 'paste_file',
+          path: file,
+          as_image: image === true,
+          x,
+          y,
+          rx,
+          ry,
+          click: Number.isFinite(x) && Number.isFinite(y),
+        });
+      } else if (reveal && aiGuiBusy === 0 && !isRemotePaused()) {
+        revealInExplorer(file);
+      }
+    },
+  });
+  // WebRTC chạy ở tiến trình con (thư viện native sập lúc thoát — xem webrtcWorker.mjs), daemon chỉ chuyển tín hiệu / thao tác / JPEG.
+  const desktopWebRtc = createDesktopWebRtcWorker({
+    command: cliLaunchCommand(),
+    emitSignal: (payload) => { if (socket?.connected) socket.emit(DeviceEvent.DESKTOP_CAST_SIGNAL, payload); },
+    emitStatus: emitCastStatus,
+    onInput: (raw, viewerId) => applyRemoteInput(raw, viewerId),
+    onFile: (viewerId, msg, sessionId) => { if (sessionId === desktopCast.sessionId()) castFileDrop.message(viewerId, msg); },
+    onFileChunk: (viewerId, bytes) => castFileDrop.chunk(viewerId, bytes),
+    // Người xem vừa nối: gửi ngay một khung (màn hình đứng yên thì bộ quay không tự gửi).
+    onPeerReady: () => desktopCast.refresh(),
+    onState: () => syncCastJpeg(),
+    log: (m) => say(chalk.gray(`  ${m}`)),
+  });
+  /**
+   * Chỉ nén JPEG khi còn người xem cần: chưa có WebRTC / không có video, hoặc khung thô chưa tới bộ mã hoá (pipe chưa nối).
+   * Con trỏ tách khỏi khung chỉ khi mọi người xem đều có video + tự vẽ con trỏ (FE cũ, đường JPEG vẫn thấy con trỏ trong hình).
+   */
+  const syncCastJpeg = () => {
+    const jpeg = desktopWebRtc.needsJpeg() || !desktopWebRtc.videoLive();
+    desktopCast.setJpeg(jpeg);
+    desktopCast.setCursorInFrame(jpeg || !desktopWebRtc.localCursor());
+    desktopCast.setAudio(desktopWebRtc.needsAudio());
+  };
+  /** Phiên daemon tự dừng (khác với tiến trình quay tự thoát / sập) — `onStop` của phiên phân biệt hai trường hợp. */
+  const castStopsRequested = new Set();
+  /**
+   * Dừng hẳn phiên trên máy (tạm dừng / mất kết nối / tắt daemon); `notify` = báo BE kết thúc phiên. `endedSessionId`: tiến trình quay của
+   * phiên đó đã tự thoát (sập, màn hình đổi…) — dọn kênh người xem + báo BE, không thì người xem đứng hình mà thao tác rơi im lặng.
+   */
+  const stopDesktopCast = (reason, notify = true, endedSessionId = null) => {
+    const sessionId = endedSessionId || desktopCast.sessionId();
+    clearCastSession();
+    // Gián đoạn (rớt mạng): máy chủ giữ phiên và mời phát lại đúng phiên đó — giữ đồng ý, chủ máy đang ở xa không bị khoá
+    // ngoài. Kết thúc hẳn: quên.
+    if (sessionId) {
+      if (CAST_RESUMABLE_REASONS.has(reason)) castConsent.suspend(sessionId);
+      else castConsent.forget(sessionId);
+    }
+    if (CAST_SHUTDOWN_REASONS.has(reason)) {
+      castConsent.cancelAll();
+      castProver.cancel();
+    }
+    clearTimeout(castDisconnectTimer);
+    castDisconnectTimer = null;
+    clearTimeout(castReconfirmTimer);
+    castReconfirmTimer = null;
+    desktopWebRtc.closeAll();
+    void castFileDrop.closeAll();
+    castGate.takeHeldInput(); // Tiến trình điều khiển tự nhả khi dừng.
+    holdCastAwake(false);
+    if (!endedSessionId) {
+      if (!desktopCast.isActive()) return;
+      castStopsRequested.add(sessionId);
+      desktopCast.stop();
+    }
+    mascot.remoteView(false);
+    // Nhật ký trên máy của chủ máy: phiên xem + số thao tác đã nhận (cả qua WebRTC, không qua máy chủ).
+    logActivity({ type: 'desktop_cast', id: sessionId, reason, inputs: castGate.takeAcceptedCount() });
+    if (notify && sessionId) emitCastStatus({ session_id: sessionId, state: CastState.STOPPED, reason, final: true });
+  };
+  /**
+   * Mã đánh dấu thao tác của phiên đang phát (humanInput.mjs): thao tác của người đang điều khiển từ xa duyệt được hộp xác nhận, AI thì không.
+   * Kể cả chế độ không cần người ở máy: chủ máy ở xa không còn cách nào khác để duyệt, và ai điều khiển được phiên cũng đã gõ được lệnh thẳng vào máy.
+   */
+  let castInputTag = null;
+  const castTrustTag = () => (castInputTag && desktopCast.isActive() ? castInputTag : null);
+  /** Mở tiến trình quay cho một phiên (lần đầu, hoặc mở lại khi tiến trình sập). `false` khi máy không quay được. */
+  function startCapture({ sessionId, viewerId, viewerDevice, castConfig }) {
+    return !!desktopCast.start({
+      sessionId,
+      inputTag: castInputTag,
+      maxFps: castConfig.max_fps,
+      maxWidth: castConfig.max_width,
+      quality: castConfig.quality,
+      monitor: castConfig.monitor,
+      onFrame: (frame) => {
+        desktopWebRtc.push(frame);
+        // Còn người xem chưa có kênh WebRTC (đang nối / runtime native không có) → JPEG qua máy chủ; BE chỉ chuyển cho những người đó.
+        // Binary thay base64: nhẹ hơn khoảng một phần ba; JPEG đã nén nên không nén thêm.
+        if (desktopWebRtc.needsFallback() && socket.connected) {
+          socket.volatile.compress(false).emit(DeviceEvent.DESKTOP_CAST_FRAME, { ...frame, image: Buffer.from(frame.image, 'base64') });
+        }
+        syncCastJpeg();
+      },
+      // Mọi người xem đã có video → tiến trình quay thôi nén JPEG, chỉ gửi meta (toạ độ) + khung thô cho bộ mã hoá video.
+      onMeta: (meta) => {
+        desktopWebRtc.push(meta);
+        // Màn hình đứng yên không có ảnh: người xem qua máy chủ vẫn cần gói giữ nhịp để biết máy còn sống.
+        if (desktopWebRtc.needsFallback() && socket.connected) socket.volatile.emit(DeviceEvent.DESKTOP_CAST_FRAME, meta);
+        syncCastJpeg();
+      },
+      onCursor: (cursor) => desktopWebRtc.pushCursor(cursor),
+      onCursorShape: (shape) => desktopWebRtc.pushCursorShape(shape),
+      onInputFocus: (focus) => {
+        desktopWebRtc.pushInputFocus?.(focus);
+        // Người xem chưa có kênh WebRTC không nhận được tin trên → gửi qua máy chủ để điện thoại vẫn tự mở bàn phím.
+        if (desktopWebRtc.needsFallback() && socket.connected) {
+          socket.emit(DeviceEvent.DESKTOP_CAST_INPUT_FOCUS, { session_id: sessionId, editable: focus?.editable === true });
+        }
+      },
+      onPasteFailed: () => emitCastStatus({ session_id: sessionId, state: CastState.PASTE_FAILED }),
+      onDropRefused: () => emitCastStatus({ session_id: sessionId, state: CastState.DROP_REFUSED }),
+      onCapture: ({ mode, reason }) => say(chalk.gray(`  🖥️  Chụp màn hình: ${mode}${reason ? ` (${reason})` : ''}`)),
+      onClipboard: (clip) => desktopWebRtc.pushClipboard?.(clip),
+      onSecureDesktop: (sec) => {
+        desktopWebRtc.pushSecureDesktop?.(sec);
+        emitCastStatus({ session_id: sessionId, state: 'secure_desktop', active: sec?.active === true });
+      },
+      rawPipe: true,
+      onReady: (meta) => {
+        say(chalk.cyan(`  🖥️  Đang có người xem + điều khiển màn hình máy này từ web (${meta.bounds?.width}x${meta.bounds?.height})`));
+        mascot.remoteView(true, { device: viewerDevice });
+        holdCastAwake(true);
+        recordCastSession({ active: true, sessionId, viewerId, viewerDevice });
+        emitCastStatus({ session_id: sessionId, state: CastState.READY, bounds: meta.bounds });
+      },
+      onError: (err) => {
+        say(chalk.yellow(`  ⚠️  Desktop Cast lỗi: ${err?.message || err}`));
+      },
+      onStop: () => {
+        say(chalk.gray('  ⏹  Đã ngừng xem màn hình từ web'));
+        const requested = castStopsRequested.delete(sessionId);
+        // Phiên mới đã thay chỗ: không đụng tới linh vật / tệp phiên / người xem của phiên mới.
+        if (desktopCast.isActive()) return;
+        if (requested) {
+          mascot.remoteView(false);
+          clearCastSession();
+          return;
+        }
+        // Tiến trình quay tự thoát (sập, lỗi chụp…) mà daemon không yêu cầu: mở lại ngay cho cùng phiên — người xem giữ kết nối WebRTC, chỉ
+        // đổi nguồn hình. Sập liên tục thì kết thúc phiên cho đúng (người xem mở lại được ngay, không đứng hình).
+        const now = Date.now();
+        while (castRestarts.length && now - castRestarts[0] > 60_000) castRestarts.shift();
+        if (!stopped && !isRemotePaused() && castRestarts.length < CAST_MAX_RESTARTS_PER_MIN) {
+          castRestarts.push(now);
+          say(chalk.yellow('  ⚠️  Tiến trình xem màn hình dừng bất ngờ — mở lại'));
+          // Tiến trình cũ chết không kịp nhả nút chuột đang giữ: nhả trên tiến trình mới.
+          const hadHeld = castGate.takeHeldInput();
+          if (startCapture({ sessionId, viewerId, viewerDevice, castConfig })) {
+            desktopWebRtc.attachPipe(desktopCast.pipeName());
+            if (hadHeld) for (const button of [0, 1, 2]) desktopCast.sendInput({ action: 'mouseup', button });
+            return;
+          }
+        }
+        say(chalk.yellow('  ⚠️  Tiến trình xem màn hình dừng bất ngờ — đã báo người xem'));
+        stopDesktopCast('capture_stopped', true, sessionId);
+      },
+    });
+  }
   let mascotChat = null;
+  let castDisconnectTimer = null;
+  let castReconfirmTimer = null;
+  const castRestarts = [];
+  // Tệp phiên của lần chạy trước (daemon chết giữa phiên) — khay sẽ hiện "Ngắt…" cho một phiên không còn.
+  clearCastSession();
+  /** Chủ máy bấm "Ngắt" ở khay / `aivin remote disconnect`: chạy ngay khi tệp lệnh xuất hiện (fs.watch), đọc định kỳ chỉ để dự phòng. */
+  const checkCastActionNow = () => {
+    const action = checkCastAction();
+    // Gỡ thiết bị tin cậy ở khay. Chỉ siết quyền lại, người đang xem (nếu có) không bị ngắt.
+    if (action?.action === 'untrust') return void castTrust.remove(action.key);
+    if (action?.action === 'untrust_all') return void castTrust.removeAll();
+    if (action?.action !== 'stop_and_block') return;
+    castConsent.revokeSessionTrust(desktopCast.sessionId());
+    lockCast({ viewerDevice: action.viewer_device });
+    say(chalk.yellow('  ⏹  Đã ngắt người đang xem. Phiên sau phải bấm "Cho phép" trên máy này.'));
+    stopDesktopCast('user_revoked');
+  };
+  const castActionTimer = setInterval(checkCastActionNow, 1000);
+  castActionTimer.unref?.();
 
   say(chalk.blue('💻 Aivin Device Agent — máy này nhận việc từ agent của bạn'));
   say(chalk.gray(`   Máy:        ${creds.name} (${creds.device_id})`));
@@ -358,6 +728,8 @@ export async function startRemoteClient(options = {}) {
   // `aivin remote meeting start|stop` gõ ở máy → daemon này; buổi ghi / biên bản dở từ lần chạy trước → làm nốt.
   const stopMeetingRequests = meetings ? watchMeetingRequests(meetings) : null;
 
+  void gui?.prewarm?.();
+  void desktopCast.prewarm?.();
   fileIndex?.build()
     .then((s) => { say(chalk.gray(`   Chỉ mục tệp: ${s.files} tệp (${s.updated} cập nhật, ${s.ms} ms)`)); fileIndex.watch(); })
     .catch((e) => say(chalk.yellow(`   ⚠️  Lập chỉ mục tệp lỗi: ${e.message}`)));
@@ -388,25 +760,45 @@ export async function startRemoteClient(options = {}) {
   const heartbeat = setInterval(() => {
     if (socket.connected) socket.emit(DeviceEvent.HEARTBEAT, multiUser ? { busy: processes.hasRunning() } : {});
     ledger.prune();
+    // Kết quả đã gửi mà lỡ ack (BE quá tải) khi socket vẫn nối → gửi lại có giãn nhịp, cùng call_id (callLedger.dueForResend, 02/11/2026).
+    if (socket.connected && serverResume) ledger.dueForResend().forEach(sendResult);
     syncProcAwake();
   }, HEARTBEAT_MS);
 
   // `aivin remote pause` ở cửa sổ khác: huỷ NGAY việc đang chạy (lệnh shell, đường hầm trình duyệt), không chỉ chặn việc mới.
   let pausedSeen = isRemotePaused();
-  const pauseWatch = setInterval(() => {
+  function checkPauseNow() {
+    if (stopped) return;
     const paused = isRemotePaused();
     if (paused && !pausedSeen) {
       say(chalk.yellow('⏸  Đã tạm dừng — huỷ việc đang chạy và đóng trình duyệt AI đang dùng.'));
       void scheduler.cancelAll('Remote control was paused on this device');
       cancelGating([...gating.keys()]);
       browserTunnels?.closeAll();
-      winHost?.close();
+      guiHost?.close();
+      officeHost?.close();
       processes.stopAll();
+      // Công tắc ngắt chặn cả xem / điều khiển màn hình từ web, không chỉ việc của AI.
+      stopDesktopCast('paused');
     }
     if (paused !== pausedSeen) mascot.paused(paused);
     pausedSeen = paused;
-  }, PAUSE_POLL_MS);
+  }
+  const pauseWatch = setInterval(checkPauseNow, PAUSE_POLL_MS);
   pauseWatch.unref?.();
+  // `aivin remote pause` / nút ở khay / lệnh ngắt cast ở cửa sổ khác: phản ứng ngay khi tệp đổi (fs.watch), không đợi tới 1–2 s của lượt kiểm
+  // định kỳ — trong lúc đó màn hình vẫn đang phát cho người xem. Tên tệp có thể vắng (Windows) → kiểm cả hai.
+  let configWatcher = null;
+  try {
+    const killName = path.basename(KILL_SWITCH_FILE);
+    const actionName = path.basename(CAST_ACTION_FILE);
+    configWatcher = fs.watch(REMOTE_CONFIG_DIR, { persistent: false }, (_event, name) => {
+      const file = name ? String(name) : '';
+      if (!file || file === killName) checkPauseNow();
+      if (!file || file === actionName) checkCastActionNow();
+    });
+    configWatcher.on('error', () => undefined);
+  } catch { /* không theo dõi được thư mục: còn kiểm định kỳ */ }
 
   // Sổ lời gọi (callLedger.mjs): kết quả làm xong lúc mất kết nối giữ trên đĩa, gửi khi nối lại (BE vẫn chờ tới hết giờ — mất là agent chạy
   // lại lệnh có tác dụng phụ); lời gọi BE gửi lại cùng `call_id` không chạy lần hai.
@@ -419,6 +811,7 @@ export async function startRemoteClient(options = {}) {
       socket.emit(DeviceEvent.RESULT, payload);
       return ledger.markSent(payload.call_id);
     }
+    ledger.markAttempt(payload.call_id);
     socket.timeout(RESULT_ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.RESULT, payload)
       .then(() => ledger.markSent(payload.call_id), () => ledger.persist());
   };
@@ -434,22 +827,31 @@ export async function startRemoteClient(options = {}) {
     stopped = true;
     clearInterval(heartbeat);
     clearInterval(pauseWatch);
+    clearInterval(castActionTimer);
+    try { configWatcher?.close(); } catch { /* đã đóng */ }
     clearTimeout(confirmTimer);
+    clearTimeout(castDisconnectTimer);
+    clearTimeout(castReconfirmTimer);
+    // Báo người xem phiên kết thúc khi socket còn nối — trước đây dừng sau `socket.disconnect()` nên STOPPED không bao giờ đi, người xem đứng
+    // hình tới khi máy chủ tự hết hạn phiên.
+    stopDesktopCast('device_stopped');
     updater?.close();
     mascot.close();
     if (selfManaged) noteCleanExit();
     const draining = scheduler.cancelAll('The Aivin agent on this device stopped');
     cancelGating([...gating.keys()]);
-    ledger.persist();
+    ledger.persist({ sync: true });
     socket.disconnect();
     browserTunnels?.closeAll();
     // Đóng tệp ghi họp cho đúng; biên bản làm ở lần chạy sau (meetings.recover).
     stopMeetingRequests?.();
     void meetings?.shutdown();
     gui?.close();
-    winHost?.close();
+    guiHost?.close();
+    officeHost?.close();
     processes.stopAll();
     keepAwake.close();
+    castAwake.close();
     watches?.closeAll();
     host?.close();
     fileIndex?.close();
@@ -472,7 +874,8 @@ export async function startRemoteClient(options = {}) {
     supervised: !!supervisor && options.handleSignals !== false,
     deviceId: creds.device_id,
     // Đang ghi họp / làm biên bản: không tự khởi động lại để cập nhật (mất đoạn ghi).
-    isIdle: () => activeCalls === 0 && !processes.hasRunning?.() && !(browserTunnels?.liveCount() > 0) && !meetings?.busy(),
+    // Đang có người xem màn hình: khởi động lại là cắt phiên (và mất đồng ý của chủ máy — nằm trong bộ nhớ).
+    isIdle: () => activeCalls === 0 && !processes.hasRunning?.() && !(browserTunnels?.liveCount() > 0) && !meetings?.busy() && !desktopCast.isActive(),
     lastActivityAt: () => lastActivityAt,
     say: (m) => say(chalk.cyan(m)),
     onRestart: async (version) => {
@@ -499,12 +902,13 @@ export async function startRemoteClient(options = {}) {
   const rotateToken = async (token) => {
     const previous = creds.device_token;
     try {
-      const fallback = saveDeviceCredentials({ ...creds, device_token: token });
+      // Giữ token cũ tới khi máy chủ xác nhận (tokenRotation.mjs) — 02/11/2026.
+      const fallback = saveDeviceCredentials({ ...creds, device_token: token }, { previousToken: previous });
       if (fallback) say(chalk.yellow(`   ⚠️  Kho bí mật của máy lỗi (${fallback}) — token mới nằm trong tệp thường`));
       // Đọc lại thật từ tệp + kho bí mật (không qua bộ nhớ đệm): ghi hỏng mà vẫn báo BE là lần khởi động sau máy bị khoá ngoài.
-      if (readStoredTokenFresh() !== token) throw new Error('saved token does not read back');
+      if (readStoredTokenFresh(serverUrl) !== token) throw new Error('saved token does not read back');
     } catch (e) {
-      try { saveDeviceCredentials({ ...creds, device_token: previous }); } catch { /* giữ nguyên tệp */ }
+      try { saveDeviceCredentials({ ...creds, device_token: previous }, { previousToken: null }); } catch { /* giữ nguyên tệp */ }
       say(chalk.yellow(`   ⚠️  Không lưu được token mới (${e.message}) — tiếp tục dùng token cũ`));
       return;
     }
@@ -512,6 +916,7 @@ export async function startRemoteClient(options = {}) {
     socket.auth = { ...socket.auth, device_token: token };
     // Gửi kèm chính token mới: BE chỉ chốt khi băm của nó đúng token đang chờ (chứng minh máy này nhận được token đó).
     const ack = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.ROTATED, { token }).catch(() => null);
+    if (ack?.ok === true) settleRotation(token, serverUrl);
     logActivity({ type: 'token_rotated', deviceId: creds.device_id, confirmed: ack?.ok === true });
     say(chalk.gray(ack?.ok
       ? '   🔑 Đã đổi token máy định kỳ (token cũ hết hiệu lực)'
@@ -522,6 +927,18 @@ export async function startRemoteClient(options = {}) {
     try {
       if (!multiUser) profile.update = updateProfile({ enabled: autoUpdateEnabled });
       const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash, inflight: ledger.heldIds() });
+      const userLang = hello?.user_lang || hello?.lang;
+      if (userLang && mascot.enabled) {
+        const resolvedLang = mascotLang(process.env, process.platform, userLang);
+        if (resolvedLang !== mascot.lang) {
+          mascot.setLang(resolvedLang);
+          mascotChat?.setLang(resolvedLang);
+          if (creds && creds.lang !== resolvedLang) {
+            creds.lang = resolvedLang;
+            saveDeviceCredentials(creds);
+          }
+        }
+      }
       serverResume = Array.isArray(hello?.features) && hello.features.includes(ServerFeature.RESUME);
       mascotChat?.setServerFeatures(hello?.features);
       // Báo chủ động lỡ trong lúc offline + câu hỏi đang ghim đã đóng ở nơi khác (BE có hộp báo).
@@ -534,6 +951,7 @@ export async function startRemoteClient(options = {}) {
         cancelGating(orphaned);
         ledger.drop(orphaned);
       }
+      if (!envCreds) settleRotation(creds.device_token, serverUrl); // chào được bằng token đang dùng → bỏ token cũ còn giữ (nếu có)
       if (typeof hello?.rotate_token === 'string' && !envCreds) await rotateToken(hello.rotate_token);
       // BE cần bản CLI tối thiểu (tính năng mới phía máy) → kiểm cập nhật ngay thay vì chờ tới lượt.
       if (hello?.cli) updater?.setServerHints(hello.cli);
@@ -567,19 +985,23 @@ export async function startRemoteClient(options = {}) {
   const cancelGating = (callIds) => {
     for (const id of callIds) gating.get(id)?.abort();
   };
+  // Có hộp xác nhận đang chờ → lời gọi có tác dụng khác chưa bắt đầu (confirmBarrier.mjs): không lời gọi nào cùng lô bấm hộ được "Cho phép".
+  const confirmBarrier = createConfirmBarrier();
+  const emitHold = (callId, extraMs, phase) => { if (socket.connected) socket.emit(DeviceEvent.HOLD, { call_id: callId, extra_ms: extraMs, phase }); };
 
   const localGate = async (call, tool) => {
-    if (tool.internal) return;
+    // Công cụ nội bộ cũng qua sàn luật (phần cấm luôn áp; phần hỏi do evaluateLocalPolicy miễn) — 02/11/2026.
     const policy = policyGuard.read();
     const verdict = evaluateLocalPolicy(policy, tool, call.args || {});
     if (verdict.action !== 'confirm' || !confirmer) return;
     const timeoutSec = policy.confirm_timeout_sec;
-    const hold = (extraMs, phase = HoldPhase.WAITING) => { if (socket.connected) socket.emit(DeviceEvent.HOLD, { call_id: call.call_id, extra_ms: extraMs, phase }); };
+    const hold = (extraMs, phase = HoldPhase.WAITING) => emitHold(call.call_id, extraMs, phase);
     hold((timeoutSec + 15) * 1000);
     say(chalk.magenta(`  ✋ ${call.tool}: chờ bạn bấm xác nhận trên máy (${verdict.reason}, tối đa ${timeoutSec} s)`));
     const purpose = typeof call.purpose === 'string' ? call.purpose.slice(0, 200) : undefined;
     const controller = new AbortController();
     gating.set(call.call_id, controller);
+    const releaseBarrier = confirmBarrier.hold();
     let result;
     mascot.waitingConfirm(call, tool);
     try {
@@ -587,9 +1009,12 @@ export async function startRemoteClient(options = {}) {
         reason: verdict.reason, purpose, detail: describeCall(tool, call.args || {}), timeoutSec, signal: controller.signal,
         // Hộp xếp hàng sau hộp khác: phần đã chờ chưa nằm trong lần xin lùi hạn đầu → xin thêm đúng phần đó.
         onStart: (queuedMs) => { if (queuedMs > 1000) hold(queuedMs); },
+        // Người đang điều khiển từ xa vẫn duyệt được; AI thì không (humanInput.mjs).
+        trustTag: castTrustTag(),
       });
     } finally {
       gating.delete(call.call_id);
+      releaseBarrier();
     }
     logActivity({ type: 'local_confirm', tool: call.tool, id: call.call_id, result });
     mascot.confirmDone(call, result === ConfirmResult.ALLOW);
@@ -605,6 +1030,24 @@ export async function startRemoteClient(options = {}) {
     throw new DeviceToolError(fail[0], fail[1]);
   };
 
+  /** Lời gọi có tác dụng chờ các hộp xác nhận đang mở được trả lời (xin BE lùi hạn trong lúc chờ; lệnh huỷ dừng được lúc chờ). */
+  const waitConfirmBarrier = async (call) => {
+    if (!confirmBarrier.pending()) return;
+    emitHold(call.call_id, (policyGuard.read().confirm_timeout_sec + 15) * 1000, HoldPhase.WAITING);
+    const controller = new AbortController();
+    gating.set(call.call_id, controller);
+    let clear;
+    try {
+      clear = await confirmBarrier.waitClear(controller.signal);
+    } finally {
+      gating.delete(call.call_id);
+    }
+    if (!clear) throw new DeviceToolError(DeviceErrorCode.CANCELLED, 'Cancelled while waiting for a confirmation box on this computer to be answered — the step did not run');
+    emitHold(call.call_id, 0, HoldPhase.STARTED);
+  };
+
+  const failOutcome = (tool, e, code = DeviceErrorCode.INVALID_ARGS) => ({ tool, outcome: { ok: false, error: e.message, error_code: e.code || code, duration_ms: 0 } });
+
   const runCall = async (call, streamer, hooks) => {
     const tool = byName.get(call.tool);
     if (isRemotePaused()) return { tool, outcome: { ok: false, error: 'Remote control is paused on this device', error_code: DeviceErrorCode.KILL_SWITCH, duration_ms: 0 } };
@@ -617,21 +1060,40 @@ export async function startRemoteClient(options = {}) {
         host.assertQuota(call.tool);
       }
       await localGate(call, tool);
+      if (!tool.read_only) await waitConfirmBarrier(call);
+      // Chủ máy có thể vừa tạm dừng trong lúc chờ hộp xác nhận (của chính lời gọi này hoặc của lời gọi khác).
+      if (isRemotePaused()) throw new DeviceToolError(DeviceErrorCode.KILL_SWITCH, 'Remote control is paused on this device');
     } catch (e) {
-      return { tool, outcome: { ok: false, error: e.message, error_code: e.code || DeviceErrorCode.INVALID_ARGS, duration_ms: 0 } };
+      return failOutcome(tool, e);
     }
-    hooks?.started?.();
-    // Máy tính tổ chức: công cụ tệp chạy trong tiến trình của thành viên, không chạy bằng root (xem memberFsPool.mjs).
-    const handler = host?.runsInWorker(call.tool)
-      ? (args, ctx) => host.runFs(call.user_scope, call.tool, args, ctx)
-      : (args, ctx) => tool.handler(args, ctx, callEnv);
-    const outcome = boundedResult(await scheduler.run(
-      call,
-      { group: tool.group, lockKeys: tool.lockKeys ? (a) => tool.lockKeys(a, callEnv) : undefined },
-      handler,
-      { onOutput: streamer.push },
-    ));
-    return { tool, outcome };
+    // Công cụ GUI ghi: chờ người điều khiển từ web thôi tay rồi mới chặn thao tác của họ — SAU hộp xác nhận, không thì người đang điều khiển
+    // từ xa bị chặn đúng lúc cần bấm "Cho phép" trên hộp đó (luôn hết giờ).
+    const guiWrite = tool.group === ToolGroup.GUI && !tool.read_only;
+    if (guiWrite) {
+      try {
+        await waitForHumanToYield(call);
+      } catch (e) {
+        return failOutcome(tool, e, DeviceErrorCode.NOT_STARTED);
+      }
+      releaseCastInput();
+      aiGuiBusy++;
+    }
+    try {
+      hooks?.started?.();
+      // Máy tính tổ chức: công cụ tệp chạy trong tiến trình của thành viên, không chạy bằng root (xem memberFsPool.mjs).
+      const handler = host?.runsInWorker(call.tool)
+        ? (args, ctx) => host.runFs(call.user_scope, call.tool, args, ctx)
+        : (args, ctx) => tool.handler(args, ctx, callEnv);
+      const outcome = boundedResult(await scheduler.run(
+        call,
+        { group: tool.group, lockKeys: tool.lockKeys ? (a) => tool.lockKeys(a, callEnv) : undefined },
+        handler,
+        { onOutput: streamer.push },
+      ));
+      return { tool, outcome };
+    } finally {
+      if (guiWrite) aiGuiBusy--;
+    }
   };
 
   // Chống làm trùng khi BE gửi lại lô bước dở (xem idempotency.mjs).
@@ -640,6 +1102,28 @@ export async function startRemoteClient(options = {}) {
     deferStart: true,
     onDuplicate: (call) => say(chalk.gray(`  ↺ ${callLabel(call)}: đã làm ở lần gửi trước — trả lại kết quả cũ`)),
   });
+
+  /**
+   * Trước khi AI bấm: chờ người thôi tay. Người đang tạm cầm lái từ web thì chờ lâu hơn hạn của lời gọi nên xin BE lùi hạn, và đăng ký vào
+   * `gating` để lệnh huỷ dừng được lúc đang chờ. Không thì người vừa trả quyền xong là bước đã huỷ vẫn bấm.
+   */
+  const waitForHumanToYield = async (call) => {
+    const holdMs = castGate.takeoverWaitMs();
+    if (!holdMs) return void await castGate.waitHumanIdle();
+    const hold = (extraMs, phase) => emitHold(call.call_id, extraMs, phase);
+    hold(holdMs, HoldPhase.WAITING);
+    const controller = new AbortController();
+    gating.set(call.call_id, controller);
+    let yielded;
+    try {
+      yielded = await castGate.waitHumanIdle({ signal: controller.signal });
+    } finally {
+      gating.delete(call.call_id);
+    }
+    if (controller.signal.aborted) throw new DeviceToolError(DeviceErrorCode.CANCELLED, 'Cancelled while waiting for the person controlling this computer — the step did not run');
+    if (!yielded) throw new DeviceToolError(DeviceErrorCode.NOT_STARTED, 'The person is still controlling this computer from the web — the step did not run, try again later');
+    hold(0, HoldPhase.STARTED);
+  };
 
   /** Không bao giờ ném / để lọt promise bị từ chối: lỗi bất ngờ vẫn trả kết quả lỗi cho BE. */
   const handleCall = async (call) => {
@@ -651,6 +1135,7 @@ export async function startRemoteClient(options = {}) {
     mascot.callStarted(call, byName.get(call.tool));
     keepAwake.hold();
     try {
+      // Người đang điều khiển từ web → công cụ GUI ghi của AI chờ người thôi tay rồi mới bấm (trong runCall, sau hộp xác nhận).
       ({ tool, outcome } = await runOnce(call, streamer));
     } catch (e) {
       outcome = { ok: false, error: e?.message || String(e), error_code: e?.code || DeviceErrorCode.EXECUTION_FAILED, duration_ms: 0 };
@@ -660,7 +1145,9 @@ export async function startRemoteClient(options = {}) {
     }
     try {
       streamer.flush();
-      const payload = { call_id: call.call_id, ...outcome };
+      // `ran` (scheduler: công cụ đã bắt đầu chưa) chỉ dùng trên máy (idempotency.mjs) — mã lỗi NOT_STARTED / INTERRUPTED đã nói cho BE.
+      const { ran: _ran, ...sent } = outcome;
+      const payload = { call_id: call.call_id, ...sent };
       ledger.finish(call.call_id, payload, { persistNow: !socket.connected });
       sendResult(payload);
       logActivity({ type: 'tool_call', tool: call.tool, id: call.call_id, success: outcome.ok, error: outcome.error, ms: outcome.duration_ms });
@@ -687,21 +1174,44 @@ export async function startRemoteClient(options = {}) {
     }
   };
 
-  socket.on('connect', guarded('connect', async () => { await announce(); flushUnsent(); }));
+  // Chưa nối thì thôi: lần chào khi nối mang theo hồ sơ mới.
+  announceProfile = () => (socket.connected ? announce() : undefined);
+  socket.on('connect', guarded('connect', async () => {
+    confirmServerCredentialMigration(serverUrl);
+    await announce();
+    flushUnsent();
+  }));
   let serverKicks = 0;
   socket.on('disconnect', guarded('disconnect', (reason) => {
     if (stopped) return;
     say(chalk.yellow(`⚠️  Mất kết nối (${reason}) — tự nối lại...`));
+    // Không quay màn hình khi không ai nhận được; nối lại thì BE mời phát lại cho người xem còn chờ.
+    clearTimeout(castReconfirmTimer);
+    castReconfirmTimer = null;
+    if (!castDisconnectTimer && desktopCast.isActive()) {
+      castDisconnectTimer = setTimeout(() => { castDisconnectTimer = null; stopDesktopCast('disconnected', false); }, CAST_DISCONNECT_GRACE_MS);
+    }
     logActivity({ type: 'disconnected', reason });
     mascot.disconnected();
     mascotChat?.voiceDisconnected();
     // Server chủ động cắt (BE khởi động lại, socket khác của máy này vừa thay chỗ…) → socket.io-client KHÔNG tự nối lại; nối tay, giãn nhịp.
     if (reason === 'io server disconnect') {
-      const delay = Math.min(30_000, 1000 * 2 ** Math.min(serverKicks++, 5)) + Math.floor(Math.random() * 500);
+      const delay = Math.min(RECONNECT_DELAY_MAX_MS, 1000 * 2 ** Math.min(serverKicks++, 5)) + Math.floor(Math.random() * 500);
       setTimeout(() => { if (!stopped) socket.connect(); }, delay);
     }
   }));
-  socket.on('connect', () => { serverKicks = 0; });
+  socket.on('connect', () => {
+    serverKicks = 0;
+    clearTimeout(castDisconnectTimer);
+    castDisconnectTimer = null;
+    // Phiên còn chạy qua lần rớt mạng: máy chủ (còn giữ phiên) sẽ mời phát lại; im lặng = phiên đã hết hạn ở máy chủ → dừng, không quay màn
+    // hình cho không ai.
+    clearTimeout(castReconfirmTimer);
+    castReconfirmTimer = desktopCast.isActive() ? setTimeout(() => {
+      castReconfirmTimer = null;
+      if (desktopCast.isActive()) stopDesktopCast('session_expired');
+    }, CAST_RECONFIRM_MS) : null;
+  });
   socket.on('connect_error', guarded('connect_error', (err) => {
     // Token cũ của máy (đã bị thay ở một lần xoay token mà máy này không làm) → có thể token bị chép: dừng + hướng dẫn ghép lại.
     if (err?.message === 'DEVICE_TOKEN_RETIRED') {
@@ -710,7 +1220,9 @@ export async function startRemoteClient(options = {}) {
       return;
     }
     if (err?.message === 'DEVICE_UNAUTHORIZED') {
-      const replaced = !clearDeviceCredentials(creds.device_token);
+      // Token xoay vòng chưa được chốt → thử lại bằng token cũ trước khi xoá ghép máy (02/11/2026).
+      if (!envCreds && fallBackToPreviousToken({ creds, socket, isStopped: () => stopped })) return void say(chalk.yellow('   ⚠️  Máy chủ chưa nhận token mới — nối lại bằng token cũ'));
+      const replaced = !clearDeviceCredentials(creds.device_token, serverUrl);
       console.log(chalk.red(replaced
         ? '❌ Máy này vừa được ghép lại bởi một cửa sổ khác — cửa sổ này dừng, cửa sổ mới tiếp tục nhận việc.'
         : '❌ Token của máy không còn hiệu lực (đã thu hồi hoặc ghép lại ở nơi khác). Chạy `aivin remote start` để ghép lại.'));
@@ -725,7 +1237,7 @@ export async function startRemoteClient(options = {}) {
     stopForGood();
   }));
   socket.on(DeviceEvent.REVOKED, guarded(DeviceEvent.REVOKED, () => {
-    clearDeviceCredentials(creds.device_token);
+    clearDeviceCredentials(creds.device_token, serverUrl);
     console.log(chalk.red('❌ Máy này đã bị thu hồi quyền điều khiển từ xa.'));
     stopForGood();
   }));
@@ -753,18 +1265,130 @@ export async function startRemoteClient(options = {}) {
       socket: () => socket, send: (cmd) => mascot.chat(cmd), lang: mascot.lang,
       onAlert: (alert) => mascot.alert(alert), onPending: (on) => mascot.needsYou(on),
       micBusy: () => !!meetings?.status()?.recording,
+      serverUrl: creds?.server_url || serverUrl,
+      notifyFreq: loadMascotSettings().notify_freq ?? 1,
+      onWorkDir: (dir) => { try { saveMascotSettings({ work_dir: dir }); } catch { /* lần chạy sau không nhớ thư mục này */ } },
     });
+    if (earlyDrops.length) mascotChat.attach(earlyDrops.splice(0));
+    // Thư mục làm việc lần trước: chỉ khôi phục khi còn tồn tại và còn trong quyền (quyền có thể đã bị thu lại).
+    const savedWorkDir = loadMascotSettings().work_dir;
+    if (savedWorkDir && isAllowedWorkFolder(savedWorkDir, roots)) mascotChat.setWorkDir(savedWorkDir, { quiet: true });
+    if (earlyWorkDir) mascotChat.setWorkDir(earlyWorkDir);
     socket.on(DeviceEvent.CHAT_EVENT, guarded(DeviceEvent.CHAT_EVENT, (payload) => mascotChat.onChatEvent(payload)));
     // Báo chủ động: việc của chủ máy (web, chạy nền, automation…) xong / lỗi / cần trả lời.
     socket.on(DeviceEvent.NOTIFY, guarded(DeviceEvent.NOTIFY, (payload) => mascotChat.onNotify(payload)));
+    socket.on(DeviceEvent.QUESTION_CLOSED, guarded(DeviceEvent.QUESTION_CLOSED, (payload) => mascotChat.onQuestionClosed(payload)));
     socket.on(DeviceEvent.VOICE_EVENT, guarded(DeviceEvent.VOICE_EVENT, (payload) => mascotChat.onVoiceEvent(payload)));
   }
+  socket.on(DeviceEvent.UPDATE, guarded(DeviceEvent.UPDATE, (payload) => {
+      if (!updater) return;
+      if (payload?.min_version) updater.setMinVersion(payload.min_version);
+      if (payload?.latest_version) updater.setServerHints(payload);
+      updater.requestCheck();
+    }));
+    socket.on(DeviceEvent.DESKTOP_CAST_START, guarded(DeviceEvent.DESKTOP_CAST_START, async (payload) => {
+    const sessionId = payload?.session_id;
+    const viewerId = payload?.viewer_id;
+    const viewerDevice = payload?.viewer_device || payload?.viewerDevice || payload?.viewer_platform || payload?.viewerPlatform;
+    if (!sessionId || !viewerId) return;
+    // Chủ máy đã tạm dừng điều khiển từ xa → từ chối cả xem màn hình.
+    if (isRemotePaused()) {
+      emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.REFUSED, reason: 'paused' });
+      return;
+    }
+    // Quyết định trước khi chụp bất cứ thứ gì; chỉ máy này trả lời được, máy chủ không trả lời thay.
+    const deviceKey = typeof payload?.device_key === 'string' ? payload.device_key : '';
+    const decision = await castConsent.decide({
+      sessionId, viewerId, viewerDevice, viewerKey: payload?.viewer_key, deviceKey,
+      prove: async () => {
+        const proven = await castProver.prove({ sessionId, viewerId, deviceKey });
+        if (proven === true) say(chalk.cyan(`  🔑 Thiết bị tin cậy "${viewerDevice || viewerId}" vào xem màn hình`));
+        return proven;
+      },
+    });
+    if (decision !== CastConsentDecision.ALLOW) {
+      logActivity({ type: 'desktop_cast_consent', id: sessionId, viewer: viewerDevice || viewerId, result: decision });
+      if (decision === CastConsentDecision.CANCELLED) return;
+      say(chalk.red(`  ✕  Không cho xem màn hình (${decision}): ${viewerDevice || viewerId}`));
+      emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.REFUSED, reason: decision });
+      return;
+    }
+    // Chủ máy có thể bấm tạm dừng trong lúc hộp đang mở.
+    if (isRemotePaused()) {
+      emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.REFUSED, reason: 'paused' });
+      return;
+    }
+    logActivity({ type: 'desktop_cast_consent', id: sessionId, viewer: viewerDevice || viewerId, result: decision });
+    const castConfig = {
+      max_fps: payload?.max_fps || 15,
+      max_width: payload?.max_width || 1366,
+      quality: payload?.quality || 65,
+      monitor: payload?.monitor ?? -1,
+    };
+    if (desktopCast.isActive() && desktopCast.sessionId() !== sessionId) stopDesktopCast('replaced', false);
+    if (desktopCast.sessionId() === sessionId) {
+      clearTimeout(castReconfirmTimer);
+      castReconfirmTimer = null;
+    }
+    if (!desktopCast.isActive()) {
+      castInputTag = newInputTag();
+      castRestarts.length = 0;
+      if (!startCapture({ sessionId, viewerId, viewerDevice, castConfig })) return;
+    } else {
+      desktopCast.config(castConfig);
+      // Màn hình đứng yên thì ảnh thưa: người mới vào cần một ảnh ngay.
+      desktopCast.refresh();
+    }
+    const webRtcStarted = payload?.transport === 'webrtc'
+      ? await desktopWebRtc.start({ sessionId, viewerId, iceServers: payload?.ice_servers || [], videoBitrate: payload?.video_bitrate || null, audio: payload?.audio !== false }).catch(() => false)
+      : false;
+    // Phiên đã dừng / bị thay trong lúc dựng WebRTC (tới 30 s): không báo trạng thái cho phiên đã chết.
+    if (desktopCast.sessionId() !== sessionId) return;
+    if (webRtcStarted) desktopWebRtc.attachPipe(desktopCast.pipeName());
+    if (!webRtcStarted) emitCastStatus({
+      session_id: sessionId, viewer_id: viewerId, state: CastState.DEGRADED, transport: 'jpeg', reason: 'webrtc_runtime_unavailable',
+    });
+  }));
+  socket.on(DeviceEvent.DESKTOP_CAST_STOP, guarded(DeviceEvent.DESKTOP_CAST_STOP, (payload) => {
+    if (payload?.session_id) castConsent.cancel({ sessionId: payload.session_id, viewerId: payload.viewer_id, final: payload.final !== false });
+    castProver.cancel(payload?.final !== false ? undefined : payload?.viewer_id);
+    if (payload?.session_id && payload.session_id !== desktopCast.sessionId()) {
+      // Phiên đã dừng ở máy (gián đoạn) mà máy chủ kết thúc hẳn: quên đồng ý đang giữ.
+      if (payload.final !== false) castConsent.forget(payload.session_id);
+      return;
+    }
+    clearTimeout(castReconfirmTimer);
+    castReconfirmTimer = null;
+    if (payload?.viewer_id) {
+      desktopWebRtc.close(payload.viewer_id);
+      void castFileDrop.close(payload.viewer_id);
+      releaseViewerInput(payload.viewer_id);
+    }
+    if (payload?.final !== false) stopDesktopCast('server', false);
+  }));
+  socket.on(DeviceEvent.DESKTOP_CAST_INPUT, guarded(DeviceEvent.DESKTOP_CAST_INPUT, (payload) => applyRemoteInput(payload)));
+  socket.on(DeviceEvent.DESKTOP_CAST_CONFIG, guarded(DeviceEvent.DESKTOP_CAST_CONFIG, (payload) => {
+    if (payload?.session_id && payload.session_id !== desktopCast.sessionId()) return;
+    const { max_fps, max_width, quality, monitor, audio } = payload || {};
+    desktopCast.config({ max_fps, max_width, quality, monitor, ...(typeof audio === 'boolean' ? { audio } : {}) });
+    if (typeof audio === 'boolean') desktopWebRtc.setAudio(audio);
+  }));
+  socket.on(DeviceEvent.DESKTOP_CAST_TAKEOVER, guarded(DeviceEvent.DESKTOP_CAST_TAKEOVER, (payload) => {
+    if (!payload?.session_id || payload.session_id !== desktopCast.sessionId()) return;
+    castGate.setHumanTakeover(payload.active === true ? { idleMs: Number(payload.idle_ms), maxWaitMs: Number(payload.max_wait_ms) } : null);
+  }));
+  socket.on(DeviceEvent.DESKTOP_CAST_SIGNAL, guarded(DeviceEvent.DESKTOP_CAST_SIGNAL, (payload) => {
+    if (payload?.type === 'device_proof') return castProver.answer(payload);
+    void desktopWebRtc.signal(payload).catch(() => undefined);
+  }));
   meetings?.recover();
 
   // Lưới cuối: promise bị từ chối mà không ai bắt → ghi log, KHÔNG thoát (daemon phục vụ cả tổ chức, chết là mất mọi lời gọi đang chạy).
   if (!unhandledRejectionHooked) {
     unhandledRejectionHooked = true;
     process.on('unhandledRejection', (reason) => console.error(chalk.red(`⚠️  Lỗi không được xử lý: ${reason?.stack || reason?.message || reason}`)));
+    // Như trên cho lỗi đồng bộ / sự kiện `error` không ai nghe: một lời gọi không được làm sập cả daemon (thoát 3 lần liền còn kích lùi bản CLI).
+    process.on('uncaughtException', (error) => console.error(chalk.red(`⚠️  Lỗi không được xử lý: ${error?.stack || error?.message || error}`)));
   }
 
   if (options.handleSignals !== false) {
@@ -782,8 +1406,9 @@ export async function startRemoteClient(options = {}) {
  * socket, bắt tay thử sẽ đá daemon đang chạy ra.
  */
 export async function testRemoteConnection(options = {}) {
-  const creds = loadDeviceCredentials();
-  const serverUrl = resolveServerUrl(options, creds);
+  const savedHint = loadDeviceCredentials();
+  const serverUrl = resolveServerUrl(options, savedHint);
+  const creds = loadDeviceCredentials(serverUrl);
   const apiKey = options.apiKey ?? process.env.API_KEY;
   const report = { serverUrl, paired: !!creds, deviceId: creds?.device_id, httpOk: false, latencyMs: null, online: null, error: null };
   const startedAt = Date.now();

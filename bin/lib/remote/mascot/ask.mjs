@@ -1,7 +1,12 @@
 import { randomUUID } from 'crypto';
-import path from 'path';
 import { ChatEventKind, DeviceEvent, NotifyKind, ServerFeature, VoiceEventKind } from '../constants.mjs';
 import { createAdpcmEncoder, decodeAdpcm, VOICE_CODEC } from './adpcm.mjs';
+import { diagramSourceOf, imageUrlsOf, normalizeBlocks, withImageFiles } from './blocks.mjs';
+import { openWebview, renderDiagram } from './diagramRender.mjs';
+import { fetchMascotImage } from './images.mjs';
+import { fileChip } from './fileChips.mjs';
+import { lucidePath } from './lucideIcons.mjs';
+import { safeLinkUrl, safeWebUrl } from './safeUrl.mjs';
 import { MascotText, mascotText } from './strings.mjs';
 
 /**
@@ -87,6 +92,27 @@ const NOTIFY_LABEL = { [NotifyKind.DONE]: MascotText.NOTIFY_DONE, [NotifyKind.FA
 export const QuestionKind = Object.freeze({ CHOICE: 'choice', FORM: 'form', TEXT: 'text' });
 /** id nút "Bỏ qua" của trường không bắt buộc trong biểu mẫu. */
 export const FORM_SKIP_ID = '__skip__';
+
+/** Link mo tren trinh duyet khi chu may bam vao thong bao phien lam viec. */
+export function webUrlForSession(sessionId, serverUrl = '') {
+  if (!sessionId) return null;
+  let base = 'https://app.aivin.vn';
+  if (serverUrl) {
+    try {
+      const u = new URL(serverUrl);
+      const host = ['api.aivin.vn', 'beta-api.aivin.vn'].includes(u.hostname.toLowerCase())
+        ? 'app.aivin.vn'
+        : u.hostname.replace(/-api\./, '.').replace(/^api\./, '');
+      const proto = u.protocol === 'wss:' ? 'https:' : u.protocol === 'ws:' ? 'http:' : u.protocol;
+      base = `${proto}//${host}${u.port && host !== 'app.aivin.vn' ? `:${u.port}` : ''}`;
+    } catch {}
+  }
+  return `${base}/?session_id=${encodeURIComponent(sessionId)}`;
+}
+
+export { safeWebUrl };
+/** Icon mặc định của nút link theo loại địa chỉ. */
+const LINK_SCHEME_ICONS = Object.freeze({ https: 'external-link', http: 'external-link', tel: 'phone', mailto: 'mail', sms: 'message-square' });
 const SEEN_NOTIFY_MAX = 50;
 /** Tệp thả vào bot chờ đi kèm một câu, tối đa (cửa sổ cũng đọc qua config.json: thùng đầy thì từ chối ngay lúc kéo tới). */
 export const MAX_ATTACH = 10;
@@ -106,21 +132,41 @@ const MAX_PENDING = 20;
  * một lần `fields` (+ `text` = giá trị khi chỉ một trường — BE cũ chưa nhận `fields` vẫn hiểu). BE từ chối → hỏi lại từ trường đầu.
  */
 export function createMascotChat({
-  socket, send, lang, timers = { setTimeout, clearTimeout }, now = Date.now, onAlert = () => {}, onPending = () => {}, micBusy = () => false,
+  socket, send, lang, timers = { setTimeout, clearTimeout }, now = Date.now, onAlert = () => {}, onPending = () => {}, micBusy = () => false, onWorkDir = () => {},
+  serverUrl = '', notifyFreq = 1, fetchImage = (url) => fetchMascotImage(url, { serverUrl }), renderDiagramImage = (source) => renderDiagram(source), openToolWindow = openWebview,
 }) {
-  const t = (key, vars) => mascotText(lang, key, vars);
+  let currentLang = lang || 'vi';
+  const t = (key, vars) => mascotText(currentLang, key, vars);
   let current = null;
+  let currentNotifyFreq = Number.isInteger(notifyFreq) ? notifyFreq : 1;
+  let currentSessionId = null;
+  /** Phiên chat mở từ máy này (ô hỏi / nói chuyện) trong lần chạy daemon này — mức báo Mid nhận báo của các phiên đó ("việc trên máy"). */
+  const deviceSessions = new Set();
+  const noteDeviceSession = (id) => {
+    if (typeof id !== 'string' || !id) return;
+    deviceSessions.add(id);
+    if (deviceSessions.size > SEEN_NOTIFY_MAX) deviceSessions.delete(deviceSessions.values().next().value);
+  };
   /** Năng lực BE (ack của HELLO, `setServerFeatures`): hộp báo + kiểm câu hỏi, dừng lượt, chat mới. */
-  const features = { inbox: false, cancel: false, newChat: false };
+  const features = { inbox: false, cancel: false, newChat: false, parallel: false };
   /** Câu hỏi đang chờ theo thứ tự đến: `{ session_id, reply_id, kind, options, text }`; đầu hàng = câu đang có nút. */
   const queue = [];
   const head = () => queue[0] || null;
   const seenNotify = new Set();
-  /** Tệp thả vào bot, chờ đi kèm câu kế tiếp; `attachRow` = dòng "📎" đang hiện. */
+  /** Tệp thả vào bot, chờ đi kèm câu kế tiếp. */
   const files = [];
-  let attachRow = null;
-  /** Số tệp đang chờ → cửa sổ (thùng trong tay bot + huy hiệu số tệp). */
-  const syncFiles = () => send({ t: AskCommand.FILES, n: files.length });
+  /** Tệp đang chờ → cửa sổ: số tệp (thùng trong tay bot + huy hiệu) + chip từng tệp trên dòng nhập (icon / màu theo loại, nút × để bỏ). */
+  const syncFiles = () => send({ t: AskCommand.FILES, n: files.length, files: [...(workDir ? [workDirChip()] : []), ...files.map((f) => fileChip(f))] });
+  /**
+   * Thư mục làm việc ("Làm việc ở đây với AIVIN Bot"): đi kèm MỌI câu (`working_dir`, BE đưa vào ngữ cảnh của agent, không hiện trong chat) tới khi
+   * chủ máy bấm × trên chip. Không tính vào `n` — `n` là số tệp chờ gửi (nút gửi không có chữ, thùng trong tay bot).
+   */
+  let workDir = null;
+  const workDirChip = () => {
+    const chip = fileChip(workDir, { dir: () => true });
+    return { ...chip, name: t(MascotText.ASK_WORKDIR_CHIP, { name: chip.name || workDir }), pinned: true, detach_tip: t(MascotText.ASK_WORKDIR_DETACH) };
+  };
+  const workContext = () => (workDir ? { working_dir: workDir } : {});
   /** Cửa sổ chủ máy đang dùng khi hỏi (mascot/index.mjs `userWindow`) của lượt / cuộc nói chuyện gần nhất, hoặc null. */
   let target = null;
   const context = () => (target ? { context: { window: target } } : {});
@@ -129,7 +175,7 @@ export function createMascotChat({
    * Câu hỏi đang chờ: dòng câu hỏi (id `q-<reply_id>`, cửa sổ dựng lại thì daemon gửi lại) + nút lựa chọn, rồi ghim ô hỏi — ô tự bật ra
    * (không lấy bàn phím) và ở đó tới khi trả lời. Không phải câu hỏi (thiếu reply_id) → chỉ là một dòng chữ.
    */
-  const questionRow = (q, more = 0) => row(ChatRole.ASSISTANT, more ? `${q.text}\n${t(MascotText.ASK_QUEUED, { n: more })}` : q.text, `${QUESTION_ROW}${q.reply_id}`);
+  const questionRow = (q, more = 0) => row(ChatRole.ASSISTANT, more ? `${q.text}\n${t(MascotText.ASK_QUEUED, { n: more })}` : q.text, `${QUESTION_ROW}${q.reply_id}`, { ...(q.url ? { url: q.url } : {}), ...(q.links ? { links: q.links } : {}), ...(q.blocks ? { blocks: q.blocks } : {}) });
   /** Dòng + nút của câu đầu hàng, rồi ghim ô hỏi (gửi lại được — cửa sổ cập nhật dòng theo id). */
   const showHead = () => {
     const q = head();
@@ -138,14 +184,27 @@ export function createMascotChat({
     else showChoices(q.options, q.multiple);
     send({ t: AskCommand.PIN, on: true });
   };
+  /** Icon của lựa chọn: tên Lucide (như thẻ chọn trên web) → hình để cửa sổ vẽ; emoji giữ nguyên; tên lạ → không icon. */
+  const choiceIcon = (icon) => {
+    if (typeof icon !== 'string' || !icon) return {};
+    const iconPath = lucidePath(icon);
+    if (iconPath) return { icon_path: iconPath };
+    return /\p{Extended_Pictographic}/u.test(icon) ? { icon } : {};
+  };
   /** Nút lựa chọn: `multiple` = câu chọn nhiều (cửa sổ cho tích nhiều mục rồi xác nhận); `icon` của mục (nếu có) đi kèm để hiện cuối nút. */
   const showChoices = (options, multiple = false) => send({
     t: AskCommand.CHOICES, multiple,
-    options: options.map((o) => ({ id: String(o.id), text: String(o.text), ...(typeof o.icon === 'string' && o.icon ? { icon: o.icon } : {}) })),
+    options: options.map((o) => ({ id: String(o.id), text: String(o.text), ...choiceIcon(o.icon) })),
   });
-  const setPending = (sessionId, question, text) => {
-    if (!question?.reply_id) return row(ChatRole.ASSISTANT, text);
-    const entry = { session_id: sessionId, reply_id: question.reply_id, kind: question.kind, options: Array.isArray(question.options) ? question.options : [], multiple: question.multiple === true, text };
+  const setPending = (sessionId, question, text, url = null, payload = null) => {
+    if (!question?.reply_id) return answerLine(ChatRole.ASSISTANT, text, undefined, payload, url ? { url } : {});
+    const blocks = readBlocks(payload);
+    const entry = { session_id: sessionId, reply_id: question.reply_id, kind: question.kind, options: Array.isArray(question.options) ? question.options : [], multiple: question.multiple === true, buttonsOnly: question.buttons_only === true, text, ...(url ? { url } : {}), ...linkButtons(payload), ...(blocks ? { blocks } : {}) };
+    // Ảnh tải xong sau khi câu hỏi đã hiện: cập nhật dòng câu hỏi (cửa sổ dựng lại cũng nhận bản có ảnh).
+    if (blocks) whenImagesLoaded(blocks, (loaded) => {
+      entry.blocks = loaded;
+      if (head() === entry) questionRow(entry, queue.length - 1);
+    });
     const fields = question.kind === QuestionKind.FORM && Array.isArray(question.fields) ? question.fields.filter((f) => f?.name) : [];
     if (fields.length) Object.assign(entry, { fields, values: {}, step: 0 });
     const at = queue.findIndex((q) => q.reply_id === entry.reply_id);
@@ -179,14 +238,22 @@ export function createMascotChat({
   };
 
   // ---- Biểu mẫu: từng trường một (`q.fields`, `q.values`, `q.step`) ----
+  /** Nút của trường: lựa chọn của biểu mẫu; có/không; giá trị điền sẵn thành nút giữ nguyên (`value` = giá trị thật gửi đi). */
+  function fieldOptions(f) {
+    const options = Array.isArray(f.options) ? f.options : [];
+    if (f.type === 'boolean') return [{ id: 'true', text: t(MascotText.FORM_YES) }, { id: 'false', text: t(MascotText.FORM_NO) }];
+    if (!options.length && typeof f.default_value === 'string' && f.default_value) return [{ id: f.default_value, text: t(MascotText.FORM_KEEP, { value: f.default_value }) }];
+    return options;
+  }
   /** Dòng hỏi trường hiện tại (id mang tiền tố câu hỏi — cửa sổ dựng lại thì hiện lại đúng trường đang hỏi) + nút của trường. */
   function promptField(q) {
     const f = q.fields[q.step];
     const total = q.fields.length;
-    const options = Array.isArray(f.options) ? f.options : [];
+    const options = fieldOptions(f);
     // Một trường bắt buộc không có lựa chọn: câu hỏi đã đủ, không cần dòng tên trường.
-    if (total > 1 || options.length || !f.required) {
-      const label = total > 1 ? t(MascotText.FORM_FIELD, { label: f.label || f.name, n: q.step + 1, total }) : String(f.label || f.name);
+    if (total > 1 || options.length || !f.required || f.placeholder) {
+      const base = total > 1 ? t(MascotText.FORM_FIELD, { label: f.label || f.name, n: q.step + 1, total }) : String(f.label || f.name);
+      const label = f.placeholder ? `${base} (${f.placeholder})` : base;
       row(ChatRole.ASSISTANT, f.required ? label : `${label} ${t(MascotText.FORM_OPTIONAL)}`, `${QUESTION_ROW}${q.reply_id}-${q.step}`);
     }
     showChoices(f.required ? options : [...options, { id: FORM_SKIP_ID, text: t(MascotText.FORM_SKIP) }]);
@@ -215,10 +282,14 @@ export function createMascotChat({
   function typeField(q, answer) {
     if (q.step >= q.fields.length) return refuseBusy();
     const f = q.fields[q.step];
-    const options = Array.isArray(f.options) ? f.options : [];
+    const options = fieldOptions(f);
     const key = answer.toLowerCase();
     if (!f.required && key === t(MascotText.FORM_SKIP).toLowerCase()) return fillField(q, null, t(MascotText.FORM_SKIP));
-    if (!options.length) return fillField(q, answer, answer);
+    // Chỉ biểu mẫu có lựa chọn thật / có-không mới bắt khớp; nút "giữ giá trị" không cấm gõ giá trị khác.
+    if (!options.length || f.allow_custom === true || (f.default_value && f.type !== 'boolean' && !f.options?.length)) {
+      const picked = options.find((o) => String(o.text).trim().toLowerCase() === key);
+      return picked ? fillField(q, String(picked.id), String(picked.text)) : fillField(q, answer, answer);
+    }
     const match = options.find((o) => String(o.text).trim().toLowerCase() === key || String(o.id).toLowerCase() === key);
     if (match) return fillField(q, String(match.id), String(match.text));
     row(ChatRole.USER, answer);
@@ -230,11 +301,63 @@ export function createMascotChat({
     if (q.step >= q.fields.length) return refuseBusy();
     const f = q.fields[q.step];
     if (id === FORM_SKIP_ID && !f.required) return fillField(q, null, t(MascotText.FORM_SKIP));
-    const option = (Array.isArray(f.options) ? f.options : []).find((o) => String(o.id) === String(id));
+    const option = fieldOptions(f).find((o) => String(o.id) === String(id));
     return option ? fillField(q, String(option.id), String(option.text)) : undefined;
   }
 
-  const row = (role, text, id = `${role}-${randomUUID()}`, extra = {}) => send({ t: AskCommand.CHAT, role, id, text, ...extra });
+  const row = (role, text, id = `${role}-${randomUUID()}`, extra = {}) => {
+    const { url, ...rest } = extra;
+    const safe = url === undefined ? null : safeWebUrl(url);
+    return send({ t: AskCommand.CHAT, role, id, text, ...rest, ...(safe ? { url: safe } : {}) });
+  };
+  /**
+   * Nút mở link dưới câu trả lời: nút mở trang của câu trả lời (`links`), và "Xem trên Aivin" khi có thành phần ô hỏi không vẽ được (`rich`:
+   * bảng, biểu đồ, sơ đồ, thẻ, ảnh, công cụ — chữ chỉ còn nhãn). Link không phải http(s) bị bỏ.
+   */
+  const linkButtons = (payload) => {
+    const web = payload?.session_id ? safeWebUrl(webUrlForSession(payload.session_id, serverUrl)) : null;
+    const links = (Array.isArray(payload?.links) ? payload.links : []).map((l) => {
+      const url = l?.web === true ? web : safeLinkUrl(l?.url);
+      const scheme = String(url || '').split(':')[0].toLowerCase();
+      return { text: typeof l?.text === 'string' ? l.text.trim() : '', url, icon_path: lucidePath(l?.icon) || lucidePath(LINK_SCHEME_ICONS[scheme] || LINK_SCHEME_ICONS.https) };
+    }).filter((l) => l.text && l.url);
+    if (web && payload?.rich) links.push({ text: t(MascotText.ASK_OPEN_WEB), url: web, icon_path: lucidePath(LINK_SCHEME_ICONS.https) });
+    return links.length ? { links } : {};
+  };
+  const readBlocks = (payload) => normalizeBlocks(payload?.blocks, {
+    t, lang: currentLang, sessionId: payload?.session_id, webUrl: payload?.session_id ? safeWebUrl(webUrlForSession(payload.session_id, serverUrl)) : null,
+  });
+  /** "Chat mới" trong lúc ảnh còn đang tải: dòng cũ không được hiện lại. */
+  let chatEpoch = 0;
+  /**
+   * Tải ảnh của các khối rồi gọi `show(khối đã gắn tệp)` — dòng đã hiện ngay với ô xám chờ ảnh, không để câu trả lời chờ mạng. Không có ảnh thì không gọi.
+   */
+  const whenImagesLoaded = (blocks, show) => {
+    const urls = imageUrlsOf(blocks);
+    if (!urls.length) return;
+    const epoch = chatEpoch;
+    const load = (key) => {
+      const source = diagramSourceOf(key);
+      return source === null ? fetchImage(key) : renderDiagramImage(source);
+    };
+    void Promise.all(urls.map((u) => Promise.resolve(load(u)).catch(() => null))).then((paths) => {
+      if (epoch === chatEpoch) show(withImageFiles(blocks, new Map(urls.map((u, i) => [u, paths[i]]))));
+    });
+  };
+  /**
+   * Dòng câu trả lời kèm nút mở link và bảng / thẻ / ảnh (`payload.blocks`). `peek`: lượt chủ máy vừa hỏi — bong bóng không hiện được bảng nên tự mở ô hỏi
+   * (không lấy bàn phím); báo chủ động thì không bật ô to lên giữa màn hình. Tải xong ảnh thì gửi lại đúng dòng đó.
+   */
+  const answerLine = (role, text, id, payload, { peek = false, ...extra } = {}) => {
+    const rowId = id || `${role}-${randomUUID()}`;
+    const base = { ...extra, ...linkButtons(payload) };
+    const blocks = readBlocks(payload);
+    if (!blocks) return row(role, text, rowId, base);
+    row(role, text, rowId, { ...base, blocks, ...(peek ? { peek: true } : {}) });
+    whenImagesLoaded(blocks, (loaded) => row(role, text, rowId, { ...base, blocks: loaded }));
+  };
+  /** Câu trả lời chỉ có bảng / thẻ / ảnh: vẫn cần một dòng chữ cho ô hỏi + bong bóng + báo xong. */
+  const answerText = (text, payload) => text || (readBlocks(payload) ? t(MascotText.ASK_RESULT) : '');
   /** `cancel`: BE dừng được lượt này → cửa sổ đổi nút mic thành nút dừng. */
   const setBusy = (busy) => send({ t: AskCommand.BUSY, busy, ...(busy && features.cancel ? { cancel: true } : {}) });
   const errorText = (code) => t(ERROR_TEXT[code] || MascotText.ASK_ERR_FAILED);
@@ -283,6 +406,8 @@ export function createMascotChat({
    * (lượt sau họp) thì không có. Bấm nút trả lời giữ cửa sổ của câu trước (`undefined`).
    */
   async function turn(text, shown, extra, window) {
+    // Câu hỏi MỚI trong lúc lượt trước còn chạy: BE mới nhận chạy song song ở phiên riêng thay vì bắt chờ (04/11/2026).
+    if (current && !call && features.parallel && shown !== null && !extra?.reply_id && !extra?.session_id) return parallelTurn(text, shown, window);
     if (refuseBusy()) return;
     if (window !== undefined) target = window;
     const s = socket();
@@ -290,17 +415,22 @@ export function createMascotChat({
     if (!s?.connected) return row(ChatRole.ERROR, t(MascotText.ASK_OFFLINE));
     const id = `ask-${randomUUID()}`;
     current = id;
+    answering = extra?.reply_id || null;
     streaming = null;
     setBusy(true);
     row(ChatRole.PROGRESS, t(MascotText.ASK_THINKING), PROGRESS_ROW, { typing: true });
+    if (extra?.session_id) { currentSessionId = extra.session_id; noteDeviceSession(extra.session_id); }
     let ack;
     try {
-      // `stream`: xin chữ chạy của câu trả lời (`delta`) — BE cũ bỏ qua trường này.
-      ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT, { text, request_id: current, stream: true, ...context(), ...extra });
+      // `stream`: xin chữ chạy của câu trả lời (`delta`); `links` / `blocks`: hiện được nút mở link, bảng, thẻ, ảnh — BE cũ bỏ qua các trường này.
+      ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT, { text, request_id: current, stream: true, links: true, blocks: true, ...context(), ...workContext(), ...extra });
+      if (ack?.session_id) { currentSessionId = ack.session_id; noteDeviceSession(ack.session_id); }
     } catch (e) {
+      answering = null;
       finish();
       return row(ChatRole.ERROR, failedSend(e));
     }
+    answering = null;
     if (!ack?.ok) {
       finish();
       // Câu hỏi đã hết hạn / có người trả lời ở nơi khác → bỏ nút; trả lời sai dạng → giữ để chọn lại.
@@ -312,14 +442,56 @@ export function createMascotChat({
     if (current === id) armSilence();
   }
 
-  /** Tệp / thư mục thả vào bot: giữ tới câu gõ kế tiếp (tối đa MAX_ATTACH), hiện một dòng "📎 tên tệp" trong ô hỏi. */
+  /**
+   * Việc giao thêm (song song với lượt đang chạy): không chiếm ô hỏi — lượt chính vẫn hiện chữ chạy / câu trả lời của nó. Kết quả việc
+   * này tới bằng báo chủ động (`device:notify`, như việc giao trên web) nên không cần theo dõi sự kiện của nó ở đây.
+   */
+  async function parallelTurn(text, shown, window) {
+    const s = socket();
+    row(ChatRole.USER, shown);
+    if (!s?.connected) return row(ChatRole.ERROR, t(MascotText.ASK_OFFLINE));
+    try {
+      const ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.CHAT, {
+        text, request_id: `ask-par-${randomUUID()}`, parallel: true, links: true, blocks: true, ...(window ? { context: { window } } : context()), ...workContext(),
+      });
+      if (!ack?.ok) return row(ChatRole.ERROR, errorText(ack?.error));
+      if (ack.session_id) noteDeviceSession(ack.session_id);
+      row(ChatRole.ASSISTANT, t(MascotText.ASK_PARALLEL_SENT), `${ChatRole.ASSISTANT}-${randomUUID()}`);
+    } catch (e) {
+      row(ChatRole.ERROR, failedSend(e));
+    }
+  }
+
+  /** Tệp / thư mục thả vào bot: giữ tới câu gõ kế tiếp (tối đa MAX_ATTACH), hiện thành chip đính kèm trên dòng nhập (không phải dòng chat). */
   function attach(paths) {
     for (const f of paths || []) if (typeof f === 'string' && f && !files.includes(f) && files.length < MAX_ATTACH) files.push(f);
     // Cửa sổ đã tự cộng số tệp lúc thả — luôn báo lại số thật (trùng / quá giới hạn bị bỏ).
     syncFiles();
-    if (!files.length) return;
-    attachRow ||= `attach-${randomUUID()}`;
-    row(ChatRole.USER, t(MascotText.ASK_ATTACHED, { names: files.map((f) => path.basename(f.replace(/[\\/]+$/, '')) || f).join(', ') }), attachRow);
+  }
+
+  /** Bấm × trên chip: bỏ tệp đó khỏi lượt kế tiếp. */
+  function detach(file) {
+    const at = files.indexOf(file);
+    if (at < 0) {
+      if (file === workDir) setWorkDir(null);
+      return;
+    }
+    files.splice(at, 1);
+    syncFiles();
+  }
+
+  /** Đặt / bỏ thư mục làm việc. `quiet`: khôi phục lúc daemon khởi động — không báo, không lưu lại. */
+  function setWorkDir(dir, { quiet = false } = {}) {
+    workDir = dir || null;
+    syncFiles();
+    if (quiet) return;
+    onWorkDir(workDir);
+    send({ t: AskCommand.STATUS, text: workDir ? t(MascotText.ASK_WORKDIR_SET, { path: workDir }) : t(MascotText.ASK_WORKDIR_CLEARED) });
+  }
+
+  /** Thư mục được chọn không dùng được (ngoài quyền và chủ máy không đồng ý, ổ mạng, không còn tồn tại). */
+  function workDirDenied(dir) {
+    send({ t: AskCommand.STATUS, text: t(MascotText.ASK_WORKDIR_DENIED, { path: dir }) });
   }
 
   /** Câu hỏi mới như chủ máy gõ (luôn vào phiên riêng của máy, kể cả khi đang có câu hỏi chờ). */
@@ -338,11 +510,10 @@ export function createMascotChat({
     if (files.length) {
       if (refuseBusy()) return;
       const sent = files.splice(0);
-      attachRow = null;
       syncFiles();
       const shown = answer || t(MascotText.ASK_FILES_DEFAULT);
       const body = `${shown}\n\n${t(MascotText.ASK_FILES_LABEL)}\n${sent.map((f) => `- ${f}`).join('\n')}`;
-      return turn(body, shown, pending ? { session_id: pending.session_id, reply_id: pending.reply_id } : {}, window);
+      return turn(body, shown, pending && !pending.buttonsOnly ? { session_id: pending.session_id, reply_id: pending.reply_id } : {}, window);
     }
     if (!answer) return;
     if (!pending) return ask(answer, window);
@@ -351,6 +522,8 @@ export function createMascotChat({
     // Chọn nhiều: gõ tên các mục cách nhau dấu phẩy — khớp hết mới tính như tích các nút đó.
     const matches = (pending.multiple ? answer.split(/\s*[,;]\s*/).filter(Boolean) : [answer]).map(byText);
     const ids = matches.every(Boolean) ? [...new Set(matches.map((o) => String(o.id)))] : [];
+    // Câu chỉ nhận nút (việc chờ duyệt của kênh canh): chữ không khớp nút là câu hỏi mới, nút vẫn ở đó — không chặn ô hỏi tới khi bấm hết hàng.
+    if (pending.buttonsOnly && !ids.length) return ask(answer, window);
     await turn(answer, answer, { session_id: pending.session_id, reply_id: pending.reply_id, ...(ids.length ? { option_ids: ids } : {}) }, window);
   }
 
@@ -367,11 +540,13 @@ export function createMascotChat({
   /** Sự kiện của lượt đang hỏi (sự kiện của câu cũ / máy khác cùng phòng bị bỏ qua). */
   function onChatEvent(payload) {
     if (!payload) return;
+    if (payload.session_id) currentSessionId = payload.session_id;
     if (stale && payload.request_id === stale && stale !== current) return lateEvent(payload);
     if (payload.request_id !== current) return;
+    noteDeviceSession(payload.session_id);
     received(payload.notice_id);
     armSilence();
-    const text = typeof payload.text === 'string' ? payload.text : '';
+    const text = answerText(typeof payload.text === 'string' ? payload.text : '', payload);
     if (payload.kind === ChatEventKind.PROGRESS) return row(ChatRole.PROGRESS, text, PROGRESS_ROW);
     if (payload.kind === ChatEventKind.DELTA) {
       if (!text) return;
@@ -388,13 +563,12 @@ export function createMascotChat({
     if (streamed && payload.kind === ChatEventKind.TIMEOUT) row(ChatRole.ASSISTANT, streamed.text, streamed.id);
     else if (streamed && payload.kind !== ChatEventKind.ANSWER) row(ChatRole.ASSISTANT, '', streamed.id, { remove: true });
     if (payload.kind === ChatEventKind.NEEDS_INPUT) {
-      setPending(payload.session_id, payload.question, text);
+      setPending(payload.session_id, payload.question, payload.more ? `${text} ${t(MascotText.ASK_MORE)}` : text, null, payload);
       return onAlert({ kind: NotifyKind.NEEDS_YOU, text });
     }
     if (payload.kind === ChatEventKind.ANSWER || payload.kind === ChatEventKind.TIMEOUT) {
       const final = payload.more ? `${text} ${t(MascotText.ASK_MORE)}` : text;
-      if (payload.kind === ChatEventKind.ANSWER && answerRow) row(ChatRole.ASSISTANT, final, answerRow);
-      else row(ChatRole.ASSISTANT, final);
+      answerLine(ChatRole.ASSISTANT, final, payload.kind === ChatEventKind.ANSWER ? answerRow : undefined, payload, { peek: true });
       // Hết giờ chờ = việc còn chạy (BE báo chủ động khi xong) — chưa phải "xong".
       return payload.kind === ChatEventKind.ANSWER ? onAlert({ kind: NotifyKind.DONE, text }) : undefined;
     }
@@ -403,16 +577,16 @@ export function createMascotChat({
 
   /** Câu chốt của lượt đã thôi chờ: hiện như báo chủ động (dòng mới, không đụng lượt đang chạy); tiến trình / chữ chạy thì bỏ. */
   function lateEvent(payload) {
-    const text = typeof payload.text === 'string' ? payload.text : '';
+    const text = answerText(typeof payload.text === 'string' ? payload.text : '', payload);
     received(payload.notice_id);
     if (payload.kind === ChatEventKind.NEEDS_INPUT) {
       stale = null;
-      setPending(payload.session_id, payload.question, text);
+      setPending(payload.session_id, payload.question, payload.more ? `${text} ${t(MascotText.ASK_MORE)}` : text, null, payload);
       return onAlert({ kind: NotifyKind.NEEDS_YOU, text });
     }
     if (payload.kind !== ChatEventKind.ANSWER && payload.kind !== ChatEventKind.TIMEOUT) return;
     stale = null;
-    row(ChatRole.ASSISTANT, payload.more ? `${text} ${t(MascotText.ASK_MORE)}` : text);
+    answerLine(ChatRole.ASSISTANT, payload.more ? `${text} ${t(MascotText.ASK_MORE)}` : text, undefined, payload);
     if (payload.kind === ChatEventKind.ANSWER) onAlert({ kind: NotifyKind.DONE, text });
   }
 
@@ -441,6 +615,7 @@ export function createMascotChat({
     features.inbox = has(ServerFeature.INBOX);
     features.cancel = has(ServerFeature.CHAT_CANCEL);
     features.newChat = has(ServerFeature.CHAT_NEW);
+    features.parallel = has(ServerFeature.CHAT_PARALLEL);
   }
 
   /**
@@ -462,9 +637,10 @@ export function createMascotChat({
     streaming = null;
     stale = null;
     target = null;
+    currentSessionId = null;
     files.splice(0);
-    attachRow = null;
     syncFiles();
+    chatEpoch++;
     send({ t: AskCommand.CLEAR });
     if (queue.length) showHead();
     send({ t: AskCommand.STATUS, text: t(MascotText.ASK_NEW_CHAT_DONE) });
@@ -490,7 +666,8 @@ export function createMascotChat({
   /** Câu hỏi đang ghim đã đóng ở nơi khác (trả lời trên web / máy khác, hết hạn) → bỏ nút, báo một dòng. Đang gửi câu trả lời thì thôi. */
   async function checkQuestions() {
     const s = socket();
-    const items = queue.filter((q) => q.session_id).map((q) => ({ session_id: q.session_id, reply_id: q.reply_id }));
+    // Câu hỏi không gắn phiên (việc chờ duyệt của kênh canh, `watch-draft:<id>`): BE hỏi nguồn của nó — BE cũ chỉ đọc mục có phiên.
+    const items = queue.map((q) => ({ ...(q.session_id ? { session_id: q.session_id } : {}), reply_id: q.reply_id }));
     if (!features.inbox || !s?.connected || !items.length || current) return;
     let ack;
     try {
@@ -506,6 +683,19 @@ export function createMascotChat({
       row(ChatRole.ASSISTANT, t(MascotText.ASK_ANSWERED_ELSEWHERE));
     }
   }
+  /** Câu hỏi máy này đang gửi câu trả lời (chờ ack) — BE báo đóng câu đó là do chính máy này, lượt tự bỏ nút. */
+  let answering = null;
+  /**
+   * BE báo câu hỏi đã xử lý ở nơi khác (`device:question_closed`: duyệt trên web / máy khác) → bỏ nút ngay, không chờ lần kiểm định kỳ.
+   */
+  function onQuestionClosed(payload) {
+    const ids = Array.isArray(payload?.reply_ids) ? payload.reply_ids.filter((x) => typeof x === 'string') : [];
+    for (const id of ids) {
+      if (id === answering || !queue.some((q) => q.reply_id === id)) continue;
+      resolve(id);
+      row(ChatRole.ASSISTANT, t(MascotText.ASK_ANSWERED_ELSEWHERE));
+    }
+  }
   let questionTimer = null;
   const watchQuestions = () => {
     if (questionTimer || !queue.length) return;
@@ -515,6 +705,22 @@ export function createMascotChat({
     }, QUESTION_CHECK_MS);
     questionTimer?.unref?.();
   };
+
+  /** Bấm "Mở công cụ": xin HTML từ BE, mở cửa sổ riêng trong sandbox. Không được thì mở phiên trên web. */
+  async function openTool({ session_id: sessionId, message_id: messageId, index, title } = {}) {
+    if (typeof sessionId !== 'string' || typeof messageId !== 'string') return;
+    const fail = () => {
+      send({ t: AskCommand.STATUS, text: t(MascotText.ASK_WEBVIEW_FAILED) });
+    };
+    const s = socket();
+    if (!s?.connected) return fail();
+    try {
+      const ack = await s.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.WEBVIEW, { session_id: sessionId, message_id: messageId, index: Number(index) || 0 });
+      if (!ack?.ok || typeof ack.html !== 'string' || !openToolWindow(ack.html, String(title || t(MascotText.ASK_WEBVIEW_TITLE)))) fail();
+    } catch {
+      fail();
+    }
+  }
 
   /** Nút dừng trong ô hỏi: dừng lượt đang chạy (BE huỷ như nút dừng trên web, rồi báo `error` mã `cancelled`). */
   async function cancel() {
@@ -530,15 +736,38 @@ export function createMascotChat({
    * thành câu hỏi đang chờ (nút / gõ để trả lời). Máy nối lại có thể nhận lại cùng `id` → bỏ trùng.
    */
   function onNotify(payload) {
-    if (!payload || typeof payload.kind !== 'string' || !NOTIFY_LABEL[payload.kind]) return;
+    // Khách trên kênh nhúng cần nhân viên: không phải việc AI giao chủ máy → chỉ mức 2 (Max) hiện, tiêu đề tự nói đủ nên không gắn nhãn.
+    const isCustomer = payload?.kind === NotifyKind.CUSTOMER;
+    if (!payload || typeof payload.kind !== 'string' || (!isCustomer && !NOTIFY_LABEL[payload.kind])) return;
+
+    // "Cần bạn" luôn qua mọi mức, kể cả báo không kèm câu hỏi có cấu trúc.
+    const isHil = payload.kind === NotifyKind.NEEDS_YOU;
+    const isCurrentSession = !!(currentSessionId && payload.session_id === currentSessionId);
+
+    // Lọc theo tần suất thông báo:
+    // 0 = Min: chỉ session hiện tại của linh vật HOẶC câu hỏi HIL cần xử lý.
+    // 1 = Mid: session hiện tại, việc trên máy, HOẶC câu hỏi HIL cần xử lý.
+    // 2 = Max: mọi thông báo trên hệ thống.
+    // "Việc trên máy" = phiên chat mở từ máy này (deviceSessions) hoặc câu trả lời theo dõi tiếp của lượt chat từ máy (id `chat:<tin>`,
+    // DeviceChatService.noticeOf) — chưa có phiên hiện tại thì báo khác (job, phiên web…) vẫn bị lọc, không lọt hết như trước 02/11/2026.
+    if (currentNotifyFreq === 0) {
+      if (!isCurrentSession && !isHil) return;
+    } else if (currentNotifyFreq === 1) {
+      // Việc hỏng cũng là "cần xử lý" ở mức này (Min chỉ giữ câu hỏi chờ trả lời).
+      const onDevice = deviceSessions.has(payload.session_id) || (typeof payload.id === 'string' && payload.id.startsWith('chat:'));
+      if (!isCurrentSession && !isHil && !onDevice && payload.kind !== NotifyKind.FAILED) return;
+    }
+    // Sau bộ lọc: `received` xác nhận với BE (BE xoá khỏi hộp báo) — báo bị lọc còn trong hộp, nâng mức thì lần nối sau vẫn nhận được.
     if (payload.id && !received(payload.id)) return;
-    const label = t(NOTIFY_LABEL[payload.kind]);
+
+    const label = isCustomer ? '' : t(NOTIFY_LABEL[payload.kind]);
     const title = typeof payload.title === 'string' ? payload.title.trim() : '';
     const text = typeof payload.text === 'string' ? payload.text.trim() : '';
-    const line = [`${label}${title ? `: ${title}` : ''}`, text].filter(Boolean).join('\n');
-    if (payload.kind === NotifyKind.NEEDS_YOU && payload.question) setPending(payload.session_id, payload.question, line);
-    else row(payload.kind === NotifyKind.FAILED ? ChatRole.ERROR : ChatRole.ASSISTANT, line);
-    onAlert({ kind: payload.kind, text: `${label}: ${text || title}` });
+    const line = [isCustomer ? title : `${label}${title ? `: ${title}` : ''}`, text].filter(Boolean).join('\n');
+    const url = safeWebUrl(payload.url) || (payload.session_id ? safeWebUrl(webUrlForSession(payload.session_id, serverUrl)) : null);
+    if (payload.kind === NotifyKind.NEEDS_YOU && payload.question) setPending(payload.session_id, payload.question, line, url, payload);
+    else answerLine(payload.kind === NotifyKind.FAILED ? ChatRole.ERROR : ChatRole.ASSISTANT, line, undefined, payload, url ? { url } : {});
+    onAlert({ kind: payload.kind, text: isCustomer ? title || text : `${label}: ${text || title}`, ...(url ? { url } : {}) });
   }
 
   // ---- Nói chuyện realtime ----
@@ -680,7 +909,7 @@ export function createMascotChat({
     if (!s?.connected) return status(t(MascotText.ASK_OFFLINE));
     let res;
     try {
-      res = await s.timeout(STT_TIMEOUT_MS).emitWithAck(DeviceEvent.STT, { audio: pcmToWav(Buffer.concat(rec.chunks)), lang });
+      res = await s.timeout(STT_TIMEOUT_MS).emitWithAck(DeviceEvent.STT, { audio: pcmToWav(Buffer.concat(rec.chunks)), lang: currentLang });
     } catch (e) {
       return status(failedSend(e));
     }
@@ -755,14 +984,20 @@ export function createMascotChat({
         endCall(voiceErrorText(payload.message));
         return;
       case VoiceEventKind.CLOSED:
-        endCall(t(TIMED_OUT_REASONS.has(payload.reason) ? MascotText.VOICE_TIMED_OUT : MascotText.VOICE_ENDED));
+        endCall(TIMED_OUT_REASONS.has(payload.reason) ? t(MascotText.VOICE_TIMED_OUT) : '');
         return;
       default:
     }
   }
 
   return {
-    ask, reply, choose, attach, cancel, newChat, onChatEvent, onNotify, syncInbox, checkQuestions, setServerFeatures, busy: () => !!current || !!call, hasPending: () => queue.length > 0, userWindow: () => target,
+    openTool,
+    ask, reply, choose, attach, detach, setWorkDir, workDirDenied, workDir: () => workDir, cancel, newChat, onChatEvent, onNotify, onQuestionClosed, syncInbox, checkQuestions, setServerFeatures, busy: () => !!current || !!call, hasPending: () => queue.length > 0, userWindow: () => target,
     voiceStart, voiceAudio, voiceInterrupt, voiceStop, voiceMicLost, voiceDisconnected, onVoiceEvent, setVoiceSupported, inCall: () => !!call,
+    setNotifyFreq: (val) => { const v = Number(val); if (Number.isInteger(v) && v >= 0 && v <= 2) currentNotifyFreq = v; },
+    setLang: (l) => { if (l) currentLang = l; },
+    getLang: () => currentLang,
+    getNotifyFreq: () => currentNotifyFreq,
+    getCurrentSessionId: () => currentSessionId,
   };
 }

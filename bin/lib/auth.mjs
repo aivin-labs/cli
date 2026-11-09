@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import http from 'http';
 import os from 'os';
 import { randomBytes } from 'crypto';
@@ -21,16 +21,30 @@ export function saveGlobalApiKey(apiKey, baseUrl = process.env.AIVIN_BASE_URL ||
   return saveActiveContext(baseUrl, apiKey, identity);
 }
 
+/**
+ * Lệnh mở trình duyệt, không qua shell: URL có thể do máy chủ trả về nên không được ghép vào chuỗi lệnh. Chỉ http(s); sai thì null.
+ */
+export function browserCommand(url, platform = process.platform, systemRoot = process.env.SystemRoot || 'C:\\Windows') {
+  let href;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    href = parsed.href;
+  } catch {
+    return null;
+  }
+  if (platform === 'win32') return { file: `${systemRoot}\\System32\\rundll32.exe`, args: ['url.dll,FileProtocolHandler', href] };
+  return { file: platform === 'darwin' ? 'open' : 'xdg-open', args: [href] };
+}
+
 export function openBrowser(url) {
-  const platform = process.platform;
-  const command =
-    platform === 'win32' ? `start "" "${url}"` : platform === 'darwin' ? `open "${url}"` : `xdg-open "${url}"`;
-  exec(command, (error) => {
-    if (error) {
-      console.log(chalk.yellow('Could not open a browser automatically - open this URL manually:'));
-      console.log(chalk.cyan(`   ${url}`));
-    }
-  });
+  const showManually = () => {
+    console.log(chalk.yellow('Could not open a browser automatically - open this URL manually:'));
+    console.log(chalk.cyan(`   ${url}`));
+  };
+  const command = browserCommand(url);
+  if (!command) return showManually();
+  execFile(command.file, command.args, (error) => { if (error) showManually(); });
 }
 
 /**

@@ -12,7 +12,171 @@ namespace AivinGui {
     const int MAX_CELLS = 5000;
     const int MAX_TEXT = 200000;
 
-    class Opened { public object App; public object Doc; public bool Own; }
+    class Opened { public object App; public object Doc; public bool Own; public int Pid; }
+
+    // ── bản Excel / Word ẩn do host tạo: ghi PID để dọn khi host bị giết giữa chừng (02/11/2026) ─────────────────────────────
+    // Host bị kill giữa OpenWorkbook → bản ẩn (Visible=false) sống mãi, giữ khoá tệp. Mỗi bản ẩn host tạo ghi một dòng
+    // "pid|tên tiến trình|giờ khởi động (UTC ticks)" vào tệp AIVIN_GUI_ORPHANS; đóng xong thì xoá dòng. Lần host khởi động sau dọn dòng còn
+    // lại — CHỈ giết khi đúng PID + đúng tên + đúng giờ khởi động (PID không bị tái dùng) và tiến trình không có cửa sổ hiển thị nào (người
+    // dùng không đang dùng nó).
+    static readonly object OrphanLock = new object();
+
+    static string OrphanFile() { var p = Environment.GetEnvironmentVariable("AIVIN_GUI_ORPHANS"); return string.IsNullOrEmpty(p) ? null : p; }
+
+    static HashSet<int> PidsOf(string name) {
+      var s = new HashSet<int>();
+      foreach (var p in Process.GetProcessesByName(name)) { s.Add(p.Id); p.Dispose(); }
+      return s;
+    }
+
+    static long StartTicks(Process p) { return p.StartTime.ToUniversalTime().Ticks; }
+
+    static bool HasVisibleWindow(int pid) {
+      bool found = false;
+      Native.EnumWindows(delegate (IntPtr h, IntPtr l) {
+        uint wp; Native.GetWindowThreadProcessId(h, out wp);
+        if ((int)wp == pid && Native.IsWindowVisible(h)) { found = true; return false; }
+        return true;
+      }, IntPtr.Zero);
+      return found;
+    }
+
+    /** PID của bản vừa tạo: Excel theo Hwnd của ứng dụng; không được thì tiến trình mới xuất hiện (đúng một) so với trước khi tạo. */
+    static int TrackOwn(string procName, HashSet<int> before, object app) {
+      int pid = 0;
+      if (procName == "EXCEL") {
+        try { uint p; Native.GetWindowThreadProcessId(new IntPtr(Convert.ToInt64(Get(app, "Hwnd"))), out p); pid = (int)p; } catch { }
+      }
+      if (pid == 0) {
+        var now = PidsOf(procName);
+        now.ExceptWith(before);
+        if (now.Count == 1) foreach (int p in now) pid = p;
+      }
+      string file = OrphanFile();
+      if (pid == 0 || file == null) return pid;
+      try {
+        long start;
+        using (var pr = Process.GetProcessById(pid)) start = StartTicks(pr);
+        lock (OrphanLock) { File.AppendAllText(file, pid + "|" + procName + "|" + start + Environment.NewLine); }
+      } catch { }
+      return pid;
+    }
+
+    static void UntrackOwn(int pid) {
+      string file = OrphanFile();
+      if (pid == 0 || file == null) return;
+      try {
+        lock (OrphanLock) {
+          if (!File.Exists(file)) return;
+          var keep = new List<string>();
+          foreach (var line in File.ReadAllLines(file)) if (line.Length > 0 && !line.StartsWith(pid + "|")) keep.Add(line);
+          if (keep.Count == 0) File.Delete(file); else File.WriteAllLines(file, keep.ToArray());
+        }
+      } catch { }
+    }
+
+    /** Lúc host khởi động: dọn bản ẩn mồ côi của host trước (xem trên). Trả số tiến trình đã dọn. */
+    public static int CleanupOrphans() {
+      string file = OrphanFile();
+      if (file == null || !File.Exists(file)) return 0;
+      int killed = 0;
+      lock (OrphanLock) {
+        foreach (var line in File.ReadAllLines(file)) {
+          var parts = line.Split('|');
+          int pid; long start;
+          if (parts.Length != 3 || !int.TryParse(parts[0], out pid) || !long.TryParse(parts[2], out start)) continue;
+          string name = parts[1];
+          if (name != "EXCEL" && name != "WINWORD") continue;
+          try {
+            using (var pr = Process.GetProcessById(pid)) {
+              if (!string.Equals(pr.ProcessName, name, StringComparison.OrdinalIgnoreCase) || StartTicks(pr) != start) continue;
+              if (HasVisibleWindow(pid)) continue;
+              pr.Kill();
+              killed++;
+            }
+          } catch { /* đã thoát / không đủ quyền */ }
+        }
+        try { File.Delete(file); } catch { }
+      }
+      return killed;
+    }
+
+    /** Quit bản ẩn do host tạo; Quit được thì bỏ khỏi danh sách mồ côi (Quit hỏng → giữ để lần khởi động sau dọn). */
+    static void QuitOwn(Opened o, bool word) {
+      bool quit = false;
+      try { if (word) Call(o.App, "Quit", 0); else Call(o.App, "Quit"); quit = true; } catch { }
+      Release(o.App);
+      if (quit) UntrackOwn(o.Pid);
+    }
+
+    // ── chống chèn công thức (formula injection) ──────────────────────────────────────────────────────────────
+    /** Chữ bắt đầu bằng = + - @ (hoặc tab / CR) mà KHÔNG cho phép công thức → ghi thành chữ (tiền tố '), Excel không hiểu là công thức. */
+    static object SafeCellValue(object v, bool formula) {
+      object j = JsonValue(v);
+      string s = j as string;
+      if (formula || string.IsNullOrEmpty(s)) return j;
+      // Số viết dạng chuỗi ("-5", "+3.5", "-1500000") vẫn để Excel đổi thành số như trước — chỉ chặn khi sau dấu là chữ / hàm / ô.
+      if (IsPlainNumber(s)) return j;
+      char c = s[0];
+      if (c == '=' || c == '+' || c == '-' || c == '@' || c == '\t' || c == '\r') return "'" + s;
+      return j;
+    }
+
+    /** [+-]chữ số, dấu phân cách (. hoặc ,) nằm giữa hai chữ số, có thể thêm số mũ e±n hoặc % — "-1,500,000", "-1.234,5", "-5%", "-1e5". Có khoảng trắng ("+84 912…") vẫn là chữ. */
+    static bool IsPlainNumber(string s) {
+      int i = (s[0] == '+' || s[0] == '-') ? 1 : 0, end = s.Length, digits = 0;
+      if (end > i && s[end - 1] == '%') end--;
+      if (i >= end) return false;
+      for (; i < end; i++) {
+        char ch = s[i];
+        if (ch >= '0' && ch <= '9') { digits++; continue; }
+        bool digitAround = digits > 0 && i + 1 < end && s[i - 1] >= '0' && s[i - 1] <= '9' && s[i + 1] >= '0' && s[i + 1] <= '9';
+        if ((ch == '.' || ch == ',') && digitAround) continue;
+        if ((ch == 'e' || ch == 'E') && digits > 0) {
+          int k = i + 1;
+          if (k < end && (s[k] == '+' || s[k] == '-')) k++;
+          if (k >= end) return false;
+          for (; k < end; k++) if (s[k] < '0' || s[k] > '9') return false;
+          return true;
+        }
+        return false;
+      }
+      return digits > 0;
+    }
+
+    /** Sổ / tài liệu người dùng mở sẵn đang có chỉnh sửa chưa lưu (đọc TRƯỚC khi AI ghi). Không đọc được → coi là có (không lưu). */
+    static bool UserHasUnsavedEdits(Opened o, string path) {
+      if (o.Own) return false;
+      bool saved;
+      try { saved = Convert.ToBoolean(Get(o.Doc, "Saved")); } catch { return true; }
+      if (saved) { AiDirty.Remove(path); return false; }
+      return !AiDirty.Contains(path);
+    }
+
+    /** Tệp người dùng mở sẵn mà AI đã ghi nhưng chưa lưu: Saved=false lần sau là do chính AI, không phải chỉnh dở của người dùng. */
+    static readonly HashSet<string> AiDirty = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    /**
+     * Sổ / tài liệu người dùng ĐANG MỞ (không do AI mở): mặc định KHÔNG lưu, chỉ lưu khi save=true — và kể cả save=true cũng không lưu nếu người
+     * dùng đang có chỉnh sửa dở (lưu lúc đó = lưu luôn phần dở của họ, 02/11/2026).
+     */
+    static bool ShouldSave(Opened o, Dictionary<string, object> a, bool userDirty) {
+      return o.Own ? B(a, "save", true) : B(a, "force_save", false) || (!userDirty && B(a, "save", false));
+    }
+
+    static void AddSaveState(Dictionary<string, object> res, Opened o, bool save, string app, bool userDirty, string path) {
+      res["saved"] = save;
+      if (!o.Own) { if (save) AiDirty.Remove(path); else AiDirty.Add(path); }
+      if (!o.Own && !save) {
+        res["unsaved"] = true;
+        if (userDirty) {
+          res["user_had_unsaved_edits"] = true;
+          res["hint"] = "The file the user has open in " + app + " already had unsaved changes (the user's own edits, or recalculated formulas), so it was NOT saved (saving would save those too) - ask the user to review and save it themselves, or call again with force_save: true only after the user confirms";
+        } else {
+          res["hint"] = "The change is in the file the user has open in " + app + " but NOT saved (saving would also save the user's own unsaved edits) - tell the user to review and save, or call again with save: true only if the user asked to save";
+        }
+      }
+    }
 
     static string S(Dictionary<string, object> d, string k) { object v; return d != null && d.TryGetValue(k, out v) && v != null ? Convert.ToString(v) : null; }
     static bool B(Dictionary<string, object> d, string k, bool def) { object v; try { return d != null && d.TryGetValue(k, out v) && v != null ? Convert.ToBoolean(v) : def; } catch { return def; } }
@@ -102,7 +266,10 @@ namespace AivinGui {
         } catch (GuiError) { }
         Release(app);
       }
+      var before = PidsOf("EXCEL");
       object own = Create("Excel.Application");
+      var opened = new Opened { App = own, Own = true };
+      opened.Pid = TrackOwn("EXCEL", before, own);
       try {
         Set(own, "Visible", false);
         Set(own, "DisplayAlerts", false);
@@ -113,8 +280,9 @@ namespace AivinGui {
         else throw new GuiError("NOT_FOUND", "File not found: " + path);
         Release(wbs);
         RequireWritable(book, readOnly, path, false);
-        return new Opened { App = own, Doc = book, Own = true };
-      } catch { try { Call(own, "Quit"); } catch { } Release(own); throw; }
+        opened.Doc = book;
+        return opened;
+      } catch { QuitOwn(opened, false); throw; }
     }
 
     static void CloseWorkbook(Opened o, bool save) {
@@ -123,8 +291,7 @@ namespace AivinGui {
         if (o.Own) Call(o.Doc, "Close", false);
       } finally {
         Release(o.Doc);
-        if (o.Own) { try { Call(o.App, "Quit"); } catch { } }
-        Release(o.App);
+        if (o.Own) QuitOwn(o, false); else Release(o.App);
       }
     }
 
@@ -195,25 +362,31 @@ namespace AivinGui {
       return v;
     }
 
-    static void WriteCell(object ws, string addr, object v) {
+    /** Chữ "=..." chỉ thành công thức khi formula=true (người dùng / Planner cho phép tường minh); không thì ghi nguyên chữ. */
+    static void WriteCell(object ws, string addr, object v, bool formula) {
       object r = Get(ws, "Range", addr);
       string s = v as string;
-      if (s != null && s.StartsWith("=")) Set(r, "Formula", s); else Set(r, "Value2", JsonValue(v));
+      if (formula && s != null && s.StartsWith("=")) Set(r, "Formula", s); else Set(r, "Value2", SafeCellValue(v, formula));
       Release(r);
     }
 
-    /** cells {"B2": giá trị | "=công thức"} và / hoặc range + values (mảng hàng). Đọc lại ô vừa ghi làm bằng chứng. */
+    /**
+     * cells {"B2": giá trị} và / hoặc range + values (mảng hàng). Đọc lại ô vừa ghi làm bằng chứng. Công thức chỉ khi formula=true. Sổ người
+     * dùng đang mở: không lưu trừ khi save=true (trả unsaved).
+     */
     static object ExcelWrite(Dictionary<string, object> a) {
       string path = S(a, "path");
       Opened o = OpenWorkbook(path, B(a, "create", false), false);
-      bool save = B(a, "save", true);
+      bool userDirty = UserHasUnsavedEdits(o, path);
+      bool save = ShouldSave(o, a, userDirty);
+      bool formula = B(a, "formula", false);
       try {
         object ws = SheetOf(o.Doc, S(a, "sheet"));
         var written = new Dictionary<string, object>();
         var cells = a.ContainsKey("cells") ? a["cells"] as Dictionary<string, object> : null;
         if (cells != null) {
           foreach (var kv in cells) {
-            WriteCell(ws, kv.Key, kv.Value);
+            WriteCell(ws, kv.Key, kv.Value, formula);
             object r = Get(ws, "Range", kv.Key);
             written[kv.Key] = Cell(Get(r, "Text"));
             Release(r);
@@ -230,7 +403,7 @@ namespace AivinGui {
           var data = new object[rowsN, Math.Max(1, colsN)];
           for (int r = 0; r < rowsN; r++) {
             var arr = values[r] as object[];
-            for (int c = 0; arr != null && c < arr.Length; c++) data[r, c] = JsonValue(arr[c]);
+            for (int c = 0; arr != null && c < arr.Length; c++) data[r, c] = SafeCellValue(arr[c], formula);
           }
           Set(target, "Value2", data);
           written[Convert.ToString(Get(target, "Address", false, false))] = rowsN + "x" + colsN;
@@ -238,7 +411,9 @@ namespace AivinGui {
         }
         if (written.Count == 0) throw new GuiError("INVALID_ARGS", "Give cells {\"B2\": value} or range + values");
         Release(ws);
-        return new Dictionary<string, object> { { "path", path }, { "written", written }, { "saved", save }, { "open_in_user_excel", !o.Own } };
+        var res = new Dictionary<string, object> { { "path", path }, { "written", written }, { "open_in_user_excel", !o.Own } };
+        AddSaveState(res, o, save, "Excel", userDirty, path);
+        return res;
       } finally { CloseWorkbook(o, save); }
     }
 
@@ -260,7 +435,10 @@ namespace AivinGui {
         } catch (GuiError) { }
         Release(app);
       }
+      var before = PidsOf("WINWORD");
       object own = Create("Word.Application");
+      var opened = new Opened { App = own, Own = true };
+      opened.Pid = TrackOwn("WINWORD", before, own);
       try {
         Set(own, "Visible", false);
         Set(own, "DisplayAlerts", 0);
@@ -271,8 +449,9 @@ namespace AivinGui {
         else throw new GuiError("NOT_FOUND", "File not found: " + path);
         Release(docs);
         RequireWritable(doc, readOnly, path, true);
-        return new Opened { App = own, Doc = doc, Own = true };
-      } catch { try { Call(own, "Quit", 0); } catch { } Release(own); throw; }
+        opened.Doc = doc;
+        return opened;
+      } catch { QuitOwn(opened, true); throw; }
     }
 
     static void CloseDocument(Opened o, bool save) {
@@ -281,8 +460,7 @@ namespace AivinGui {
         if (o.Own) Call(o.Doc, "Close", 0);
       } finally {
         Release(o.Doc);
-        if (o.Own) { try { Call(o.App, "Quit", 0); } catch { } }
-        Release(o.App);
+        if (o.Own) QuitOwn(o, true); else Release(o.App);
       }
     }
 
@@ -310,9 +488,11 @@ namespace AivinGui {
     static object WordEdit(Dictionary<string, object> a) {
       string path = S(a, "path");
       Opened o = OpenDocument(path, B(a, "create", false), false);
-      bool save = B(a, "save", true);
+      bool userDirty = UserHasUnsavedEdits(o, path);
+      bool save = ShouldSave(o, a, userDirty);
       try {
-        var res = new Dictionary<string, object> { { "path", path }, { "saved", save }, { "open_in_user_word", !o.Own } };
+        var res = new Dictionary<string, object> { { "path", path }, { "open_in_user_word", !o.Own } };
+        AddSaveState(res, o, save, "Word", userDirty, path);
         string find = S(a, "find"), replace = S(a, "replace"), append = S(a, "append");
         if (!string.IsNullOrEmpty(find)) {
           object content = Get(o.Doc, "Content");
@@ -338,11 +518,54 @@ namespace AivinGui {
 
     // ── Outlook ────────────────────────────────────────────────────────────────────────────────
 
-    static object OutlookApp() { return Running("Outlook.Application") ?? Create("Outlook.Application"); }
+    /** Outlook đang chạy của người dùng, không thì host tự bật (created=true) — bản host bật phải Quit khi xong (02/11/2026). */
+    static object OutlookApp(out bool created) {
+      object running = Running("Outlook.Application");
+      created = running == null;
+      return running ?? Create("Outlook.Application");
+    }
+
+    static int ComCount(object o, string collection) {
+      object c = null;
+      try { c = Get(o, collection); return Convert.ToInt32(Get(c, "Count")); } catch { return -1; } finally { Release(c); }
+    }
+
+    const int OUTBOX_DRAIN_MS = 15000;
+
+    /**
+     * Outlook do host bật: Quit khi xong — nhưng chỉ khi không có cửa sổ Outlook nào (người dùng có thể vừa mở Outlook, cùng một tiến trình)
+     * và (sau khi gửi) Hộp thư đi đã trống, không thì thư kẹt lại tới lần mở sau. Trả true khi đã Quit.
+     */
+    static bool QuitOutlookIfOurs(object app, object ns, bool created, bool waitOutbox) {
+      if (!created) return false;
+      if (waitOutbox && ns != null) {
+        object outbox = null;
+        try {
+          try { Call(ns, "SendAndReceive", false); } catch (GuiError) { }
+          outbox = Call(ns, "GetDefaultFolder", 4);
+          var sw = Stopwatch.StartNew();
+          while (ComCount(outbox, "Items") > 0 && sw.ElapsedMilliseconds < OUTBOX_DRAIN_MS) Thread.Sleep(500);
+          if (ComCount(outbox, "Items") > 0) return false;
+        } catch (GuiError) { return false; } finally { Release(outbox); }
+      }
+      if (ComCount(app, "Explorers") != 0 || ComCount(app, "Inspectors") != 0) return false;
+      try { Call(app, "Quit"); return true; } catch (GuiError) { return false; }
+    }
 
     static object OutlookList(Dictionary<string, object> a) {
-      object app = OutlookApp();
-      object ns = Call(app, "GetNamespace", "MAPI");
+      bool created;
+      object app = OutlookApp(out created);
+      object ns = null;
+      try {
+        ns = Call(app, "GetNamespace", "MAPI");
+        return OutlookListIn(ns, a);
+      } finally {
+        QuitOutlookIfOurs(app, ns, created, false);
+        Release(ns); Release(app);
+      }
+    }
+
+    static object OutlookListIn(object ns, Dictionary<string, object> a) {
       object folder = Call(ns, "GetDefaultFolder", S(a, "folder") == "sent" ? 5 : 6);
       object items = Get(folder, "Items");
       Call(items, "Sort", "[ReceivedTime]", true);
@@ -364,13 +587,33 @@ namespace AivinGui {
           });
         } catch (GuiError) { /* mục không phải thư (lịch họp…) */ } finally { Release(it); }
       }
-      Release(items); Release(folder); Release(ns); Release(app);
+      Release(items); Release(folder);
       return new Dictionary<string, object> { { "folder", S(a, "folder") == "sent" ? "sent" : "inbox" }, { "messages", list } };
     }
 
-    /** Soạn thư: lưu vào Bản nháp (mặc định) hoặc gửi luôn (send). */
+    /** Soạn thư: lưu vào Bản nháp (mặc định) hoặc gửi luôn (send). Outlook do host bật → Quit khi xong (sau khi Hộp thư đi trống). */
     static object OutlookCompose(Dictionary<string, object> a) {
-      object app = OutlookApp();
+      bool created;
+      object app = OutlookApp(out created);
+      object ns = null;
+      bool send = B(a, "send", false);
+      bool composed = false;
+      try {
+        var res = OutlookComposeIn(app, a, send);
+        composed = true;
+        if (created) {
+          try { ns = Call(app, "GetNamespace", "MAPI"); } catch (GuiError) { }
+          bool quit = QuitOutlookIfOurs(app, ns, true, send);
+          if (send && !quit) res["outbox_pending"] = true;
+        }
+        return res;
+      } finally {
+        if (created && !composed) QuitOutlookIfOurs(app, ns, true, false);
+        Release(ns); Release(app);
+      }
+    }
+
+    static Dictionary<string, object> OutlookComposeIn(object app, Dictionary<string, object> a, bool send) {
       object mail = Call(app, "CreateItem", 0);
       try {
         Set(mail, "To", S(a, "to") ?? "");
@@ -383,10 +626,9 @@ namespace AivinGui {
           foreach (var f in files) Call(att, "Add", Convert.ToString(f));
           Release(att);
         }
-        bool send = B(a, "send", false);
         if (send) Call(mail, "Send"); else Call(mail, "Save");
         return new Dictionary<string, object> { { "sent", send }, { "saved_to_drafts", !send }, { "to", S(a, "to") }, { "subject", S(a, "subject") }, { "attachments", files == null ? 0 : files.Length } };
-      } finally { Release(mail); Release(app); }
+      } finally { Release(mail); }
     }
   }
 }

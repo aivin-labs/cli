@@ -17,6 +17,8 @@ import time
 
 HOME = @@HOME@@
 CREDS = os.path.join(HOME, 'device-credentials.json')
+# Listener sập: mở lại sau 2 s, rồi gấp đôi (tối đa 5 phút) nếu sập liên tục.
+FIRST_DELAY = 2
 LOCK = os.path.join(HOME, 'remote-daemon.lock')
 PAUSED = os.path.join(HOME, 'remote-paused')
 DESK = os.path.join(HOME, 'desktop')
@@ -64,7 +66,7 @@ def touch(path):
 
 def notify(text):
     if shutil.which('notify-send'):
-        subprocess.Popen(['notify-send', '-i', LOGO, 'AIVIN Bot CLI', text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(['notify-send', '-i', LOGO, 'AIVIN Bot', text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def pid_alive(pid):
@@ -84,7 +86,7 @@ class Supervisor:
         self.child_pid = 0
         self.started = 0
         self.next_start = 0
-        self.delay = 10
+        self.delay = FIRST_DELAY
         self.pairing = False
         self.was_paired = os.path.exists(CREDS)
         self.seen_open = mtime(OPEN_REQ)
@@ -140,12 +142,17 @@ class Supervisor:
             notify(self.t('pairFailed'))
             return
         if rc == 0:
-            self.next_start = time.time() + 60
+            # Dừng có chủ đích (thu hồi, ghép lại, cửa sổ khác nhận việc): chờ ngắn; thoát 0 liền nhau (hai máy chung token) thì giãn dần.
+            if secs < 30:
+                self.backoff()
+            else:
+                self.delay = FIRST_DELAY
+                self.next_start = time.time() + FIRST_DELAY
         elif rc == RESTART_CODE:
             self.next_start = time.time() + 1
         else:
             if secs > 300:
-                self.delay = 10
+                self.delay = FIRST_DELAY
             self.backoff()
 
     def kill(self):
@@ -164,7 +171,7 @@ class Supervisor:
     def start_now(self):
         if self.child is None and not self.lock_held():
             self.next_start = 0
-            self.delay = 10
+            self.delay = FIRST_DELAY
 
     def tick(self):
         if mtime(QUIT_REQ) > self.seen_quit:
@@ -250,16 +257,15 @@ def gtk_ui(sup):
     t = sup.t
     ind = AppIndicator.Indicator.new('aivin', LOGO, AppIndicator.IndicatorCategory.APPLICATION_STATUS)
     ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
-    ind.set_title('AIVIN Bot CLI')
+    ind.set_title('AIVIN Bot')
     menu = Gtk.Menu()
-    status = Gtk.MenuItem(label='AIVIN Bot CLI')
+    status = Gtk.MenuItem(label='AIVIN Bot')
     status.set_sensitive(False)
     connect = Gtk.MenuItem(label=t('connect'))
     pause = Gtk.MenuItem(label=t('pause'))
     startup = Gtk.CheckMenuItem(label=t('startup'))
-    folder = Gtk.MenuItem(label=t('folder'))
     quit_item = Gtk.MenuItem(label=t('quit'))
-    for item in (status, Gtk.SeparatorMenuItem(), connect, pause, startup, folder, Gtk.SeparatorMenuItem(), quit_item):
+    for item in (status, Gtk.SeparatorMenuItem(), connect, pause, startup, Gtk.SeparatorMenuItem(), quit_item):
         menu.append(item)
     state = {'icon': None, 'syncing': False, 'dialog': False}
 
@@ -282,7 +288,7 @@ def gtk_ui(sup):
         if state['dialog']:
             return
         state['dialog'] = True
-        d = Gtk.Dialog(title='AIVIN Bot CLI')
+        d = Gtk.Dialog(title='AIVIN Bot')
         d.add_buttons(t('pairCancel'), Gtk.ResponseType.CANCEL, t('pairOk'), Gtk.ResponseType.OK)
         d.set_default_response(Gtk.ResponseType.OK)
         d.set_keep_above(True)
@@ -322,11 +328,6 @@ def gtk_ui(sup):
             set_startup(sup, item.get_active())
             refresh()
 
-    def open_folder(*_):
-        opener = shutil.which('xdg-open')
-        if opener:
-            subprocess.Popen([opener, HOME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
     def quit_app(*_):
         sup.kill()
         Gtk.main_quit()
@@ -341,7 +342,6 @@ def gtk_ui(sup):
     connect.connect('activate', ask_code)
     pause.connect('activate', toggle_pause)
     startup.connect('toggled', toggle_startup)
-    folder.connect('activate', open_folder)
     quit_item.connect('activate', quit_app)
     menu.show_all()
     ind.set_menu(menu)

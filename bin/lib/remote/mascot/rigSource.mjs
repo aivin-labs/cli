@@ -1,4 +1,4 @@
-import { BOT_BLINKS, BOT_EYES, BOT_MOTION, BOT_MOUTHS, BOT_RIG, BOT_SPINS, SCREEN_SCROLL_LOOP } from './bot.mjs';
+import { BOT_BLINKS, BOT_EYES, BOT_TEARS, BOT_MOTION, BOT_MOUTHS, BOT_RIG, BOT_SPINS, SCREEN_SCROLL_LOOP } from './bot.mjs';
 
 /**
  * Bộ chuyển động của linh vật (29/10/2026) — mã C# biên dịch trong host.ps1 (Add-Type, cùng khối với AivinMascot.Native), chạy theo
@@ -40,6 +40,8 @@ const Z = BOT_RIG.zzz;
 const SCREENS = BOT_RIG.screens;
 const SP = BOT_RIG.sparks;
 const TR = BOT_RIG.tray;
+
+const WAVE = BOT_RIG.wave;
 
 export const RIG_CS = String.raw`
   public sealed class Motion {
@@ -90,6 +92,7 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
     readonly System.Windows.FrameworkElement w;
     readonly System.Windows.UIElement bot, shadow, earL, earR, visorFx, face;
     readonly System.Windows.Shapes.Shape tint, halo;
+    readonly System.Windows.UIElement blushL, blushR;
     readonly ScaleTransform botScale, shadowScale, faceScale, mouthOpen, talk;
     readonly RotateTransform botLean, headRot, antRot;
     readonly TranslateTransform botMove, headMove, faceLook, eyeLook, scanY;
@@ -124,13 +127,19 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
     readonly Spring lookX = new Spring(0), lookY = new Spring(0), near = new Spring(0);
     int curX = int.MinValue, curY = int.MinValue; double curMovedAt = -10;
     double prevHead, prevHeadVel, headAcc;
-    double nextBlink = 1.2, blinkAt = -10; bool doubleBlink;
+    double nextBlink = 1.2, blinkAt = -10, blushAt = -10; bool doubleBlink;
     double nextGlance = 2, glanceX, glanceY;
     double hopAt = -10, shakeAt = -10, nodAt = -10, perkAt = -10, flashAt = -10;
     bool hopKick, landKick;
     // Play (Play()): dizzy = head circles + spiral eyes spin; giggle = quick little bounces; purr = leaning in, slow antenna wag (kept alive
     // while petting goes on).
     double dizzyAt = -10, giggleAt = -10, purrUntil = -10, purrK;
+    // Mood from the answer's emoji (mood.mjs): sad = sink, head bowed, antenna and ear lights drooping, eyes down, held DROOP_S then
+    // recovering; sheepish = a sideways head tilt with a small bow and a blush.
+    // cry = the sad droop held longer (droopLen) + tears falling from both eyes + small sobbing shudders.
+    double droopAt = -10, sheepAt = -10, cryAt = -10, droopLen = 2.4;
+    const double DROOP_S = 2.4, SHEEP_S = 1.4, CRY_S = 3.2, TEAR_S = 0.9;
+    System.Windows.UIElement tearsView; readonly List<System.Windows.UIElement> tearEls = new List<System.Windows.UIElement>(); readonly List<TranslateTransform> tearMoves = new List<TranslateTransform>();
     readonly List<RotateTransform> spins = new List<RotateTransform>();
     const double DIZZY_S = 2.6, GIGGLE_S = 1.1;
     // Reactions (Play) + life in a long state: when each started; the next spontaneous gesture; how insistent the waiting "ask" has got.
@@ -143,6 +152,10 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
     readonly Dictionary<string, System.Windows.UIElement> mouthEls = new Dictionary<string, System.Windows.UIElement>();
     readonly ScaleTransform eyeMorphL, eyeMorphR, mouthMorph;
     string eyesNow, eyesNext, mouthNow, mouthNext; double mouthAt;
+    readonly System.Windows.Shapes.Polyline waveL, waveR;
+    bool waveOn;
+    const double WAVE_HALF = ${n(WAVE.halfWidth)}, WAVE_AMP = ${n(WAVE.amp)}, WAVE_LEN = ${n(WAVE.length)}, WAVE_HZ = ${n(WAVE.hz)}, WAVE_EYE_DX = ${n(BOT_RIG.face.eyeDx)};
+    const int WAVE_SEGMENTS = ${WAVE.segments};
     readonly Spring eyeSq = new Spring(1), mouthSq = new Spring(1);
     const double MOUTH_LAG = 0.05;
     // Antenna light color: eases from the old state's color to the new one.
@@ -171,7 +184,7 @@ ${Object.entries(BOT_MOTION).map(motionCase).join('\n')}
       bot = Get<System.Windows.UIElement>("Bot"); shadow = Get<System.Windows.UIElement>("Shadow");
       earL = Get<System.Windows.UIElement>("EarGlowL"); earR = Get<System.Windows.UIElement>("EarGlowR");
       visorFx = Get<System.Windows.UIElement>("VisorFx"); face = Get<System.Windows.UIElement>("Face");
-      tint = Get<System.Windows.Shapes.Shape>("AntennaTint"); halo = Get<System.Windows.Shapes.Shape>("AntennaHalo");
+      tint = Get<System.Windows.Shapes.Shape>("AntennaTint"); halo = Get<System.Windows.Shapes.Shape>("AntennaHalo"); blushL = w.FindName("BlushL") as System.Windows.UIElement; blushR = w.FindName("BlushR") as System.Windows.UIElement;
       botScale = Get<ScaleTransform>("BotScale"); shadowScale = Get<ScaleTransform>("ShadowScale"); faceScale = Get<ScaleTransform>("FaceScale");
       mouthOpen = Get<ScaleTransform>("MouthOpenScale"); talk = Get<ScaleTransform>("MouthTalkScale");
       botLean = Get<RotateTransform>("BotLean"); headRot = Get<RotateTransform>("HeadRot"); antRot = Get<RotateTransform>("AntennaRot");
@@ -193,9 +206,15 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       for (int i = 0; i < 3; i++) { var z = Get<System.Windows.Controls.TextBlock>("Zzz" + i); z.RenderTransform = new ScaleTransform(); zs.Add(z); }
       foreach (var name in new[] { ${BOT_BLINKS.map((b) => `"${b}"`).join(', ')} }) { var b = w.FindName(name) as ScaleTransform; if (b != null) blinks.Add(b); }
       foreach (var name in new[] { ${BOT_SPINS.map((b) => `"${b}"`).join(', ')} }) { var r = w.FindName(name) as RotateTransform; if (r != null) spins.Add(r); }
+      tearsView = w.FindName("Tears") as System.Windows.UIElement;
+      foreach (var name in new[] { ${BOT_TEARS.map((b) => `"${b}"`).join(', ')} }) {
+        var el = w.FindName("Tear" + name) as System.Windows.UIElement; var mv = w.FindName("TearMove" + name) as TranslateTransform;
+        if (el != null && mv != null) { tearEls.Add(el); tearMoves.Add(mv); }
+      }
       faceBase = faceScale.ScaleX;
       foreach (var name in new[] { ${BOT_EYES.map((e) => `"${e}"`).join(', ')} }) eyeEls[name] = new[] { Get<System.Windows.UIElement>("Eyes_" + name + "_L"), Get<System.Windows.UIElement>("Eyes_" + name + "_R") };
       foreach (var name in new[] { ${BOT_MOUTHS.map((e) => `"${e}"`).join(', ')} }) mouthEls[name] = Get<System.Windows.UIElement>("Mouth_" + name);
+      waveL = Get<System.Windows.Shapes.Polyline>("WaveL"); waveR = Get<System.Windows.Shapes.Polyline>("WaveR");
       eyeMorphL = Get<ScaleTransform>("EyeMorphL"); eyeMorphR = Get<ScaleTransform>("EyeMorphR"); mouthMorph = Get<ScaleTransform>("MouthMorph");
       tint.Fill = tintBrush; halo.Fill = tintBrush;
       tray = Get<System.Windows.UIElement>("Tray"); trayArrow = Get<System.Windows.UIElement>("TrayArrow"); trayBase = Get<System.Windows.UIElement>("TrayBase"); trayNo = Get<System.Windows.UIElement>("TrayNo");
@@ -231,12 +250,30 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
     public void SetFace(string eyes, string mouth) {
       if (!eyeEls.ContainsKey(eyes) || !mouthEls.ContainsKey(mouth)) return;
       if (eyesNow == null) { eyesNow = eyes; ShowEyes(eyes); }
+      else if (waveOn) { eyesNow = eyes; eyesNext = null; } // Remote viewer: the eyes stay a wave; only remember the face to restore when the session ends.
       else if (eyesNext != null || eyes != eyesNow) eyesNext = eyes;
       if (mouthNow == null) { mouthNow = mouth; ShowMouth(mouth); }
       else if (mouthNext != null || mouth != mouthNow) { if (mouthNext == null) mouthAt = Now + MOUTH_LAG; mouthNext = mouth; }
     }
     void ShowEyes(string name) {
-      foreach (var kv in eyeEls) { var v = kv.Key == name ? Visibility.Visible : Visibility.Collapsed; foreach (var e in kv.Value) e.Visibility = v; }
+      string shown = waveOn ? "wave" : name;
+      foreach (var kv in eyeEls) { var v = kv.Key == shown ? Visibility.Visible : Visibility.Collapsed; foreach (var e in kv.Value) e.Visibility = v; }
+    }
+    /** Someone is viewing / controlling this computer: both eyes become one continuously moving sine wave, over any face, until the session ends. */
+    public void RemoteWave(bool on) {
+      if (on == waveOn) return;
+      if (on && dozing) Doze(false);
+      waveOn = on;
+      ShowEyes(eyesNow);
+    }
+    /** Phase follows the real position, so it reads as one wave running through both eyes. */
+    PointCollection WavePoints(double t, double eyeCenter) {
+      var points = new PointCollection(WAVE_SEGMENTS + 1);
+      for (int i = 0; i <= WAVE_SEGMENTS; i++) {
+        double x = -WAVE_HALF + 2 * WAVE_HALF * i / WAVE_SEGMENTS;
+        points.Add(new Point(x, WAVE_AMP * Math.Sin(2 * Math.PI * ((x + eyeCenter) / WAVE_LEN - WAVE_HZ * t))));
+      }
+      return points;
     }
     void ShowMouth(string name) {
       foreach (var kv in mouthEls) kv.Value.Visibility = kv.Key == name ? Visibility.Visible : Visibility.Collapsed;
@@ -260,7 +297,7 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
 
     /** Doze off (the window calls this after a long idle) or wake up: wake = perk up, antenna flick, a blink. */
     public void Doze(bool on) {
-      if (on == dozing) return;
+      if (on == dozing || (on && waveOn)) return;
       dozing = on; m = Motion.For(on ? "doze" : state);
       if (on) nextJerk = Now + 6 + rnd.NextDouble() * 5;
       else { perkAt = Now; antA.V += 150; blinkAt = Now; }
@@ -297,11 +334,12 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       double t = Now;
       switch (g) {
         case "dizzy": dizzyAt = t; antA.V += 220; break;
-        case "giggle": giggleAt = t; antA.V -= 140; blinkAt = t; break;
+        case "giggle": giggleAt = t; antA.V -= 140; blinkAt = t; blushAt = t; break;
         case "purr": purrUntil = t + 0.9; break;
-        case "wave": hopAt = t; hopKick = landKick = false; perkAt = t + 0.6; flashAt = t; break;
+        case "wave": hopAt = t; hopKick = landKick = false; perkAt = t + 0.6; flashAt = t; blushAt = t; break;
+        case "wink": blinkAt = t; blushAt = t; antA.V -= 60; break;
         // Busy -> needs you: a start (eyes pop wide, antenna jolts, a quick rise) before the waiting look.
-        case "startle": perkAt = t; flashAt = t; antA.V -= 260; eyeSq.V += 6; pop.V += 2.5; break;
+        case "startle": hopAt = t; hopKick = landKick = false; perkAt = t; flashAt = t; antA.V -= 280; eyeSq.V += 6; pop.V += 2.8; break;
         // Done after an error: no hop - sag with a slow breath out, then perk up.
         case "relief": hopAt = -10; sighAt = t; perkAt = t + 0.75; antA.V += 70; break;
         // Done after long work: a second hop + sparkle burst right after the first.
@@ -312,6 +350,10 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
         case "yawn": yawnAt = t; break;
         // Files dropped into the tray: it gulps them (squash, lid snaps shut), a nod and a little sparkle.
         case "gulp": gulpAt = t; nodAt = t + 0.12; sparkAt = t; antA.V += 110; break;
+        // Apologetic: no hop / sparkle left over from "done" - a breath out, then droop.
+        case "sad": hopAt = hop2At = sparkAt = -10; sighAt = t; droopAt = t; droopLen = DROOP_S; antA.V += 90; break;
+        case "cry": hopAt = hop2At = sparkAt = -10; sighAt = t; droopAt = t; droopLen = CRY_S; cryAt = t; antA.V += 120; break;
+        case "sheepish": hopAt = hop2At = -10; sheepAt = t; nodAt = t + 0.1; blushAt = t; antA.V += 60; break;
       }
       reactAt = t;
     }
@@ -370,6 +412,14 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       // Relief: sink + squash slowly (a breath out); yawn: stretch up.
       double sigh = Bump(t - sighAt, 0.8), yawn = Bump(t - yawnAt, 1.8);
       y += sigh * 2.4; sq -= sigh * 0.035; sq += yawn * 0.035;
+      // Droop: eases in over 0.35 s, holds, eases out over the last 0.6 s (smoothstep both ways).
+      double drU = t - droopAt, droop = 0;
+      if (drU >= 0 && drU < droopLen) { double k = Math.Min(Clamp(drU / 0.35, 0, 1), Clamp((droopLen - drU) / 0.6, 0, 1)); droop = k * k * (3 - 2 * k); }
+      // Crying: sobs = quick small shudders while the droop holds; tears (step 3b) follow the same envelope.
+      double cryU = t - cryAt, cry = (cryU >= 0 && cryU < CRY_S) ? droop : 0;
+      y += Math.Max(0, Math.Sin(cryU * 9)) * 0.9 * cry; sq += Math.Sin(cryU * 18) * 0.012 * cry;
+      double sheep = Bump(t - sheepAt, SHEEP_S);
+      y += droop * 2.2; sq -= droop * 0.025;
       // Play: dizzy / giggle fade out over their length; purr eases in and out while petting goes on.
       double dizU = t - dizzyAt, dz = (dizU >= 0 && dizU < DIZZY_S) ? 1 - dizU / DIZZY_S : 0;
       double gigU = t - giggleAt, gig = (gigU >= 0 && gigU < GIGGLE_S) ? 1 - gigU / GIGGLE_S : 0;
@@ -439,19 +489,30 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       double ask = Bump(t - askAt, 1.8);
       if (!asleep) nw = Math.Max(nw, ask);
       if (t < attendUntil && !asleep && dz <= 0) { gx = attendX; gy = attendY; nw = 0; }
+      // Drooping: eyes drop to the floor and stop following the cursor.
+      if (droop > 0) { gx *= 1 - droop; gy = gy * (1 - droop) + 1.6 * droop; nw *= 1 - droop; }
       lookX.Step(gx + (cx - gx) * nw, 320, 34, dt); lookY.Step(gy + (cy - gy) * nw, 320, 34, dt);
       eyeLook.X = lookX.X; eyeLook.Y = lookY.X;
       faceLook.X = lookX.X * 0.55; faceLook.Y = lookY.X * 0.45;
+      // 3b) Tears: each drop falls 11 units in TEAR_S and fades in fast / out slowly; the drops of one eye are half a cycle apart and the
+      //     right eye lags a little. Hidden outright when not crying (no work per frame).
+      if (tearsView != null) {
+        var tv0 = cry > 0.01 ? Visibility.Visible : Visibility.Collapsed; if (tearsView.Visibility != tv0) tearsView.Visibility = tv0;
+        if (cry > 0.01) for (int i = 0; i < tearEls.Count; i++) {
+          double u = ((cryU + 0.25) / TEAR_S + (i % 2) * 0.5 + (i / 2) * 0.18) % 1.0;
+          tearMoves[i].Y = u * u * 13; tearEls[i].Opacity = cry * (u < 0.15 ? u / 0.15 : 1 - (u - 0.15) / 0.85);
+        }
+      }
 
       // 4) Head: spring toward the state's tilt + a curious lean toward a nearby cursor; lags the body's bob; nod / shake gestures.
       double curious = asleep ? 0 : Clamp(cx / 2.6, -1, 1) * 3.0 * near.X;
       headFocus = Ease(headFocus, state == "working" ? screens[focus].Head : 0, 5, dt);
-      headA.Step(headTilt + curious + headFocus + purrK * 7 + askSide * (5 + 2 * askLevel) * ask - yawn * 7, 95, 12, dt);
+      headA.Step(headTilt + curious + headFocus + purrK * 7 + askSide * (5 + 2 * askLevel) * ask - yawn * 7 + droop * 6 - sheep * 9, 95, 12, dt);
       double su = t - shakeAt, shake = (su >= 0 && su < 0.8) ? 7 * Math.Exp(-su * 4.2) * Math.Sin(su * 27) : 0;
       double angle = headA.X + shake + Math.Sin(dizU * 7) * 9 * dz + Math.Sin(gigU * 30) * 3 * gig;
       headRot.Angle = angle;
       double squint = Bump(t - squintAt, 0.9);
-      headMove.Y = headY - bobVel * 0.13 + Bump(t - nodAt, 0.5) * 2.2 - perk * 0.8 + squint * 0.8;
+      headMove.Y = headY - bobVel * 0.13 + Bump(t - nodAt, 0.5) * 2.2 - perk * 0.8 + squint * 0.8 + droop * 2.4;
       double headVel = (angle - prevHead) / dt; headAcc += ((headVel - prevHeadVel) / dt - headAcc) * 0.5; prevHead = angle; prevHeadVel = headVel;
       double faceS = faceBase * (1 + perk * 0.05 + Bump(t - flashAt, 0.35) * 0.04);
       faceScale.ScaleX = faceS; faceScale.ScaleY = faceS;
@@ -462,19 +523,20 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
 
       // 5) Antenna: loose spring, pushed by the head's angular acceleration and gestures (see hop / Nudge); a slow idle sway.
       antA.V -= Clamp(headAcc, -4000, 4000) * 0.55 * dt;
-      antA.Step(antRest + Math.Sin(phase * 0.5 + 1.3) * 1.2 + Math.Sin(t * 3) * 8 * purrK, 150, 5.5, dt);
+      antA.Step(antRest + droop * 16 + Math.Sin(phase * 0.5 + 1.3) * 1.2 + Math.Sin(t * 3) * 8 * purrK, 150, 5.5, dt);
       antA.X = Clamp(antA.X, -28, 28); antRot.Angle = antA.X;
 
       // 6) Lights: ear glow (alternating while working), antenna tint pulse, flash on done / attention, visor scan.
       double flash = (t - flashAt >= 0 && t - flashAt < 1.2) ? Math.Exp(-(t - flashAt) * 3.2) * 0.8 : 0;
       double gl = glow + glowPulse * Math.Sin(glowPhase) + flash, gr = glow + glowPulse * Math.Sin(glowPhase + (m.Alt ? Math.PI : 0)) + flash;
-      earL.Opacity = Clamp(gl, 0, 1); earR.Opacity = Clamp(gr, 0, 1);
+      earL.Opacity = Clamp(gl * (1 - droop * 0.7), 0, 1); earR.Opacity = Clamp(gr * (1 - droop * 0.7), 0, 1);
       double tv = Clamp(tintV + tintPulse * Math.Sin(tintPhase), 0, 1);
       double cu = (t - colorAt) / COLOR_S;
       if (cu >= 0 && cu < 1) { double k = cu * cu * (3 - 2 * cu); tintBrush.Color = Mix(colorFrom, colorTo, k); }
       else if (hasColor && tintBrush.Color != colorTo) tintBrush.Color = colorTo;
       tint.Opacity = tv; halo.Opacity = Clamp(0.12 + (tv - 0.45) * 0.9 + flash * 0.5, 0, 0.8);
       visorFx.Opacity = scan; scanY.Y = (scanPhase % 1.0) * VISOR_SCAN;
+      double blush = Math.Max(purrK * 0.9, Bump(t - blushAt, 1.8) * 0.85); if (blushL != null) blushL.Opacity = blush; if (blushR != null) blushR.Opacity = blush;
 
       // 7) Screens (working): flip up from edge-on one after another with a little overshoot, drift, the focused one lights up;
       //    text scrolls / bars bounce. Collapsed when folded away (no 3D work). Zzz (offline): letters drift up and fade.
@@ -543,6 +605,7 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
       double blink = 1;
       if (bu >= 0 && bu < 0.17) blink = bu < 0.06 ? 1 - 0.9 * (bu / 0.06) : (bu < 0.08 ? 0.1 : 0.1 + 0.9 * Math.Sin((bu - 0.08) / 0.09 * Math.PI / 2));
       foreach (var b in blinks) b.ScaleY = blink;
+      if (waveOn) { waveL.Points = WavePoints(t, -WAVE_EYE_DX); waveR.Points = WavePoints(t, WAVE_EYE_DX); }
       if (dz > 0) foreach (var r in spins) r.Angle = (dizU * 540) % 360;
 
       // 10) Face morph: eyes squash shut fast (~80 ms, no overshoot), swap kind while shut, spring open with a small overshoot (and a
@@ -570,9 +633,11 @@ ${SCREENS.map((sc, i) => `      screens.Add(MakeScreen(${i}, ${n(sc.tilt)}, ${n(
           else if (state == "waiting" && inState > 12) {
             askAt = t; askSide = rnd.NextDouble() < 0.5 ? -1 : 1; askLevel = Math.Min(askLevel + 1, 3);
             if (askLevel >= 2) perkAt = t + 0.3;
+            SetFace("curious", "hmm");
           }
         }
       }
+      if (state == "waiting" && t - askAt >= 2.0 && eyesNow == "curious" && eyesNext == null) SetFace("wide", "open");
       mouthOpen.ScaleY = 1 + Math.Sin(t * 3.4) * 0.1; mouthOpen.ScaleX = 1 - Math.Sin(t * 3.4) * 0.05;
       talk.ScaleY = 0.45 + 0.55 * Math.Abs(Math.Sin(t * 12));
 

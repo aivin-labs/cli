@@ -7,7 +7,8 @@ import path from 'path';
 import inquirer from 'inquirer';
 import { spawn } from 'child_process';
 import axios from 'axios';
-import dotenv from 'dotenv';
+import { loadProjectEnv } from './lib/projectEnv.mjs';
+import { requestCastStop } from './lib/remote/desktop/castAuth.mjs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname } from 'path';
 import { createRequire } from 'module';
@@ -23,6 +24,7 @@ import { flattenManifestFile } from '@aivin-labs/sdk';
 import './lib/cancellation.mjs';
 
 import { DEFAULT_AIVIN_BASE_URL, GLOBAL_CREDENTIALS_PATH, fetchWebUrl, loadActiveContext, clearActiveContext } from './lib/context.mjs';
+import { resolveServerUrl as normalizeServerUrl, readActiveServer, setActiveServer, serverLabel } from './lib/servers.mjs';
 import { requireArg } from './lib/util.mjs';
 import { readStdin, createFromJSON, createInteractive, validatePluginConfig, validateMcpProxyConfig } from './lib/scaffold.mjs';
 import { buildDeploymentPayload, deployPlugin, incrementVersion } from './lib/deploy.mjs';
@@ -57,14 +59,20 @@ import {
 import { runMission, runBrowserMission } from './lib/mission.mjs';
 import { DeviceAccess } from './lib/remote/constants.mjs';
 import { configureProxy } from './lib/remote/netProxy.mjs';
-import { DAEMON_RUNNING } from './lib/remote/daemonLock.mjs';
+import { DAEMON_RUNNING, lockHolder } from './lib/remote/daemonLock.mjs';
 import { runPolicyCommand } from './lib/remote/policyCommand.mjs';
-import { loadMascotSettings, saveMascotSettings } from './lib/remote/mascot/index.mjs';
+import { loadMascotSettings, requestMascotAttach, saveMascotSettings } from './lib/remote/mascot/index.mjs';
+import { forgetWorkFolder } from './lib/remote/workFolder.mjs';
+import { ServerRevoke, uninstallAivin } from './lib/remote/desktop/uninstall.mjs';
 import { MascotText, mascotLang, mascotText } from './lib/remote/mascot/strings.mjs';
-import { UiResult, showMascotDemo, showMascotUi } from './lib/remote/mascot/ui.mjs';
+import { DESKTOP_WEBRTC_WORKER_ARG, runDesktopWebRtcWorker } from './lib/remote/desktop/webrtcWorker.mjs';
+import { DemoScope, UiResult, showMascotDemo, showMascotUi } from './lib/remote/mascot/ui.mjs';
 import { desktopAppStatus, installDesktopApp, uninstallDesktopApp } from './lib/remote/autoStart.mjs';
+import { OpenDisplay, openFile, openText } from './lib/openFile.mjs';
+import { OPEN_WITH_EXTENSIONS, SAFE_DEFAULT_EXTENSIONS, defaultAssociationsXml, openDefaultAppsSettings } from './lib/remote/desktop/fileAssociation.mjs';
+import { showOSNotification } from './lib/remote/notify.mjs';
 import { createMeetingManager, requestMeeting } from './lib/remote/meeting/index.mjs';
-import { DEFAULT_HOTKEYS, hotkeyCandidates, parseHotkey, probeHotkey } from './lib/remote/mascot/hotkey.mjs';
+import { DEFAULT_CHAT_HOTKEYS, DEFAULT_HOTKEYS, hotkeyCandidates, parseHotkey, probeHotkey } from './lib/remote/mascot/hotkey.mjs';
 import { RESTART_EXIT_CODE, UPDATE_ROLLED_BACK, UpdateStatus, cleanupRetired, downloadRoot, installUpdate, isStandaloneBinary, saveUpdateSettings } from './lib/selfUpdate.mjs';
 import {
   createAutomationJob,
@@ -94,8 +102,10 @@ import {
   resetDeviceId,
   loadDeviceCredentials,
   pairDevice,
+  pairWithCodeOnly,
   listDevices,
   unpairDevice,
+  assertHumanCommand,
   isRemotePaused,
   setRemotePaused,
   getRecentLogs,
@@ -107,6 +117,11 @@ import {
   deleteMemoryItems,
   clearDeviceMemory,
   createFileIndex,
+  loadIndexFolders,
+  saveIndexFolders,
+  loadIndexExcludes,
+  saveIndexExcludes,
+  resolveInRoots,
   indexRootsFor,
   runRemoteMission,
   MemoryKind,
@@ -117,14 +132,16 @@ import {
 // didn't set them. `dotenv.config()` never overrides a variable that's already set, so a project's
 // own `.env` (or a real shell env var) always wins over the global context, exactly like before -
 // but nothing requires a project to have a `.env` at all anymore for the common single-context case.
-// `quiet: true` - otherwise dotenv prints an "injected env" tip line to stdout on every run, which
-// would corrupt `--json-output` mode (meant for clean, parseable JSON on stdout).
-dotenv.config({ quiet: true });
+// Chỉ các lệnh làm việc trên dự án plugin mới đọc `.env` (xem projectEnv.mjs).
+loadProjectEnv();
 
 {
-  const activeContext = loadActiveContext();
+  const selectedServer = process.env.AIVIN_BASE_URL
+    ? normalizeServerUrl(process.env.AIVIN_BASE_URL)
+    : (readActiveServer() || loadDeviceCredentials()?.server_url || DEFAULT_AIVIN_BASE_URL);
+  process.env.AIVIN_BASE_URL = selectedServer;
+  const activeContext = loadActiveContext(selectedServer);
   if (activeContext) {
-    if (!process.env.AIVIN_BASE_URL) process.env.AIVIN_BASE_URL = activeContext.base_url;
     if (!process.env.API_KEY) process.env.API_KEY = activeContext.api_key;
     if (!process.env.SDK_ENDPOINT && activeContext.sdk_endpoint) process.env.SDK_ENDPOINT = activeContext.sdk_endpoint;
   }
@@ -814,8 +831,49 @@ mcpCommand
   });
 
 program
+  .command('server [target]')
+  .description('Show or switch the active Aivin server (cloud, vn, local, or a URL)')
+  .option('--force', 'Switch servers without asking before stopping the current remote connection')
+  .action(async (target, options) => {
+    try {
+      const current = normalizeServerUrl(process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
+      if (!target) {
+        console.log(`Máy chủ đang chọn: ${serverLabel(current)} (${current})`);
+        if (!loadActiveContext(current)) console.log(chalk.yellow('   Chưa đăng nhập CLI ở máy chủ này — chạy `aivin login` hoặc ghép máy bằng mã.'));
+        return;
+      }
+      const next = normalizeServerUrl(target);
+      if (next === current) {
+        // An explicit selection should persist even when the value currently comes only from
+        // AIVIN_BASE_URL or the built-in default; desktop launchers read server.json themselves.
+        if (!readActiveServer()) setActiveServer(next);
+        return console.log(`Đang dùng ${serverLabel(next)} (${next}).`);
+      }
+      const holder = lockHolder();
+      if (holder && !options.force) {
+        const { proceed } = await inquirer.prompt([{
+          type: 'confirm', name: 'proceed', default: false,
+          message: `Đổi sang ${serverLabel(next)} sẽ dừng daemon PID ${holder} và huỷ việc đang chạy. Tiếp tục?`,
+        }]);
+        if (!proceed) return console.log(chalk.gray('Đã huỷ; máy chủ hiện tại không đổi.'));
+      }
+      setActiveServer(next);
+      if (holder) {
+        try { process.kill(holder, 'SIGTERM'); } catch (error) { if (error?.code !== 'ESRCH') throw error; }
+      }
+      console.log(chalk.green(`✅ Đã chọn ${serverLabel(next)} (${next}).`));
+      if (loadActiveContext(next)) console.log(chalk.gray('   CLI sẽ dùng thông tin đăng nhập đã lưu riêng cho máy chủ này.'));
+      else console.log(chalk.yellow('   Chưa có đăng nhập cho máy chủ này; chạy `aivin login` nếu cần dùng API.'));
+      if (holder) console.log(chalk.gray('   Phiên nhận việc đã được dừng; khay sẽ mở lại bằng token ghép riêng của server mới. Nếu đang chạy trong terminal, hãy chạy lại `aivin remote start`.'));
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exitCode = 1;
+    }
+  });
+
+program
   .command('login')
-  .argument('[baseUrl]', 'Server to log into (REST API base) - defaults to production (api.aivin.cloud). Pass a staging/self-hosted host to switch the machine\'s active context to it, e.g. `aivin login beta-api.aivin.vn`.')
+  .argument('[baseUrl]', 'Server to log into (REST API base) - defaults to production (api.aivin.cloud). Pass a staging/self-hosted host to switch the machine\'s active context to it, e.g. `aivin login api.aivin.vn`.')
   .description('Log in and save an API key for plugin deployment (opens your browser by default)')
   .option('-k, --api-key <key>', 'Set API key directly (skip login entirely)')
   .option('--basic', 'Log in with email/password directly in the terminal instead of a browser')
@@ -823,9 +881,9 @@ program
   .option('--client <client>', 'Client/org id to use with --basic (default: "aivin.cloud")')
   .action(async (baseUrl, options) => {
     try {
-      // Bare hostname (no scheme) is the common case for a quick `aivin login beta-api.aivin.vn` -
+      // Bare hostname (no scheme) is the common case for a quick `aivin login api.aivin.vn` -
       // assume https, same as every other *.aivin.* endpoint in this file.
-      const resolvedBaseUrl = baseUrl ? (/^https?:\/\//.test(baseUrl) ? baseUrl : `https://${baseUrl}`) : DEFAULT_AIVIN_BASE_URL;
+      const resolvedBaseUrl = normalizeServerUrl(baseUrl || process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
       process.env.AIVIN_BASE_URL = resolvedBaseUrl;
 
       if (options.apiKey) {
@@ -900,7 +958,7 @@ program
   .action(() => {
     try {
       const apiKey = requireSavedApiKey();
-      const serverUrl = process.env.AIVIN_BASE_URL || DEFAULT_AIVIN_BASE_URL;
+      const serverUrl = normalizeServerUrl(process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
       const localClient = parseApiKeyClient(apiKey);
 
       // The effective API_KEY may come from a project's own .env instead of `~/.aivin/credentials`
@@ -944,7 +1002,7 @@ keyCommand
       console.log(chalk.yellow('🔑 Key:'), chalk.cyan(plainKey));
       console.log(chalk.gray('   This is shown only once - store it somewhere safe.'));
       if (options.save) {
-        const serverUrl = process.env.AIVIN_BASE_URL || DEFAULT_AIVIN_BASE_URL;
+        const serverUrl = normalizeServerUrl(process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
         const identity = await tryFetchWhoami(serverUrl, plainKey);
         saveGlobalApiKey(plainKey, serverUrl, identity);
         console.log(chalk.green(`💾 Saved to ${GLOBAL_CREDENTIALS_PATH} - every project on this machine can use it now.`));
@@ -975,7 +1033,7 @@ keyCommand
   .description('List API keys on your account')
   .action(async () => {
     try {
-      const serverUrl = process.env.AIVIN_BASE_URL || 'https://api.aivin.cloud';
+      const serverUrl = normalizeServerUrl(process.env.AIVIN_BASE_URL || readActiveServer() || DEFAULT_AIVIN_BASE_URL);
       const apiKey = requireSavedApiKey();
       await logAccountIdentity(serverUrl, apiKey);
       const items = await listRemoteApiKeys(serverUrl, apiKey);
@@ -1025,14 +1083,23 @@ program
   .command('ui')
   .description('Show the Aivin mascot on this computer with its ask box (Windows) - starts the background listener if it is not running')
   .option('--demo', 'Preview every mascot animation state without pairing or starting the listener')
+  .option('--moods', 'With --demo: only the faces the mascot makes from the emoji of an answer (sad, cry, sheepish, happy...)')
   .action(async (options) => {
     const lang = mascotLang();
     const say = (key, color = chalk.green) => console.log(color(mascotText(lang, key)));
     if (options.demo) {
-      const result = showMascotDemo();
+      const result = showMascotDemo({
+        scope: options.moods ? DemoScope.MOODS : DemoScope.ALL,
+        onEarlyExit: () => {
+          console.error(chalk.yellow('Cửa sổ demo đóng ngay: linh vật thật đang chạy (mỗi lúc chỉ một linh vật). Tắt nó bằng `aivin remote mascot off`, chạy lại demo, xong thì `aivin remote mascot on`.'));
+          process.exitCode = 1;
+        },
+      });
       if (result === UiResult.UNSUPPORTED) return say(MascotText.CMD_UNSUPPORTED, chalk.yellow);
       if (result === UiResult.START_FAILED) { console.error(chalk.red('Không thể mở bản demo linh vật.')); process.exitCode = 1; return; }
-      console.log(chalk.green('✓ Demo linh vật đang chạy qua 8 trạng thái — đóng cửa sổ hoặc nhấn Ctrl+C để dừng.'));
+      console.log(chalk.green(options.moods
+        ? '✓ Demo linh vật đang chạy qua 7 nét mặt theo emoji — đóng cửa sổ hoặc nhấn Ctrl+C để dừng.'
+        : '✓ Demo linh vật đang chạy qua 8 trạng thái + 7 nét mặt theo emoji — đóng cửa sổ hoặc nhấn Ctrl+C để dừng.'));
       return;
     }
     const result = await showMascotUi({ onStarting: () => say(MascotText.UI_STARTING, chalk.gray) });
@@ -1046,31 +1113,53 @@ program
 
 program
   .command('desktop [action]')
-  .description('Aivin as a desktop app: install (Windows: system tray + Start menu; macOS: menu bar + Aivin.app; Linux: app menu + tray) and start it with the computer | uninstall | status (default)')
+  .description('Aivin as a desktop app: install (Windows: system tray + Start menu; macOS: menu bar + Aivin.app; Linux: app menu + tray) and start it with the computer | uninstall | defaults (Windows: pick AIVIN Bot as default for file types) | status (default)')
   .option('--no-autostart', "install: don't start Aivin with the computer (turn it on later from Aivin's menu or the system's startup settings)")
   .option('--no-launch', "install: don't open Aivin now")
+  .option('--open-platform', 'Windows install: also open the Aivin platform in an app window after installation')
+  .option('--export-xml <file>', 'defaults (Windows): write a default-associations file for IT (Group Policy / Intune) instead of opening Settings')
+  .option('--all', 'defaults --export-xml: include Office formats, not only md/txt/csv')
   .action((action = 'status', options) => {
     // Chỗ bật / tắt khởi động cùng máy của từng hệ điều hành — cùng chỗ menu Aivin và `aivin remote enable|disable` đổi.
     const startupWhere = { win32: 'Task Manager → Startup apps', darwin: 'System Settings → General → Login Items', linux: 'Startup Applications / Autostart' }[process.platform] || '';
     const where = { win32: 'khay hệ thống, tìm "Aivin" trong Start', darwin: 'thanh menu, tìm "Aivin" bằng Spotlight', linux: 'khay hệ thống, tìm "Aivin" trong menu ứng dụng' }[process.platform] || '';
     try {
       if (action === 'install') {
-        const res = installDesktopApp({ autostart: options.autostart !== false, launch: options.launch !== false });
+        const res = installDesktopApp({ autostart: options.autostart !== false, launch: options.launch !== false, openPlatform: options.openPlatform });
         console.log(chalk.green(`✅ Đã cài Aivin vào máy: ${where}.`));
         console.log(chalk.gray(`   Ứng dụng: ${res.exe}`));
         console.log(chalk.gray(`   Khởi động cùng máy: ${res.autostart ? 'bật' : 'tắt'} (đổi ở menu Aivin hoặc ${startupWhere})`));
+        if (res.openWith?.registered) {
+          console.log(chalk.gray('   Mở tệp: chuột phải tệp → "Mở bằng AIVIN Bot", hoặc Open with → AIVIN Bot → Always để mở mặc định'));
+          console.log(chalk.gray('   Hỏi bot về tệp: chuột phải tệp / thư mục → "Gửi cho AIVIN Bot" (hoặc Send to → AIVIN Bot)'));
+          console.log(chalk.gray('   Chọn thư mục làm việc: chuột phải vào chỗ trống trong thư mục → "Làm việc ở đây với AIVIN Bot"'));
+        }
+        else if (res.openWith?.error) console.log(chalk.yellow(`   ⚠️  Chưa thêm được "Mở bằng AIVIN Bot": ${res.openWith.error}`));
         if (process.platform === 'linux' && !desktopAppStatus().tray) {
           console.log(chalk.yellow('   ⚠️  Máy chưa có AppIndicator cho python3 nên không có biểu tượng khay — Aivin vẫn chạy nền. Cài: sudo apt install gir1.2-ayatanaappindicator3-0.1 (Ubuntu / Debian)'));
         }
         return;
       }
       if (action === 'uninstall') {
+        assertHumanCommand('desktop', 'uninstall');
         const res = uninstallDesktopApp();
         console.log(chalk.green('✅ Đã gỡ ứng dụng Aivin trên màn hình và mục khởi động cùng máy (lệnh `aivin` vẫn còn).'));
         if (!res.removed) console.log(chalk.yellow('   ⚠️  Ứng dụng còn đang chạy nên chưa xoá hết được tệp — chạy lại lệnh này sau ít giây.'));
         return;
       }
-      if (action !== 'status') throw new Error('Dùng: aivin desktop install [--no-autostart] [--no-launch] | uninstall | status');
+      if (action === 'defaults') {
+        if (process.platform !== 'win32') throw new Error('`aivin desktop defaults` chỉ có trên Windows.');
+        if (options.exportXml) {
+          fs.writeFileSync(options.exportXml, defaultAssociationsXml(options.all ? OPEN_WITH_EXTENSIONS : SAFE_DEFAULT_EXTENSIONS));
+          console.log(chalk.green(`✅ Đã ghi ${options.exportXml} — IT áp bằng Group Policy "Set a default associations configuration file" hoặc Intune.`));
+          return;
+        }
+        openDefaultAppsSettings();
+        console.log(chalk.green('✅ Đã mở Settings → Default apps → AIVIN Bot. Chọn AIVIN Bot cho từng loại tệp để nháy đúp là mở bằng Aivin.'));
+        console.log(chalk.gray(`   Nên chọn: ${SAFE_DEFAULT_EXTENSIONS.map((e) => `.${e}`).join(', ')}. Tệp Office dựng lại định dạng khi xuất, nên cân nhắc trước khi đặt mặc định.`));
+        return;
+      }
+      if (action !== 'status') throw new Error('Dùng: aivin desktop install [--no-autostart] [--no-launch] | uninstall | defaults [--export-xml <tệp>] [--all] | status');
       const st = desktopAppStatus();
       if (st.supported === false) return console.log(chalk.gray(`Chưa có ứng dụng Aivin trên màn hình cho ${process.platform} — dùng \`aivin remote enable\`.`));
       console.log(chalk.blue('🖥️  Aivin trên máy này:'));
@@ -1078,10 +1167,95 @@ program
       if (st.installed) console.log(chalk.gray(`   Tìm bằng:           ${st.search || 'không'}`));
       console.log(chalk.gray(`   Khởi động cùng máy: ${st.startup.registered ? (st.startup.enabled ? 'bật' : `tắt (${startupWhere})`) : 'không'}`));
       if (process.platform === 'linux') console.log(chalk.gray(`   Biểu tượng khay:    ${st.tray ? 'có' : 'không (thiếu python3 + AppIndicator) — vẫn chạy nền'}`));
+      if (process.platform === 'win32') console.log(chalk.gray(`   Mở bằng AIVIN Bot:  ${st.openWith ? 'có (chuột phải tệp / Open with)' : 'chưa — aivin desktop install'}`));
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);
     }
+  });
+
+program
+  .command('open <files...>')
+  .description('Open files from this computer in your Aivin Drive (uploads once; the same content reopens the same Drive file). Windows: `aivin desktop install` adds "Open with AIVIN Bot" to Explorer.')
+  .option('-w, --workspace <id>', 'Workspace to upload into (default: your personal workspace)')
+  .option('--tab', 'Open in a normal browser tab instead of its own window')
+  .option('--print', 'Print the Drive link instead of opening anything')
+  .action(async (files, options) => {
+    // Gọi từ Explorer qua Aivin.exe --open (không có console) → báo bằng thông báo hệ điều hành.
+    const toast = process.env.AIVIN_OPEN_UI === 'toast';
+    for (const file of files) {
+      try {
+        const name = path.basename(file);
+        if (toast) showOSNotification({ title: 'AIVIN Bot', body: openText('opening', { name }) });
+        let lastReported = 0;
+        const onProgress = (percent, phase) => {
+          if (phase === 'processing') {
+            if (toast) showOSNotification({ title: 'AIVIN Bot', body: openText('processing', { name }) });
+            else process.stdout.write(`\r${chalk.cyan('⏳')} ${openText('processing', { name })}\n`);
+            return;
+          }
+          if (percent - lastReported >= 25 || percent === 100) {
+            lastReported = percent;
+            if (toast && (percent === 0 || percent === 50 || percent === 100)) {
+              showOSNotification({ title: 'AIVIN Bot', body: openText('uploading', { name, percent }) });
+            } else if (!toast) {
+              process.stdout.write(`\r${chalk.cyan('⬆')} ${openText('uploading', { name, percent })}`);
+            }
+          }
+        };
+        const display = options.print ? OpenDisplay.NONE : options.tab ? OpenDisplay.TAB : OpenDisplay.WINDOW;
+        const res = await openFile(file, { workspace: options.workspace, display, onProgress });
+        console.log(options.print ? res.url : chalk.green(`✅ ${res.name} → ${res.url}${res.reused ? ' (Drive copy reused)' : ''}${res.viewOnly ? ' (view only, not signed in - closes with its window)' : ''}`));
+      } catch (error) {
+        console.error(chalk.red('❌'), error.message);
+        if (toast) showOSNotification({ title: openText('failed_title'), body: error.message });
+        process.exitCode = 1;
+      }
+    }
+  });
+
+program
+  .command('uninstall')
+  .description('Windows: remove Aivin from this computer - the app, the aivin command, its PATH entry and this computer\'s connection to your account. Your data in .aivin stays unless you add --delete-data. Programs & Features runs this too.')
+  .option('--yes', 'Do not ask for confirmation')
+  .option('--delete-data', 'Also delete the .aivin folder: the bot\'s memory, file copies kept for undo, browser sign-ins, logs. Cannot be undone.')
+  .action(async (options) => {
+    // Gọi từ Programs & Features (không có console) → báo bằng thông báo hệ điều hành.
+    const toast = process.env.AIVIN_OPEN_UI === 'toast';
+    try {
+      let deleteData = !!options.deleteData;
+      if (!options.yes) {
+        const { go } = await inquirer.prompt([{ type: 'confirm', name: 'go', default: false, message: 'Gỡ Aivin khỏi máy này (ứng dụng, lệnh aivin, kết nối của máy với tài khoản)?' }]);
+        if (!go) return;
+        if (!deleteData) ({ deleteData } = await inquirer.prompt([{ type: 'confirm', name: 'deleteData', default: false, message: 'Xoá luôn dữ liệu trong .aivin (ghi nhớ của bot, bản sao tệp để hoàn tác, phiên đăng nhập trình duyệt)? Xoá rồi không lấy lại được.' }]));
+      }
+      const res = await uninstallAivin({ deleteData, serverUrl: missionServerUrl(), apiKey: process.env.API_KEY });
+      const notes = [
+        res.server !== ServerRevoke.DONE ? 'Máy có thể còn trong danh sách của tài khoản (ngoại tuyến) — thu hồi trên Aivin nếu cần.' : '',
+        !res.removesBinary ? 'Bản cài qua npm: gỡ lệnh bằng npm rm -g @aivin-labs/cli.' : '',
+        !deleteData ? 'Dữ liệu vẫn còn trong thư mục .aivin.' : '',
+      ].filter(Boolean);
+      console.log(chalk.green('✅ Đã gỡ Aivin khỏi máy này.'));
+      for (const note of notes) console.log(chalk.gray(`   ${note}`));
+      if (toast) showOSNotification({ title: 'AIVIN Bot', body: ['Đã gỡ khỏi máy này.', ...notes].join(' ') });
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      if (toast) showOSNotification({ title: 'AIVIN Bot', body: error.message });
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command('share <paths...>')
+  .description('Attach files / folders to the AIVIN Bot chat box on this computer (like dropping them on the mascot; needs `aivin remote start` running). Windows: right-click → "Share with AIVIN Bot" does the same.')
+  .action((paths) => {
+    const missing = paths.filter((p) => !fs.existsSync(p));
+    if (missing.length) {
+      console.error(chalk.red('❌'), `Không tìm thấy: ${missing.join(', ')}`);
+      process.exit(1);
+    }
+    requestMascotAttach(paths);
+    console.log(chalk.green(`✅ Đã gửi ${paths.length} mục cho AIVIN Bot — gõ câu hỏi trong ô hỏi của bot.`));
   });
 
 program
@@ -1120,6 +1294,16 @@ program
       process.exit(1);
     }
   });
+
+// Agent chạy CLI này trong lệnh shell của nó: không đổi việc ghép máy / luật tại máy, không giao việc mới (sandbox.mjs).
+program.hook('preAction', (_cmd, action) => {
+  try {
+    assertHumanCommand(action.parent?.name(), action.name());
+  } catch (error) {
+    console.error(chalk.red('❌'), error.message);
+    process.exit(1);
+  }
+});
 
 const remoteCommand = program
   .command('remote')
@@ -1174,13 +1358,51 @@ remoteCommand
   .description('Pair (or re-pair) this computer with your account without starting the listener')
   .option('--dir <path>', 'Folder the agent may work in (default: current folder)')
   .option('--name <name>', 'Name shown for this computer (default: hostname)')
+  .option('--code <code>', 'Pair with a one-time code from Aivin (chat box → Browser ▾ → Add this computer) - no `aivin login` needed')
+  .option('--server <url>', 'Aivin server the code belongs to')
+  .option('--full-access', 'Let the agent work anywhere on this computer (with --code)')
   .action(async (options) => {
     try {
+      if (options.code) {
+        // Bộ cài (đã có khay): chỉ ghép — khay thấy máy đã ghép là mở listener.
+        const { creds, stopped } = await pairWithCodeOnly(options);
+        console.log(chalk.green(`✅ Đã kết nối máy "${creds.name}" với tài khoản ${creds.account || 'Aivin của bạn'} — quay lại Aivin để chọn máy này.`));
+        if (stopped) console.log(chalk.gray('   Đã dừng phiên nhận việc cũ — Aivin mở lại bằng kết nối mới.'));
+        return;
+      }
       const roots = [path.resolve(options.dir || process.cwd())];
-      const creds = await pairDevice({ serverUrl: missionServerUrl(), apiKey: process.env.API_KEY, roots, name: options.name, profile: buildDeviceProfile(roots) });
+      const serverUrl = normalizeServerUrl(options.server || missionServerUrl());
+      const currentCreds = loadDeviceCredentials();
+      if (options.server && currentCreds?.server_url && currentCreds.server_url !== serverUrl) {
+        const { proceed } = await inquirer.prompt([{
+          type: 'confirm', name: 'proceed', default: false,
+          message: `Chuyển ghép máy từ ${currentCreds.server_url} sang ${serverUrl}? Máy chủ mới sẽ có quyền điều khiển máy này.`,
+        }]);
+        if (!proceed) return console.log(chalk.gray('Đã huỷ.'));
+      }
+      const apiKey = options.server
+        ? (loadActiveContext(serverUrl)?.api_key || (process.env.AIVIN_BASE_URL === serverUrl ? process.env.API_KEY : undefined))
+        : process.env.API_KEY;
+      if (!apiKey) throw new Error(`Chưa đăng nhập tại ${serverUrl}; chạy ` + '`aivin login ${serverUrl}`' + ` trước, hoặc ghép bằng --code.`);
+      setActiveServer(serverUrl);
+      const creds = await pairDevice({ serverUrl, apiKey, roots, name: options.name, profile: buildDeviceProfile(roots) });
       console.log(chalk.green(`✅ Đã ghép máy "${creds.name}" (${creds.device_id})`));
       console.log(chalk.gray(`   Thư mục được phép: ${creds.roots.join(' | ')}`));
       console.log(chalk.gray('   Chạy `aivin remote start` để bắt đầu nhận việc.'));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('forget-folder <path>')
+  .description('Take back a folder you allowed from "Work here with AIVIN Bot" (the running listener restarts with the shorter list)')
+  .action((dir) => {
+    try {
+      const { removed, stopped } = forgetWorkFolder(dir);
+      if (!removed) return console.log(chalk.yellow(`Thư mục này không nằm trong danh sách đã đồng ý thêm: ${path.resolve(dir)}`));
+      console.log(chalk.green(`✅ Đã thu lại quyền với thư mục: ${path.resolve(dir)}`));
+      if (stopped) console.log(chalk.gray('   Đã dừng phiên nhận việc — khay mở lại với danh sách mới (chạy trong terminal thì chạy lại `aivin remote start`).'));
     } catch (error) {
       remoteFail(error);
     }
@@ -1226,27 +1448,51 @@ remoteCommand
   });
 
 remoteCommand
+  .command('disconnect')
+  .description('Cut off whoever is viewing or controlling this screen; the next session must be allowed on this computer')
+  .action(() => {
+    if (!requestCastStop()) {
+      console.log(chalk.gray('Không có ai đang xem màn hình máy này.'));
+      return;
+    }
+    console.log(chalk.yellow('⏹  Đã gửi lệnh ngắt. Phiên xem sau phải bấm "Cho phép" trên máy này.'));
+  });
+
+remoteCommand
   .command('mascot [action] [combo]')
-  .description('The Aivin mascot floating on screen while the listener runs (Windows): on | off — no argument shows the current setting; hotkey [combo|off|default] — the key combination that calls the mascot (default Win+Alt+Space)')
-  .action((action, combo) => {
+  .description('The Aivin mascot floating on screen while the listener runs (Windows): on | off — no argument shows the current setting; hotkey [combo|off|default] — the key combination for voice (default Alt+Shift+Space; off turns off both keys), with --chat the one that opens the ask box to type (default Alt+Space)')
+  .option('--chat', 'hotkey: show or set the key that opens the ask box instead of the voice key')
+  .action((action, combo, options) => {
     const lang = mascotLang();
     if (action === 'hotkey') {
       try {
-        const setting = loadMascotSettings().hotkey;
+        const settings = loadMascotSettings();
+        const key = options.chat ? 'chat_hotkey' : 'hotkey';
+        const otherKey = options.chat ? 'hotkey' : 'chat_hotkey';
+        const defaults = options.chat ? DEFAULT_CHAT_HOTKEYS : DEFAULT_HOTKEYS;
+        const name = options.chat ? 'Phím tắt mở ô hỏi' : 'Phím tắt nói chuyện';
+        const setting = settings[key];
         if (!combo) {
-          const active = hotkeyCandidates(setting);
-          if (!active.length) return console.log('Phím tắt gọi linh vật: tắt (bật lại: aivin remote mascot hotkey default)');
-          return console.log(`Phím tắt gọi linh vật: ${active[0].label}${setting ? '' : ' (mặc định)'} — không đăng ký được thì thử lần lượt: ${active.slice(1).map((h) => h.label).join(', ')}`);
+          const active = hotkeyCandidates(setting, defaults);
+          if (settings.hotkey === 'off') return console.log(`${name}: tắt (bật lại: aivin remote mascot hotkey default)`);
+          if (!active.length) return console.log(`${name}: tắt (bật lại: aivin remote mascot hotkey --chat default)`);
+          return console.log(`${name}: ${active[0].label}${setting ? '' : ' (mặc định)'} — không đăng ký được thì thử lần lượt: ${active.slice(1).map((h) => h.label).join(', ')}`);
         }
-        if (combo === 'off') { saveMascotSettings({ hotkey: 'off' }); return console.log(chalk.green('✅ Đã tắt phím tắt gọi linh vật.')); }
-        if (combo === 'default') { saveMascotSettings({ hotkey: null }); return console.log(chalk.green(`✅ Dùng phím tắt mặc định ${DEFAULT_HOTKEYS[0]}.`)); }
+        if (combo === 'off') {
+          saveMascotSettings({ [key]: 'off' });
+          return console.log(chalk.green(options.chat ? '✅ Đã tắt phím tắt mở ô hỏi.' : '✅ Đã tắt phím tắt gọi linh vật (cả nói chuyện và mở ô hỏi).'));
+        }
+        if (combo === 'default') { saveMascotSettings({ [key]: null }); return console.log(chalk.green(`✅ ${name}: dùng mặc định ${defaults[0]}.`)); }
         const hotkey = parseHotkey(combo);
+        if (settings[otherKey] && settings[otherKey] !== 'off' && parseHotkey(settings[otherKey]).label === hotkey.label) {
+          throw new Error(`${hotkey.label} đang dùng cho ${options.chat ? 'nói chuyện' : 'mở ô hỏi'} — chọn tổ hợp khác.`);
+        }
         const free = probeHotkey(hotkey);
         if (free === false) {
           console.log(chalk.yellow(`⚠️  ${hotkey.label} đang bị một ứng dụng khác (hoặc chính linh vật đang chạy) giữ — nếu không phải linh vật thì chọn tổ hợp khác.`));
         }
-        saveMascotSettings({ hotkey: hotkey.label });
-        return console.log(chalk.green(`✅ Phím tắt gọi linh vật: ${hotkey.label} — có hiệu lực khi linh vật khởi động lại (aivin remote start).`));
+        saveMascotSettings({ [key]: hotkey.label });
+        return console.log(chalk.green(`✅ ${name}: ${hotkey.label} — có hiệu lực khi linh vật khởi động lại (aivin remote start).`));
       } catch (error) {
         return remoteFail(error);
       }
@@ -1302,7 +1548,7 @@ remoteCommand
 
 remoteCommand
   .command('policy [action] [value]')
-  .description('Rules enforced on this computer itself (Aivin cannot change them): which steps need a click on this computer, tools turned off, extra blocked commands')
+  .description('Rules enforced on this computer itself (Aivin cannot change them): which steps need a click on this computer, tools turned off, extra blocked commands, whether viewing this screen needs a click here (cast ask|unattended|off)')
   .action(async (action, value) => {
     try {
       await runPolicyCommand(action, value);
@@ -1459,6 +1705,57 @@ remoteCommand
       const stats = await index.build();
       index.close();
       console.log(chalk.green(`✅ Chỉ mục: ${stats.files} tệp (${stats.updated} cập nhật, ${stats.removed} bỏ) trong ${stats.ms} ms`));
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('index [action] [folder]')
+  .description('Working folders indexed fully (code too) so agents find everything in them instantly: list (default) | add <folder> | remove <folder>. Agents add one themselves when you tell them in chat where you work')
+  .action((action = 'list', folder) => {
+    try {
+      const creds = loadDeviceCredentials();
+      if (action === 'list') {
+        const folders = loadIndexFolders();
+        if (!folders.length) return console.log(chalk.gray('Chưa có thư mục làm việc nào. Thêm: aivin remote index add <thư mục>'));
+        return folders.forEach((f) => console.log(`📁 ${f}`));
+      }
+      if (!['add', 'remove'].includes(action) || !folder) throw new Error('Dùng: aivin remote index [list | add <thư mục> | remove <thư mục>]');
+      // Chỉ trong thư mục máy cho phép — chỉ mục ngoài đó trả về tệp mà agent không mở được.
+      const abs = creds?.roots?.length ? resolveInRoots(creds.roots, folder) : path.resolve(folder);
+      if (action === 'add') {
+        if (!fs.statSync(abs, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`Không phải thư mục: ${abs}`);
+        saveIndexFolders([...loadIndexFolders(), abs]);
+        console.log(chalk.green(`✅ Đã thêm thư mục làm việc ${abs} — listener đang chạy sẽ lập chỉ mục trong vài giây.`));
+      } else {
+        saveIndexFolders(loadIndexFolders().filter((f) => f !== abs));
+        console.log(chalk.green(`✅ Đã bỏ thư mục làm việc ${abs}`));
+      }
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
+  .command('index-exclude [action] [pattern]')
+  .description('Custom exclude rules for file indexing: list (default) | add <name/pattern> | remove <name/pattern>')
+  .action((action = 'list', pattern) => {
+    try {
+      if (action === 'list') {
+        const excludes = loadIndexExcludes();
+        if (!excludes.length) return console.log(chalk.gray('Chưa có mẫu loại trừ tuỳ biến nào. Thêm: aivin remote index-exclude add <tên_hoặc_mẫu>'));
+        return excludes.forEach((e) => console.log(`🚫 ${e}`));
+      }
+      if (!['add', 'remove'].includes(action) || !pattern) throw new Error('Dùng: aivin remote index-exclude [list | add <mẫu> | remove <mẫu>]');
+      const item = String(pattern).trim();
+      if (action === 'add') {
+        saveIndexExcludes([...loadIndexExcludes(), item]);
+        console.log(chalk.green(`✅ Đã thêm mẫu loại trừ "${item}" — listener đang chạy sẽ áp dụng trong vài giây.`));
+      } else {
+        saveIndexExcludes(loadIndexExcludes().filter((e) => e.toLowerCase() !== item.toLowerCase()));
+        console.log(chalk.green(`✅ Đã xoá mẫu loại trừ "${item}"`));
+      }
     } catch (error) {
       remoteFail(error);
     }
@@ -1908,5 +2205,7 @@ function resolveIsMain() {
 }
 
 if (resolveIsMain()) {
-  program.parse(process.argv);
+  // Tiến trình con WebRTC của xem màn hình từ web (daemon tự gọi, không phải lệnh cho người dùng) — xem lib/remote/desktop/webrtcWorker.mjs.
+  if (process.argv.includes(DESKTOP_WEBRTC_WORKER_ARG)) await runDesktopWebRtcWorker();
+  else program.parse(process.argv);
 }

@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import WSClient from 'ws';
 import {
-  AIVIN_BROWSER_PROFILE_DIR, DEBUG_PORTS, LOCAL_BROWSERS, detectDefaultBrowserId, launchLocalChromeWithDebugging, probeLocalChromeDebugger,
+  AIVIN_BROWSER_PROFILE_DIR, DEBUG_PORTS, LOCAL_BROWSERS, detectDefaultBrowserId, hideAivinBrowserFromTaskbar, launchLocalChromeWithDebugging, probeLocalChromeDebugger,
   resolveBrowserInstall,
 } from '../localBrowser.mjs';
 import { DeviceErrorCode } from './constants.mjs';
@@ -65,12 +65,12 @@ export function detectLocalBrowser() {
  */
 export async function ensureAivinBrowser(preferredId, { ports = DEBUG_PORTS, launch = true, log } = {}) {
   const running = await activeBrowserEndpoint(AIVIN_BROWSER_PROFILE_DIR);
-  if (running) return { wsUrl: running.wsUrl, browserId: (await probeLocalChromeDebugger(running.port)).browserId || preferredId, port: running.port };
+  if (running) { hideAivinBrowserFromTaskbar(AIVIN_BROWSER_PROFILE_DIR); return { wsUrl: running.wsUrl, browserId: (await probeLocalChromeDebugger(running.port)).browserId || preferredId, port: running.port }; }
   // Cửa sổ Aivin đang mở mà không ghi DevToolsActivePort (Edge với cổng cố định) → dùng lại theo dòng lệnh tiến trình, không mở thêm.
   const processPort = await browserPortFromProcesses(AIVIN_BROWSER_PROFILE_DIR);
   if (processPort) {
     const { wsUrl, browserId } = await probeLocalChromeDebugger(processPort);
-    if (wsUrl) return { wsUrl, browserId: browserId || preferredId, port: processPort };
+    if (wsUrl) { hideAivinBrowserFromTaskbar(AIVIN_BROWSER_PROFILE_DIR); return { wsUrl, browserId: browserId || preferredId, port: processPort }; }
   }
   if (!launch) throw new DeviceToolError(DeviceErrorCode.BROWSER_NOT_FOUND, 'The Aivin browser window is no longer running');
   const conflicts = [];
@@ -95,7 +95,23 @@ export async function ensureAivinBrowser(preferredId, { ports = DEBUG_PORTS, lau
 const tokenOf = (t) => (typeof t === 'function' ? t() : t);
 
 /** Khung trình duyệt gửi lên có thể đáng xem (gắn / gỡ phiên, tab mới, trả lời có targetId) — so chuỗi trước, chỉ parse khi cần. */
-const UPSTREAM_INTEREST_RE = /attachedToTarget|detachedFromTarget|targetCreated|targetInfoChanged|"targetId"/;
+const UPSTREAM_INTEREST_RE = /attachedToTarget|detachedFromTarget|targetCreated|targetInfoChanged|targetDestroyed|"targetId"/;
+const KEEPALIVE_MS = 30_000;
+const MAX_EARLY_QUEUE_BYTES = 4 * 1024 * 1024;
+
+function watchSocketAlive(ws, onDead, intervalMs = KEEPALIVE_MS) {
+  if (!intervalMs || typeof ws.ping !== 'function') return () => {};
+  let awaitingPong = false;
+  ws.on('pong', () => { awaitingPong = false; });
+  const timer = setInterval(() => {
+    if (ws.readyState !== WSClient.OPEN) return;
+    if (awaitingPong) { try { ws.terminate?.(); } catch { /* đã đóng */ } onDead(); return; }
+    awaitingPong = true;
+    try { ws.ping(); } catch { /* đang đóng */ }
+  }, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
 
 /**
  * Hai WebSocket nối nhau (BE ↔ trình duyệt), chờ cả hai mở. Một đầu đóng → đóng đầu kia. Lệnh BE gửi xuống đi qua bộ lọc `cdpPolicy.mjs`, cộng:
@@ -109,7 +125,9 @@ export function pipeTunnel({ relayUrl, authorization, chromeWsUrl, signal, downl
   const extensionSessions = new Set();
   const aivinTargets = new Set();
   const pendingCreates = new Set(); // `${sessionId}:${id}` của lệnh Target.createTarget chưa có trả lời
+  let stopKeepalive = () => {};
   const close = () => {
+    stopKeepalive();
     try { toBackend.close(); } catch { /* đã đóng */ }
     try { toChrome.close(); } catch { /* đã đóng */ }
   };
@@ -176,9 +194,13 @@ export function pipeTunnel({ relayUrl, authorization, chromeWsUrl, signal, downl
       // Tab bật ra từ tab AI (window.open, target=_blank) cũng là của AI.
       const info = params.targetInfo;
       if (msg.method === 'Target.targetCreated' && info?.type === 'page' && aivinTargets.has(info.openerId)) markAivin(info.targetId);
+    } else if (msg.method === 'Target.targetDestroyed' && params.targetId) {
+      extensionTargets.delete(params.targetId);
+      aivinTargets.delete(params.targetId);
     }
   });
   relay(toChrome, toBackend);
+  stopKeepalive = watchSocketAlive(toBackend, close);
   const opened = (ws) => new Promise((resolve, reject) => {
     ws.once('open', resolve);
     ws.once('error', reject);
@@ -198,13 +220,23 @@ function pipeTunnelToMux({ relayUrl, authorization, mux, signal }) {
   let client = null;
   let closed = false;
   const early = [];
+  let earlyBytes = 0;
+  let stopKeepalive = () => {};
   const close = () => {
+    stopKeepalive();
     if (closed) return;
     closed = true;
     try { toBackend.close(); } catch { /* đã đóng */ }
     client?.close();
   };
-  toBackend.on('message', (data) => { if (client) client.send(String(data)); else early.push(String(data)); });
+  toBackend.on('message', (data) => {
+    const str = String(data);
+    if (client) { client.send(str); return; }
+    earlyBytes += Buffer.byteLength(str);
+    if (earlyBytes > MAX_EARLY_QUEUE_BYTES) { try { toBackend.close(1009, 'too much data before pairing'); } catch { /* đã đóng */ } close(); return; }
+    early.push(str);
+  });
+  stopKeepalive = watchSocketAlive(toBackend, close);
   toBackend.on('close', close);
   toBackend.on('error', close);
   const onAbort = () => close();
@@ -264,7 +296,7 @@ async function findDownload(dir, name, since, signal) {
  */
 export function createBrowserTunnels({
   serverUrl, deviceToken, authorization, browser, downloadsDir = AIVIN_DOWNLOADS_DIR, say = () => {}, ensureBrowser = ensureAivinBrowser,
-  useDailyBrowser = true, findDaily = findDailyBrowser, createMux = createCdpMux, notify = showOSNotification,
+  useDailyBrowser = false, findDaily = findDailyBrowser, createMux = createCdpMux, notify = showOSNotification,
   groupTabs = true, createGrouper = createTabGrouper,
 }) {
   const live = new Map(); // tunnelId → { close, done, deliberate }
@@ -364,7 +396,14 @@ export function createBrowserTunnels({
   async function readDownload(args, ctx) {
     const name = String(args?.name || '');
     if (!name || name !== path.basename(name) || name.includes('..')) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Invalid file name');
-    const hit = await findDownload(downloadsDir, name, Number(args?.since) || 0, ctx?.signal);
+    const reqOffset = Math.max(0, Number(args?.offset) || 0);
+    const since = Number(args?.since) || 0;
+    let hit = null;
+    if (reqOffset > 0 && !name.endsWith(PARTIAL_SUFFIX)) {
+      const st = await fs.promises.stat(path.join(downloadsDir, name)).catch(() => null);
+      if (st?.isFile() && st.mtimeMs >= since - 2000) hit = { name, size: st.size };
+    }
+    if (!hit) hit = await findDownload(downloadsDir, name, since, ctx?.signal);
     if (!hit) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `Downloaded file not found: ${name}`);
     const offset = Math.max(0, Number(args?.offset) || 0);
     const length = Math.min(Math.max(0, Number(args?.length) || MAX_READ_BYTES), MAX_READ_BYTES, Math.max(0, hit.size - offset));

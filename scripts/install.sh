@@ -12,16 +12,18 @@
 #          --dir <folder the agent may use> --version <e.g. v1.1.0>
 # Environment: AIVIN_DOWNLOAD_ROOT (versioned site: <root>/latest.txt + <root>/<version>/<asset>, default https://get.aivin.vn),
 #              AIVIN_DOWNLOAD_BASE (one folder holding every asset, e.g. a GitHub release - overrides the root),
+#              AIVIN_SERVER (server to use; otherwise every install infers api.aivin.vn/cloud from get.aivin.vn/cloud),
+#              AIVIN_PRESERVE_SERVER=1 (keep the existing server when reinstalling from another download domain),
 #              AIVIN_INSTALL_DIR (default: ~/.local/bin),
 #              AIVIN_NO_AUTOSTART=1 (don't start Aivin with the computer - can be turned on later in Aivin's menu),
 #              AIVIN_NO_DESKTOP=1 (no menu bar / tray app and no app menu entry; Linux without a graphical session never gets them).
 set -eu
 
-CODE=""; SERVER=""; DIR=""; FULL=""; VERSION="${AIVIN_VERSION:-}"
+CODE=""; SERVER=""; SERVER_EXPLICIT=""; DIR=""; FULL=""; VERSION="${AIVIN_VERSION:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --code) CODE="$2"; shift 2 ;;
-    --server) SERVER="$2"; shift 2 ;;
+    --server) SERVER="$2"; SERVER_EXPLICIT=1; shift 2 ;;
     --dir) DIR="$2"; shift 2 ;;
     --full-access) FULL=1; shift ;;
     --version) VERSION="$2"; shift 2 ;;
@@ -57,6 +59,24 @@ download() {
   else fail "curl or wget is required."; fi
 }
 
+download_with_progress() {
+  if command -v curl >/dev/null 2>&1; then
+    if [ -t 1 ]; then
+      curl -# -fSL "$1" -o "$2"
+    else
+      curl -fsSL "$1" -o "$2"
+    fi
+  elif command -v wget >/dev/null 2>&1; then
+    if [ -t 1 ]; then
+      wget -q --show-progress -O "$2" "$1"
+    else
+      wget -qO "$2" "$1"
+    fi
+  else
+    fail "curl or wget is required."
+  fi
+}
+
 if [ -n "${AIVIN_DOWNLOAD_BASE:-}" ]; then
   BASE="${AIVIN_DOWNLOAD_BASE%/}"
 else
@@ -71,6 +91,17 @@ else
   fi
   BASE="$ROOT/$VERSION"
 fi
+
+# Match the Aivin environment to the download host on every install. AIVIN_PRESERVE_SERVER=1
+# keeps a deliberate existing selection during a reinstall.
+SERVER_CONFIG="${AIVIN_REMOTE_HOME:-$HOME/.aivin}/server.json"
+if [ -z "$SERVER" ] && [ -n "${AIVIN_SERVER:-}" ]; then SERVER="$AIVIN_SERVER"; SERVER_EXPLICIT=1; fi
+if [ -z "$SERVER" ] && [ -z "${AIVIN_DOWNLOAD_BASE:-}" ]; then
+  case "${ROOT:-}" in
+    https://get.aivin.vn|https://get.aivin.vn/*) SERVER=https://api.aivin.vn ;;
+    https://get.aivin.cloud|https://get.aivin.cloud/*) SERVER=https://api.aivin.cloud ;;
+  esac
+fi
 INSTALL_DIR="${AIVIN_INSTALL_DIR:-$HOME/.local/bin}"
 TARGET="$INSTALL_DIR/aivin"
 
@@ -84,7 +115,7 @@ echo "  Aivin - installing the computer connector"
 say "Downloading $ASSET ..."
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-download "$BASE/$ASSET.gz" "$TMP/$ASSET.gz" || fail "Could not download $ASSET from $BASE - check the network, or this platform may not be published yet."
+download_with_progress "$BASE/$ASSET.gz" "$TMP/$ASSET.gz" || fail "Could not download $ASSET from $BASE - check the network, or this platform may not be published yet."
 download "$BASE/SHA256SUMS" "$TMP/SHA256SUMS" || fail "Could not download the checksum list from $BASE."
 
 # Integrity: the download must match the checksum published with the same release.
@@ -116,6 +147,15 @@ INSTALLED_VERSION="$("$TARGET.new" --version 2>/dev/null)" || { rm -f "$TARGET.n
 mv -f "$TARGET.new" "$TARGET"
 
 say "Installed aivin $INSTALLED_VERSION to $INSTALL_DIR"
+if [ -n "$SERVER" ] && { [ -n "$SERVER_EXPLICIT" ] || [ "${AIVIN_PRESERVE_SERVER:-0}" != "1" ] || [ ! -f "$SERVER_CONFIG" ]; }; then
+  OLD_SERVER=""
+  if [ -f "$SERVER_CONFIG" ]; then OLD_SERVER="$(sed -n 's/.*"server_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SERVER_CONFIG" | head -n 1)"; fi
+  if [ -n "$OLD_SERVER" ] && [ "${OLD_SERVER%/}" != "${SERVER%/}" ]; then
+    say "Switching Aivin server from $OLD_SERVER to $SERVER; running remote work will stop and this computer may need to be paired again"
+  fi
+  "$TARGET" server "$SERVER" --force >/dev/null || fail "Could not select Aivin server $SERVER."
+  say "Using Aivin server $SERVER"
+fi
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) echo "  $INSTALL_DIR is not on your PATH - add this line to ~/.zshrc or ~/.bashrc to type 'aivin' anywhere:"

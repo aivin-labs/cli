@@ -4,7 +4,9 @@ import { spawn } from 'child_process';
 import { DeviceErrorCode, ToolGroup } from '../constants.mjs';
 import { DeviceToolError, resolveInRoots } from '../sandbox.mjs';
 import { showOSNotification } from '../notify.mjs';
+import { PS_UTF8_PREFIX } from '../processes.mjs';
 import { createWindowsHost } from './windowsHost.mjs';
+import { isProtectedPromptWindow } from '../humanInput.mjs';
 
 /**
  * Tầng điều khiển giao diện (28/10/2026, đợt 1: Windows). Nhìn cửa sổ bằng cây trợ năng của hệ điều hành (UI Automation) + ảnh khi cây
@@ -46,6 +48,7 @@ const OPEN_WAIT_MS = 10_000;
 const WAIT_MAX_MS = 60_000;
 const FIND_DEFAULT = 20;
 const FIND_MAX = 60;
+const SEMANTIC_CHOICES = 5;
 /** Báo người dùng "AI đang điều khiển" một lần mỗi quãng này (lần thao tác ghi đầu tiên). */
 const NOTIFY_EVERY_MS = 5 * 60_000;
 
@@ -71,6 +74,10 @@ const normalizeProcess = (name) => String(name || '').toLowerCase().replace(/\.e
 
 /** Ứng dụng này có được điều khiển không — ném lỗi nếu bị chặn. */
 export function assertWindowAllowed(windowInfo, { fullAccess }) {
+  // Hộp xác nhận / đồng ý của chính Aivin: chỉ người ở máy trả lời — AI bấm "Cho phép" là tự duyệt việc của mình (humanInput.mjs).
+  if (isProtectedPromptWindow(windowInfo?.title)) {
+    throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, 'This is an Aivin confirmation box — only the person at this computer can answer it');
+  }
   const proc = normalizeProcess(windowInfo?.process);
   if (!proc) return;
   if (BLOCKED_PROCESSES.has(proc)) throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, `Controlling "${windowInfo.process}" is not allowed on this device`);
@@ -87,7 +94,64 @@ export function assertAppAllowed(name, { fullAccess }) {
   }
 }
 
-const normalizeName = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const normalizeName = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/gi, 'd').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * Rank UI nodes with richer evidence while keeping the model-facing schema small. Hard exclusions happen
+ * before scoring; exact accessible names and AutomationIds beat loose word matches. The margin between the
+ * first two candidates is used by gui.do to refuse ambiguous actions instead of guessing.
+ */
+export function rankGuiNodes(nodes, query, role = '', { matchValue = true } = {}) {
+  const q = normalizeName(query);
+  const words = q.split(' ').filter(Boolean);
+  const wantedRole = String(role || '').toLowerCase();
+  if (!words.length) return [];
+  return (nodes || [])
+    .filter((n) => (!wantedRole || String(n.role || '').toLowerCase() === wantedRole || n.source === 'ocr') && !n.disabled && !n.offscreen)
+    .map((node, order) => {
+      const name = normalizeName(node.name);
+      const aid = normalizeName(node.automation_id);
+      const value = matchValue ? normalizeName(node.value) : '';
+      const help = normalizeName(node.help);
+      const combined = [name, aid, value, help].filter(Boolean).join(' ');
+      const hits = words.filter((word) => combined.includes(word)).length;
+      if (!hits) return null;
+      let score = Math.round((hits / words.length) * 50);
+      const evidence = [];
+      if (name === q) { score += 50; evidence.push('exact_name'); }
+      else if (aid === q) { score += 45; evidence.push('exact_automation_id'); }
+      else if (name.startsWith(q)) { score += 35; evidence.push('name_prefix'); }
+      else if (words.every((word) => name.includes(word))) { score += 30; evidence.push('all_words_in_name'); }
+      else if (words.every((word) => combined.includes(word))) { score += 20; evidence.push('all_words'); }
+      if (node.source === 'ocr') { score -= 5; evidence.push('ocr'); }
+      if (node.patterns?.length) { score += 3; evidence.push('actionable_pattern'); }
+      return { node, score, hits, evidence, order };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || b.hits - a.hits || a.order - b.order);
+}
+
+/**
+ * Nhãn nút chốt / phá huỷ (đã bỏ dấu, viết thường). Cổng duyệt trên BE xét câu mô tả, nên khi máy tự chọn phần tử có nhãn kiểu này mà câu
+ * mô tả không nói tới (vd "Lưu" khớp tiền tố "Lưu và gửi") thì không bấm thẳng — trả mơ hồ để BE phân giải + xét sàn an toàn trên đúng nút.
+ */
+const RISKY_LABEL_WORDS = new Set([
+  'send', 'submit', 'post', 'publish', 'delete', 'remove', 'erase', 'pay', 'purchase', 'buy', 'order', 'confirm', 'approve', 'transfer', 'logout', 'signout',
+  'gui', 'dang', 'xoa', 'go', 'huy', 'mua', 'chuyen', 'duyet',
+]);
+const RISKY_LABEL_PHRASES = ['sign out', 'log out', 'thanh toan', 'xac nhan', 'dang xuat', 'dat hang', 'chuyen tien', 'go bo'];
+
+export function riskyLabelWords(label) {
+  const n = normalizeName(label);
+  const words = n.split(' ').filter((w) => RISKY_LABEL_WORDS.has(w));
+  return [...words, ...RISKY_LABEL_PHRASES.filter((p) => ` ${n} `.includes(` ${p} `))];
+}
+
+/** Phần tử đã chọn mang nhãn chốt / phá huỷ mà câu mô tả không có → không bấm thẳng. */
+export function needsServerCheck(query, node) {
+  const asked = new Set(riskyLabelWords(query));
+  return riskyLabelWords(node?.name || node?.automation_id).some((w) => !asked.has(w));
+}
 
 /** Chọn ứng dụng theo tên: trùng hẳn > bắt đầu bằng > chứa. Nhiều ứng viên ngang nhau → trả danh sách để Planner chọn lại. */
 export function matchApps(apps, query) {
@@ -105,14 +169,16 @@ export function matchApps(apps, query) {
 
 function runPowerShellJson(script, signal) {
   return new Promise((resolve, reject) => {
-    const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true });
-    let out = '';
-    c.stdout.on('data', (d) => { out += d.toString(); });
+    // Đầu ra UTF-8: tên cửa sổ / ứng dụng tiếng Việt không thành `?` (PowerShell không console ghi theo bảng mã OEM).
+    const c = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `${PS_UTF8_PREFIX}${script}`], { windowsHide: true });
+    const chunks = [];
+    c.stdout.on('data', (d) => { chunks.push(d); });
     const onAbort = () => { try { c.kill(); } catch { /* đã thoát */ } };
     signal?.addEventListener('abort', onAbort, { once: true });
     c.on('error', (e) => reject(e));
     c.on('close', () => {
       signal?.removeEventListener('abort', onAbort);
+      const out = Buffer.concat(chunks).toString('utf8');
       try { const v = JSON.parse(out || 'null'); resolve(Array.isArray(v) ? v : v ? [v] : []); } catch (e) { reject(e); }
     });
   });
@@ -122,9 +188,10 @@ function runPowerShellJson(script, signal) {
  * Bộ điều khiển GUI của máy. `env.fullAccess` quyết định có cho điều khiển terminal không. `host` truyền vào được (test dùng host giả).
  */
 export function createGuiController({
-  fullAccess = false, host = createWindowsHost(), notify = showOSNotification, say = () => {}, background = true, defaultWindow = () => null,
+  fullAccess = false, host = createWindowsHost(), notify = showOSNotification, say = () => {}, background = true, defaultWindow = () => null, fetchApps = (signal) => runPowerShellJson('Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress', signal),
 } = {}) {
   let appsCache = null;
+  let appsInflight = null;
   let lastNotifyAt = 0;
   /** Cửa sổ của từng lần observe — để kiểm ứng dụng bị chặn ở thao tác theo node_id. */
   const snapshotWindows = new Map();
@@ -139,7 +206,7 @@ export function createGuiController({
 
   async function windows(args, ctx) {
     const list = await host.call('windows', { all: !!args.include_dialogs }, ctx);
-    return { windows: list.map((w) => ({ ...w, blocked: BLOCKED_PROCESSES.has(normalizeProcess(w.process)) || (!fullAccess && SHELL_PROCESSES.has(normalizeProcess(w.process))) || undefined })) };
+    return { windows: list.map((w) => ({ ...w, blocked: BLOCKED_PROCESSES.has(normalizeProcess(w.process)) || (!fullAccess && SHELL_PROCESSES.has(normalizeProcess(w.process))) || isProtectedPromptWindow(w.title) || undefined })) };
   }
 
   /**
@@ -148,6 +215,14 @@ export function createGuiController({
    */
   const target = (args) => (args.window ? { window: args.window } : { ...defaultWindow() });
   const windowInfoOf = (args, ctx) => host.call('window_info', target(args), ctx);
+  /**
+   * Thao tác có thay đổi mà không nêu cửa sổ (02/11/2026): không lấy cửa sổ đang focus — người dùng có thể vừa chuyển sang cửa sổ khác. Chỉ
+   * cho khi hỏi từ linh vật (có cửa sổ chủ máy dùng ngay trước đó); host kiểm lại đúng lúc thao tác (linh vật có đang được focus không).
+   */
+  const assertWindowNamed = (windowArg) => {
+    if (windowArg || defaultWindow()?.fallback) return;
+    throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Name the window for this action (window / within: a handle 0x… or a title/process from gui.windows) — input is never sent to whatever window happens to be focused');
+  };
 
   async function observe(args, ctx) {
     const res = await host.call('observe', {
@@ -176,16 +251,87 @@ export function createGuiController({
     const role = String(args.role || '').toLowerCase();
     const max = Math.max(1, Math.min(Number(args.max) || FIND_DEFAULT, FIND_MAX));
     const res = await observe({ ...args, max_nodes: 1500 }, ctx);
-    const scored = (res.nodes || [])
-      .filter((n) => !role || n.role === role)
-      .map((n) => {
-        const text = normalizeName([n.name, n.automation_id, n.value, n.help].filter(Boolean).join(' '));
-        return { n, hits: words.filter((w) => text.includes(w)).length };
-      })
-      .filter((x) => x.hits > 0);
+    // gui.do chọn phần tử để BẤM: không tính nội dung ô — chữ trên màn hình (thư, trang web) không được lái việc chọn nút (02/11/2026).
+    const scored = rankGuiNodes(res.nodes, args.query, role, { matchValue: args.match_value !== false });
     const all = scored.filter((x) => x.hits === words.length);
-    const picked = (all.length ? all : scored.sort((a, b) => b.hits - a.hits)).slice(0, max).map((x) => x.n);
-    return { ...res, nodes: picked, query: String(args.query), matched: all.length ? all.length : scored.length, exact: all.length > 0 };
+    const pool = all.length ? all : scored.filter((x) => x.hits === scored[0]?.hits);
+    const picked = pool.slice(0, max);
+    const margin = picked.length > 1 ? picked[0].score - picked[1].score : picked.length ? picked[0].score : 0;
+    const out = { ...res, nodes: picked.map((x) => x.node), query: String(args.query), matched: all.length || scored.length, exact: all.length > 0, confidence: !picked.length ? 'none' : margin >= 15 || picked.length === 1 ? 'high' : margin >= 5 ? 'medium' : 'low', ambiguous: picked.length > 1 && margin < 5 || undefined };
+    Object.defineProperty(out, '_raw_observation', { value: res, enumerable: false });
+    return out;
+  }
+
+  /**
+   * Compact semantic fast path. The caller states intent; candidate evidence, exclusions, ambiguity handling,
+   * execution and cheap post-action verification stay inside the device runtime.
+   */
+  async function semanticDo(args, ctx, env) {
+    const command = String(args.do || '').toLowerCase();
+    if (command === 'open') return openApp({ name: args.target, file: args.file }, ctx, env);
+    const action = {
+      click: GuiAction.CLICK, fill: GuiAction.SET_VALUE, select: GuiAction.SELECT, toggle: GuiAction.TOGGLE,
+      key: GuiAction.KEY, scroll: GuiAction.SCROLL,
+    }[command];
+    if (!action) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Unknown semantic action: ${args.do || ''}`);
+    assertWindowNamed(args.within || args.window);
+
+    if ((command === 'key' || command === 'scroll') && !args.target) {
+      const result = await act({
+        action, window: args.within || args.window, keys: command === 'key' ? args.value : undefined,
+        direction: command === 'scroll' ? args.value : undefined,
+      }, ctx);
+      return { ok: true, action: command, effect: result.window_title_changed || result.focused_element || command };
+    }
+
+    const query = String(args.target || '').trim();
+    if (!query) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give target');
+    let found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, match_value: false }, ctx);
+    if (!found.nodes.length && !found.ocr && found.tree_quality !== 'poor') {
+      found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, match_value: false, ocr: true }, ctx);
+    }
+    if (!found.nodes.length) throw new DeviceToolError(DeviceErrorCode.GUI_TARGET_NOT_FOUND, `No enabled visible target matched "${query}"`);
+    if (found.ambiguous) {
+      return {
+        ok: false, code: DeviceErrorCode.GUI_AMBIGUOUS_TARGET,
+        choices: found.nodes.map((n) => ({ ref: n.id, label: [n.name || n.automation_id || n.role, n.role].filter(Boolean).join(' — ') })),
+        observation: found._raw_observation,
+      };
+    }
+
+    const node = found.nodes[0];
+    if (command !== 'fill' && needsServerCheck(query, node)) {
+      return {
+        ok: false, code: DeviceErrorCode.GUI_AMBIGUOUS_TARGET,
+        choices: found.nodes.map((n) => ({ ref: n.id, label: [n.name || n.automation_id || n.role, n.role].filter(Boolean).join(' — ') })),
+        observation: found._raw_observation,
+      };
+    }
+    if (command === 'fill' && node.password) {
+      throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'AI may not fill password or secret fields — ask the user to enter it');
+    }
+    const result = await act({
+      action, node_id: node.id,
+      text: command === 'fill' ? args.value : undefined,
+      option: command === 'select' ? args.value : undefined,
+      state: command === 'toggle' ? args.value : undefined,
+    }, ctx);
+    let verified;
+    if (command === 'fill' && Object.hasOwn(result.target || {}, 'value')) verified = String(result.target.value) === String(args.value ?? '');
+    if (command === 'select' && Object.hasOwn(result.target || {}, 'selected')) verified = result.target.selected === true;
+    if (command === 'toggle' && Object.hasOwn(result.target || {}, 'checked')) {
+      const expected = String(args.value || '').toLowerCase();
+      verified = expected === 'on' ? result.target.checked === 'on' : expected === 'off' ? result.target.checked === 'off' : undefined;
+    }
+    if (verified === false) {
+      throw new DeviceToolError(DeviceErrorCode.GUI_NO_EFFECT, `${command} ran but the target did not reach the requested state`);
+    }
+    return {
+      ok: true, action: command, target: node.name || node.automation_id || node.role,
+      ...(verified === undefined ? {} : { verified }),
+      ...(result.screen_point ? { screen_point: result.screen_point } : {}),
+      effect: result.window_title_changed || result.target || result.focused_element || command,
+    };
   }
 
   /** Chờ phần tử / cửa sổ hiện ra hoặc mất đi — chỉ đọc. Chờ trong một cửa sổ thì cửa sổ đó phải được phép điều khiển. */
@@ -208,6 +354,8 @@ export function createGuiController({
     const action = String(args.action || GuiAction.CLICK);
     if (!Object.values(GuiAction).includes(action)) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `Unknown action: ${action}`);
     const snap = args.node_id ? String(args.node_id).split('.')[0] : null;
+    // node_id đã chỉ đúng phần tử của một lần observe (kèm cửa sổ của nó) — chỉ thao tác không node_id mới phải nêu cửa sổ.
+    if (!snap) assertWindowNamed(args.window);
     const windowInfo = snap ? snapshotWindows.get(snap) : await windowInfoOf(args, ctx);
     if (snap && !windowInfo) throw new DeviceToolError(DeviceErrorCode.GUI_STALE_NODE, `Node ${args.node_id} is from an old observation — observe again`);
     assertWindowAllowed(windowInfo, { fullAccess });
@@ -222,10 +370,14 @@ export function createGuiController({
 
   async function listApps(signal) {
     if (appsCache && Date.now() - appsCache.at < APPS_CACHE_MS) return appsCache.apps;
-    const rows = await runPowerShellJson('Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress', signal).catch(() => []);
-    const apps = rows.filter((r) => r?.Name && r?.AppID).map((r) => ({ name: String(r.Name), app_id: String(r.AppID) }));
-    appsCache = { at: Date.now(), apps };
-    return apps;
+    if (appsInflight && !signal) return appsInflight;
+    const task = Promise.resolve().then(() => fetchApps(signal)).catch(() => []).then((rows) => {
+      const apps = (rows || []).filter((r) => r?.Name && r?.AppID).map((r) => ({ name: String(r.Name), app_id: String(r.AppID) }));
+      if (apps.length) appsCache = { at: Date.now(), apps };
+      return apps.length ? apps : (appsCache?.apps || []);
+    }).finally(() => { if (appsInflight === task) appsInflight = null; });
+    if (!signal) appsInflight = task;
+    return task;
   }
 
   async function waitNewWindow(before, ctx, hint) {
@@ -275,21 +427,28 @@ export function createGuiController({
     return { opened: app.name, window: win, hint: win ? undefined : 'App started but no new window yet — call gui.windows in a moment' };
   }
 
-  return { windows, observe, find, waitFor, focus, act, openApp, close: () => host.close() };
+  return { windows, observe, find, waitFor, focus, act, semanticDo, openApp, prewarm: () => listApps(), close: () => host.close() };
 }
 
 /** Công cụ GUI cho danh mục của Planner. */
 export function buildGuiTools(gui) {
   const target = {
     node_id: str('target element id from the latest gui.observe (preferred)'),
-    window: str('window handle (0x…) or a title/process to match; default the focused window (asked from the mascot: the window the person was using)'),
+    window: str('window handle (0x…) or a title/process to match; reading defaults to the focused window, but an action without node_id must name it (asked from the mascot: the window the person was using)'),
   };
   return [
+    { name: 'gui.do', group: ToolGroup.GUI, handler: (a, c, e) => gui.semanticDo(a, c, e),
+      description: 'Fast semantic desktop action. State the intent briefly; the device finds one enabled visible target, refuses ambiguity, acts, and verifies simple value/state changes. Use precise gui.find/gui.act only after an ambiguous result.',
+      input_schema: schema({
+        do: str('click | fill | select | toggle | key | scroll | open'), target: str('short visible label or app name'),
+        value: str('text, option, on/off, key chord, or scroll direction'), within: str('window title/process to act in (required, except when asked from the mascot)'),
+        role: str('optional role such as button or edit'), file: str('document path for open'),
+      }, ['do']) },
     { name: 'gui.windows', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.windows(a, c),
       description: 'List open desktop windows: title, app process, handle, position, which is focused/minimized. blocked = the AI may not control it.',
       input_schema: schema({ include_dialogs: bool('also list owned dialogs') }) },
     { name: 'gui.observe', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.observe(a, c),
-      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window.',
+      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window. image_error = no screenshot this time (the app can only be captured from the screen and the window is behind/covered — gui.focus it first if a screenshot is needed).',
       input_schema: schema({
         window: target.window, include_image: bool('attach a screenshot even when the tree is good'), max_nodes: num('default 300'),
         ocr: bool('read the text on the window even when the tree is good (default: only when poor)'),
@@ -311,7 +470,7 @@ export function buildGuiTools(gui) {
       description: 'Bring a window to the front (restores it if minimized).',
       input_schema: schema({ window: target.window }, ['window']) },
     { name: 'gui.act', group: ToolGroup.GUI, handler: (a, c) => gui.act(a, c),
-      description: 'Do one action on an element (node_id) or at a point of the last screenshot: click, double_click, right_click, set_value (replace a field\'s text), type (keystrokes into the focused element), key (shortcut like "ctrl+s", "alt+f4", "enter"), scroll, select (option of a list/combo), toggle, expand, collapse, drag. Uses accessibility actions first (works even when the window is behind), real mouse/keyboard otherwise. Returns evidence: the element\'s new value/state, window title change, focused element. OCR text nodes ("4.t2") take click / double_click / right_click, or set_value / type (clicks there, then types). Stops with GUI_USER_ACTIVE if the person is using the mouse/keyboard.',
+      description: 'Do one action on an element (node_id) or at a point of the last screenshot: click, double_click, right_click, set_value (replace a field\'s text), type (keystrokes into the focused element), key (shortcut like "ctrl+s", "alt+f4", "enter"), scroll, select (option of a list/combo), toggle, expand, collapse, drag. Uses accessibility actions first (works even when the window is behind), real mouse/keyboard otherwise. Returns evidence: the element\'s new value/state, window title change, focused element. OCR text nodes ("4.t2") take click / double_click / right_click, or set_value / type (clicks there, then types). Without node_id give window. Stops with GUI_USER_ACTIVE if the person is using the mouse/keyboard, and with GUI_FOCUS_LOST (nothing clicked / the rest not typed) if real mouse/keyboard input could not reach the window — it could not come to the front, or another window covers the point.',
       input_schema: schema({
         action: str(Object.values(GuiAction).join(' | ')), ...target, text: str('text for set_value / type'), keys: str('for key: e.g. "ctrl+s", several separated by spaces'),
         option: str('for select: the option name'), state: str('for toggle: on | off'), direction: str('for scroll: up | down | left | right'), amount: num('scroll steps, default 3'),

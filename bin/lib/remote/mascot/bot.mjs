@@ -20,6 +20,8 @@ export const BOT_RIG = Object.freeze({
   earR: { x: 170.6, y: 97.3, w: 12, h: 33 },
   /** Mặt vẽ theo đơn vị gốc rồi phóng FACE_SCALE, tâm đặt hơi dưới tâm kính. */
   face: { x: 97.2, y: 90.5, scale: 1.6, eyeDx: 15, eyeY: -3.5, mouthY: 10.5 },
+  /** Mắt khi có người đang xem máy: đoạn sóng sin rộng ±halfWidth, biên độ amp, bước sóng length (đơn vị mặt), trôi hz vòng/giây. */
+  wave: { halfWidth: 9.5, amp: 4.2, length: 15, hz: 1.1, segments: 24, stroke: 3.6 },
   /**
    * Màn hình 3D khi đang làm (Viewport3D thật, phối cảnh): tấm chính trước ngực + hai tấm nhỏ hai bên quây quanh bot. Bot chăm chú nhìn
    * lần lượt từng màn (mắt + đầu hướng theo `look` / `head`, màn đang nhìn sáng lên), ở mỗi màn `dwell` giây (ngẫu nhiên trong khoảng).
@@ -67,10 +69,19 @@ export const BOT_FACES = Object.freeze({
   // Phản ứng (hostSource.mjs): xong sau khi lỗi → nhắm mắt thở phào; rảnh lâu sắp ngủ gật → ngáp.
   relief: { eyes: 'closed', mouth: 'smile' },
   yawn: { eyes: 'closed', mouth: 'open' },
+  // Cử chỉ biểu cảm mở rộng:
+  wink: { eyes: 'wink', mouth: 'grin' },
+  curious: { eyes: 'curious', mouth: 'hmm' },
+  star: { eyes: 'star', mouth: 'grin' },
+  // Theo emoji của câu trả lời (mood.mjs): xin lỗi / tiếc → mắt cụp, lông mày xếch trong, miệng mếu; ngượng (😅) → cười híp, miệng méo.
+  sad: { eyes: 'droop', mouth: 'frown' },
+  // Khóc (😭 / 😢): mắt cụp như buồn, miệng mếu há; nước mắt do rig vẽ (BOT_TEARS).
+  cry: { eyes: 'droop', mouth: 'wail' },
+  sheepish: { eyes: 'happy', mouth: 'hmm' },
 });
 
-export const BOT_EYES = Object.freeze(['open', 'focus', 'up', 'wide', 'happy', 'closed', 'sad', 'dizzy']);
-export const BOT_MOUTHS = Object.freeze(['smile', 'flat', 'hmm', 'open', 'grin', 'wobble', 'talk']);
+export const BOT_EYES = Object.freeze(['open', 'focus', 'up', 'wide', 'happy', 'closed', 'sad', 'dizzy', 'wink', 'curious', 'star', 'droop', 'wave']);
+export const BOT_MOUTHS = Object.freeze(['smile', 'flat', 'hmm', 'open', 'grin', 'wobble', 'talk', 'frown', 'wail']);
 
 /**
  * Thông số chuyển động theo trạng thái (đơn vị bot / độ / Hz). Giá trị hiện tại luôn trượt dần về đích nên đổi trạng thái không giật.
@@ -101,22 +112,45 @@ const pill = (w, h, blink) => `<Rectangle Canvas.Left="${-w / 2}" Canvas.Top="${
 
 /** Mắt xoắn ốc (chóng mặt): các nửa vòng tròn nối nhau to dần quanh (0,0); rig quay `spin` (BOT_SPINS). */
 const spiral = (spin) => `<Path Data="M0,0 A1.6,1.6 0 0 1 3.2,0 A3.2,3.2 0 0 1 -3.2,0 A4.8,4.8 0 0 1 6.4,0 A6.4,6.4 0 0 1 -6.4,0" ${glowStroke(2.4)} Fill="{x:Null}"><Path.RenderTransform><RotateTransform x:Name="${spin}"/></Path.RenderTransform></Path>`;
+/** Mắt ngôi sao 4 cánh phát sáng (hào hứng / ăn mừng). */
+const starEye = `<Path Data="M0,-6.5 Q1.2,-1.2 6.5,0 Q1.2,1.2 0,6.5 Q-1.2,1.2 -6.5,0 Q-1.2,-1.2 0,-6.5 Z" ${glowStroke(2.2)} Fill="${GLOW}"/>`;
 /** Tên các RotateTransform của mắt xoắn ốc (rigSource.mjs quay khi chóng mặt). */
 export const BOT_SPINS = Object.freeze(['SpinL', 'SpinR']);
 
 /** Kiểu mắt: [trái, phải?] — thiếu phải thì dùng như trái. Mắt viên thuốc nào có tên Blink* thì chớp được. */
+const waveEye = (name) => `<Polyline x:Name="${name}" Points="${-BOT_RIG.wave.halfWidth},0 ${BOT_RIG.wave.halfWidth},0" ${glowStroke(BOT_RIG.wave.stroke)}/>`;
 const EYE_SHAPES = {
   open: [pill(10, 14, 'BlinkL'), pill(10, 14, 'BlinkR')],
   focus: [pill(10, 8, 'BlinkFL'), pill(10, 8, 'BlinkFR')],
-  up: [`<Canvas Canvas.Left="2" Canvas.Top="-3.5">${pill(9, 12)}</Canvas>`],
+  up: [
+    `<Canvas Canvas.Left="2" Canvas.Top="-3.5">${pill(9, 12, 'BlinkUL')}</Canvas>`,
+    `<Canvas Canvas.Left="2" Canvas.Top="-3.5">${pill(9, 12, 'BlinkUR')}</Canvas>`,
+  ],
   wide: [pill(12.5, 16, 'BlinkWL'), pill(12.5, 16, 'BlinkWR')],
   happy: [`<Path Data="M-8,3 Q0,-8 8,3" ${glowStroke()} Fill="{x:Null}"/>`],
   closed: [`<Path Data="M-7,0 Q0,5 7,0" ${glowStroke()} Fill="{x:Null}"/>`],
   sad: [`<Path Data="M-7,3 Q-1,-5 7,-1" ${glowStroke()} Fill="{x:Null}"/>`, `<Path Data="M-7,-1 Q1,-5 7,3" ${glowStroke()} Fill="{x:Null}"/>`],
   dizzy: [spiral('SpinL'), spiral('SpinR')],
+  wink: [`<Path Data="M-8,3 Q0,-8 8,3" ${glowStroke()} Fill="{x:Null}"/>`, pill(10, 14, 'BlinkWnkR')],
+  curious: [pill(10, 8, 'BlinkCurL'), pill(12.5, 16, 'BlinkCurR')],
+  star: [starEye],
+  wave: [waveEye('WaveL'), waveEye('WaveR')],
+  // Buồn / xin lỗi: mắt thấp hơn, lông mày xếch lên ở phía trong (hai đầu gần nhau cao hơn).
+  droop: [
+    `<Canvas Canvas.Top="1.5">${pill(10, 11, 'BlinkDrL')}</Canvas><Path Data="M-6.5,-8 L4.5,-11.5" ${glowStroke(2.6)}/>`,
+    `<Canvas Canvas.Top="1.5">${pill(10, 11, 'BlinkDrR')}</Canvas><Path Data="M-4.5,-11.5 L6.5,-8" ${glowStroke(2.6)}/>`,
+  ],
 };
 /** Tên các ScaleTransform chớp mắt (rigSource.mjs đặt ScaleY). */
-export const BOT_BLINKS = Object.freeze(['BlinkL', 'BlinkR', 'BlinkFL', 'BlinkFR', 'BlinkWL', 'BlinkWR']);
+export const BOT_BLINKS = Object.freeze([
+  'BlinkL', 'BlinkR',
+  'BlinkFL', 'BlinkFR',
+  'BlinkUL', 'BlinkUR',
+  'BlinkWL', 'BlinkWR',
+  'BlinkWnkR',
+  'BlinkCurL', 'BlinkCurR',
+  'BlinkDrL', 'BlinkDrR',
+]);
 
 const eyeSide = (side) => BOT_EYES.map((n) => {
   const [left, right] = EYE_SHAPES[n];
@@ -131,7 +165,19 @@ const MOUTH_SHAPES = {
   grin: `<Path Data="M-8,-2.5 C-4,-3.6 4,-3.6 8,-2.5 C7.4,4.6 3.8,7.6 0,7.6 C-3.8,7.6 -7.4,4.6 -8,-2.5 Z" Fill="${GLOW}" Stroke="${GLOW}" StrokeThickness="2.2" StrokeLineJoin="Round"/>`,
   wobble: `<Path Data="M-6.5,2 C-4.5,-0.8 -2,-0.8 0,1.4 C2,3.6 4.5,3.6 6.5,0.8" ${glowStroke(3.6)} Fill="{x:Null}"/>`,
   talk: `<Ellipse Canvas.Left="-5" Canvas.Top="-4" Width="10" Height="8" Fill="${GLOW}" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform x:Name="MouthTalkScale"/></Ellipse.RenderTransform></Ellipse>`,
+  frown: `<Path Data="M-5.5,2.4 C-3.5,-1.6 3.5,-1.6 5.5,2.4" ${glowStroke(4)} Fill="{x:Null}"/>`,
+  // Khóc: miệng mếu há (đáy phẳng, đỉnh cong lên).
+  wail: `<Path Data="M-5.5,3 C-4.5,-3 4.5,-3 5.5,3 Z" Fill="${GLOW}" Stroke="${GLOW}" StrokeThickness="2" StrokeLineJoin="Round"/>`,
 };
+
+/**
+ * Nước mắt (khóc): mỗi mắt 2 giọt so le, rơi từ dưới mắt xuống ngang miệng rồi tan; rig dời `TearMove*` + chỉnh độ mờ từng giọt, cả cụm
+ * `Tears` ẩn khi không khóc. Nằm trong `EyeLook` nên đi theo hướng nhìn của mắt.
+ */
+export const BOT_TEARS = Object.freeze(['L0', 'L1', 'R0', 'R1']);
+const TEAR = { x: 17, y: 5, color: '#E6FBFF' };
+const tearDrop = (id) => `<Path x:Name="Tear${id}" Canvas.Left="${id[0] === 'L' ? -TEAR.x : TEAR.x}" Canvas.Top="${TEAR.y}" Data="M0,-4.6 Q3.7,1.1 0,4 Q-3.7,1.1 0,-4.6 Z" Fill="${TEAR.color}" Opacity="0"><Path.RenderTransform><TranslateTransform x:Name="TearMove${id}"/></Path.RenderTransform></Path>`;
+const TEARS_XAML = `<Canvas x:Name="Tears" Visibility="Collapsed">${BOT_TEARS.map(tearDrop).join('')}</Canvas>`;
 
 const R = BOT_RIG;
 const V = R.visor;
@@ -245,7 +291,7 @@ const THINK_XAML = `<Canvas x:Name="Think" Opacity="0" IsHitTestVisible="False">
    ${thinkCircle(TK.x - TK.w / 2 - 16, TK.y + TK.h / 2 + 20, 4)}
    ${thinkCircle(TK.x - TK.w / 2 - 5, TK.y + TK.h / 2 + 9, 6.2)}
    <Border Canvas.Left="${TK.x - TK.w / 2}" Canvas.Top="${TK.y - TK.h / 2}" Width="${TK.w}" Height="${TK.h}" CornerRadius="${TK.h / 2}" Background="White" BorderBrush="#D5DBE6" BorderThickness="1.2"/>
-   ${[0, 1, 2].map((i) => `<Ellipse x:Name="ThinkDot${i}" Canvas.Left="${TK.x - TK.gap - TK.dot / 2 + i * TK.gap}" Canvas.Top="${TK.y - TK.dot / 2}" Width="${TK.dot}" Height="${TK.dot}" Fill="#3491FA"/>`).join('\n   ')}
+   ${[0, 1, 2].map((i) => `<Ellipse x:Name="ThinkDot${i}" Canvas.Left="${TK.x - TK.gap - TK.dot / 2 + i * TK.gap}" Canvas.Top="${TK.y - TK.dot / 2}" Width="${TK.dot}" Height="${TK.dot}" Fill="#722ED1"/>`).join('\n   ')}
   </Canvas>`;
 
 /** Tia lấp lánh (xong việc): sao bốn cánh vàng / xanh xen kẽ; rig đặt vị trí / cỡ / góc xoay. */
@@ -335,6 +381,12 @@ export const BOT_XAML = `<Canvas x:Name="Stage" Width="${S}" Height="${S}">
       <TranslateTransform X="${F.x}" Y="${F.y}"/>
      </TransformGroup></Canvas.RenderTransform>
      <Canvas.Effect><DropShadowEffect BlurRadius="7" ShadowDepth="0" Opacity="0.8" Color="${GLOW}"/></Canvas.Effect>
+     <Ellipse x:Name="BlushL" Canvas.Left="${-F.eyeDx - 4}" Canvas.Top="${F.eyeY + 8.5}" Width="8" Height="4" Fill="#FFA39E" Opacity="0">
+      <Ellipse.Effect><BlurEffect Radius="2.5"/></Ellipse.Effect>
+     </Ellipse>
+     <Ellipse x:Name="BlushR" Canvas.Left="${F.eyeDx - 4}" Canvas.Top="${F.eyeY + 8.5}" Width="8" Height="4" Fill="#FFA39E" Opacity="0">
+      <Ellipse.Effect><BlurEffect Radius="2.5"/></Ellipse.Effect>
+     </Ellipse>
      <Canvas><Canvas.RenderTransform><TranslateTransform x:Name="EyeLook"/></Canvas.RenderTransform>
       <Canvas x:Name="EyeL" Canvas.Left="${-F.eyeDx}" Canvas.Top="${F.eyeY}"><Canvas.RenderTransform><ScaleTransform x:Name="EyeMorphL"/></Canvas.RenderTransform>
       ${eyeSide('L')}
@@ -342,6 +394,7 @@ export const BOT_XAML = `<Canvas x:Name="Stage" Width="${S}" Height="${S}">
       <Canvas x:Name="EyeR" Canvas.Left="${F.eyeDx}" Canvas.Top="${F.eyeY}"><Canvas.RenderTransform><ScaleTransform x:Name="EyeMorphR"/></Canvas.RenderTransform>
       ${eyeSide('R')}
       </Canvas>
+      ${TEARS_XAML}
      </Canvas>
      <Canvas x:Name="Mouth" Canvas.Top="${F.mouthY}"><Canvas.RenderTransform><ScaleTransform x:Name="MouthMorph"/></Canvas.RenderTransform>
       ${BOT_MOUTHS.map((n) => `<Canvas x:Name="Mouth_${n}" Visibility="Collapsed">${MOUTH_SHAPES[n]}</Canvas>`).join('\n      ')}

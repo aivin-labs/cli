@@ -7,6 +7,9 @@ const UNSENT_KEEP_MS = 15 * 60_000;
 /** Kết quả đã gửi vẫn nhớ thêm chừng này (BE gửi lại đúng `call_id` vì ACK / kết quả lỡ mất → trả lại kết quả cũ, không chạy lần hai). */
 const SENT_KEEP_MS = 3 * 60_000;
 const MAX_UNSENT = 200;
+/** Gửi lại kết quả chưa có ack khi socket vẫn nối: lần đầu sau ~30 s (ack chờ 15 s), giãn gấp đôi, tối đa 4 phút. */
+const RESEND_BASE_MS = 30_000;
+const RESEND_MAX_MS = 4 * 60_000;
 /** Kết quả lớn hơn không ghi xuống đĩa (chỉ giữ trong bộ nhớ) — daemon chết thì BE nhận lỗi thay vì nội dung. */
 const PERSIST_RESULT_BYTES = 4 * 1024 * 1024;
 
@@ -22,26 +25,77 @@ function payloadBytes(payload) {
  * - Kết quả chưa gửi được (mất mạng, chưa có ack) ghi xuống `REMOTE_OUTBOX_FILE` — daemon khởi động lại vẫn gửi.
  * - `heldIds()`: lời gọi máy đang giữ, gửi lên khi chào để BE đối chiếu (huỷ việc không còn ai chờ, khỏi gửi lại việc máy đang làm).
  */
-export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.now() } = {}) {
+export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.now(), debounceMs = 40 } = {}) {
   const calls = new Map();
+  let persistTimer = null;
+  let writeChain = Promise.resolve();
 
-  function persist() {
+  function buildUnsentRows() {
     const unsent = [...calls.entries()].filter(([, e]) => e.state === CallState.DONE && !e.sent);
+    return unsent.map(([id, e]) => {
+      const payload = payloadBytes(e.payload) <= PERSIST_RESULT_BYTES ? e.payload
+        : { call_id: id, ok: false, error: 'Result was too large to keep while offline — run the step again', error_code: 'OUTPUT_TOO_LARGE', duration_ms: e.payload.duration_ms };
+      return { id, at: e.at, payload };
+    });
+  }
+
+  function clearPersistTimer() {
+    if (!persistTimer) return;
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+
+  function persistSync() {
+    clearPersistTimer();
+    const rows = buildUnsentRows();
     try {
-      if (!unsent.length) {
+      if (!rows.length) {
         fs.rmSync(file, { force: true });
         return;
       }
-      const rows = unsent.map(([id, e]) => {
-        const payload = payloadBytes(e.payload) <= PERSIST_RESULT_BYTES ? e.payload
-          : { call_id: id, ok: false, error: 'Result was too large to keep while offline — run the step again', error_code: 'OUTPUT_TOO_LARGE', duration_ms: e.payload.duration_ms };
-        return { id, at: e.at, payload };
-      });
       fs.mkdirSync(path.dirname(file), { recursive: true });
       const tmp = `${file}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(rows), { mode: 0o600 });
       fs.renameSync(tmp, file);
     } catch { /* không ghi được: vẫn giữ trong bộ nhớ */ }
+  }
+
+  function enqueueAsyncPersist() {
+    clearPersistTimer();
+    const rows = buildUnsentRows();
+    if (!rows.length) {
+      try { fs.rmSync(file, { force: true }); } catch { /* bỏ qua */ }
+      return writeChain;
+    }
+    const serialized = JSON.stringify(rows);
+    writeChain = writeChain.then(async () => {
+      try {
+        await fs.promises.mkdir(path.dirname(file), { recursive: true });
+        const tmp = `${file}.tmp`;
+        await fs.promises.writeFile(tmp, serialized, { mode: 0o600 });
+        await fs.promises.rename(tmp, file);
+      } catch { /* không ghi được: vẫn giữ trong bộ nhớ */ }
+    });
+    return writeChain;
+  }
+
+  function schedulePersist() {
+    const hasUnsent = [...calls.values()].some((e) => e.state === CallState.DONE && !e.sent);
+    if (!hasUnsent) {
+      clearPersistTimer();
+      try { fs.rmSync(file, { force: true }); } catch { /* bỏ qua */ }
+      return;
+    }
+    if (debounceMs <= 0) {
+      persistSync();
+      return;
+    }
+    if (persistTimer) return;
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      void enqueueAsyncPersist();
+    }, debounceMs);
+    persistTimer.unref?.();
   }
 
   function load() {
@@ -70,7 +124,7 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
       calls.delete(id);
       changed = true;
     }
-    if (changed) persist();
+    if (changed) schedulePersist();
   }
 
   load();
@@ -86,7 +140,10 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
     /** Lời gọi xong — kết quả chờ gửi. `persistNow`: ghi xuống đĩa ngay (đang mất kết nối). */
     finish(callId, payload, { persistNow = false } = {}) {
       calls.set(callId, { state: CallState.DONE, at: now(), payload, sent: false });
-      if (persistNow) persist();
+      if (persistNow) {
+        for (const e of calls.values()) if (e.state === CallState.DONE && !e.sent) e.onDisk = true;
+        persistSync();
+      }
     },
     markSent(callId) {
       const e = calls.get(callId);
@@ -94,7 +151,7 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
       const wasOnDisk = e.onDisk;
       e.sent = true;
       e.payload = { call_id: callId, ...pick(e.payload) };
-      if (wasOnDisk) persist();
+      if (wasOnDisk) schedulePersist();
     },
     /** Lời gọi đã xong bị BE gửi lại: đánh dấu chưa gửi, trả kết quả để gửi lần nữa. */
     reopen(callId) {
@@ -104,9 +161,14 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
       return e.payload;
     },
     /** Ghi các kết quả chưa gửi xuống đĩa (gửi chưa được xác nhận / daemon sắp dừng). */
-    persist() {
+    persist({ sync = false } = {}) {
       for (const e of calls.values()) if (e.state === CallState.DONE && !e.sent) e.onDisk = true;
-      persist();
+      if (sync) persistSync();
+      else schedulePersist();
+    },
+    /** Đẩy ngay các thay đổi đang chờ ghi bất đồng bộ xuống đĩa. */
+    flush() {
+      return persistTimer ? enqueueAsyncPersist() : writeChain;
     },
     /** BE báo không còn ai chờ → bỏ kết quả chưa gửi của các lời gọi này. */
     drop(callIds) {
@@ -118,9 +180,27 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
           changed = true;
         }
       }
-      if (changed) persist();
+      if (changed) schedulePersist();
     },
     unsent: () => [...calls.values()].filter((e) => e.state === CallState.DONE && !e.sent).map((e) => e.payload),
+    /** Vừa gửi kết quả này (chờ ack) — `dueForResend` giãn nhịp theo số lần đã gửi. */
+    markAttempt(callId) {
+      const e = calls.get(callId);
+      if (!e || e.state !== CallState.DONE || e.sent) return;
+      e.attempts = (e.attempts || 0) + 1;
+      e.attemptAt = now();
+    },
+    /**
+     * Kết quả đã gửi mà chưa có ack quá hạn giãn nhịp (02/11/2026): máy chủ quá tải làm lỡ ack khi socket vẫn nối thì trước đây chỉ gửi lại
+     * lúc nối lại — BE chờ tới hết giờ rồi agent chạy lại bước. Nhịp: `baseMs` × 2^(lần−1), tối đa `maxMs`; mục chưa gửi lần nào không
+     * tính (đường gửi thường lo). Cùng `call_id` → BE bỏ bản trùng.
+     */
+    dueForResend({ baseMs = RESEND_BASE_MS, maxMs = RESEND_MAX_MS } = {}) {
+      const t = now();
+      return [...calls.values()]
+        .filter((e) => e.state === CallState.DONE && !e.sent && e.attempts > 0 && t - e.attemptAt >= Math.min(maxMs, baseMs * 2 ** (e.attempts - 1)))
+        .map((e) => e.payload);
+    },
     heldIds: () => [...calls.entries()].filter(([, e]) => e.state === CallState.RUNNING || (e.state === CallState.DONE && !e.sent)).map(([id]) => id),
     runningIds: () => [...calls.entries()].filter(([, e]) => e.state === CallState.RUNNING).map(([id]) => id),
     prune,

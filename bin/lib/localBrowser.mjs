@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 import path from 'path';
 import os from 'os';
 import chalk from 'chalk';
@@ -21,6 +22,29 @@ import { execSync, spawn } from 'child_process';
 // fully independently of whatever the user's main browser is doing, at the cost of a one-time login
 // (Facebook etc.) the first time it's used - after that, cookies persist here just like any profile.
 export const AIVIN_BROWSER_PROFILE_DIR = path.join(os.homedir(), '.aivin', 'browser-profile');
+export const AIVIN_CAST_EXTENSION_DIR = path.join(os.homedir(), '.aivin', 'cast-extension');
+
+export function ensureCastExtension() {
+  try {
+    fs.mkdirSync(AIVIN_CAST_EXTENSION_DIR, { recursive: true });
+    const __filename = fileURLToPath(import.meta.url);
+    const __dirname = path.dirname(__filename);
+    const srcDir = path.join(__dirname, 'remote', 'browserExtension');
+    if (fs.existsSync(srcDir)) {
+      const files = fs.readdirSync(srcDir);
+      for (const file of files) {
+        const srcFile = path.join(srcDir, file);
+        const destFile = path.join(AIVIN_CAST_EXTENSION_DIR, file);
+        if (!fs.existsSync(destFile) || fs.statSync(srcFile).mtimeMs > fs.statSync(destFile).mtimeMs) {
+          fs.copyFileSync(srcFile, destFile);
+        }
+      }
+    }
+  } catch {
+    // best-effort
+  }
+  return AIVIN_CAST_EXTENSION_DIR;
+}
 
 // 9222 is Chrome/Edge's conventional remote-debugging port, but it's not reserved to them - anything
 // can be listening there (found the hard way: this project's own local docker-compose stack publishes
@@ -286,6 +310,96 @@ export function printChromeLaunchHelp(port = CHROME_DEBUG_PORT, preferredId) {
   console.log(chalk.gray('   ...or pass --remote for a server-side browser instead (no local browser needed).'));
 }
 
+export function buildHideTaskbarPowerShellScript(profileDir = AIVIN_BROWSER_PROFILE_DIR) {
+  const escapedDir = String(profileDir || '').replace(/'/g, "''");
+  return `
+$ErrorActionPreference = 'SilentlyContinue'
+$targetDir = '${escapedDir}'.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant()
+if (-not $targetDir) { exit 0 }
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public static class AivinTaskbarHider {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    public static void HideForPids(uint[] pids) {
+        if (pids == null || pids.Length == 0) return;
+        var set = new HashSet<uint>(pids);
+        EnumWindows((hWnd, lParam) => {
+            if (!IsWindowVisible(hWnd)) return true;
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            if (!set.Contains(pid)) return true;
+            int ex = GetWindowLong(hWnd, -20);
+            int next = (ex | 0x00000080) & ~0x00040000;
+            if (next != ex) {
+                ShowWindow(hWnd, 0);
+                SetWindowLong(hWnd, -20, next);
+                ShowWindow(hWnd, 4);
+            }
+            SetWindowPos(hWnd, IntPtr.Zero, 10000, 10000, 0, 0, 0x0035);
+            return true;
+        }, IntPtr.Zero);
+    }
+}
+'@
+
+for ($attempt = 0; $attempt -lt 3; $attempt++) {
+    $procs = Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe' OR Name='brave.exe'"
+    $pids = @()
+    foreach ($p in $procs) {
+        $cmd = [string]$p.CommandLine
+        if ($cmd -match '--user-data-dir=(?:"([^"]+)"|''([^'']+)''|(\\S+))') {
+            $raw = if ($matches[1]) { $matches[1] } elseif ($matches[2]) { $matches[2] } else { $matches[3] }
+            $norm = $raw.Replace('/', '\\').TrimEnd('\\').ToLowerInvariant()
+            if ($norm -eq $targetDir) {
+                $pids += [uint32]$p.ProcessId
+            }
+        }
+    }
+    if ($pids.Count -gt 0) {
+        [AivinTaskbarHider]::HideForPids($pids)
+    }
+    if ($attempt -lt 2) { Start-Sleep -Milliseconds 350 }
+}
+`.trim();
+}
+
+/**
+ * Ẩn cửa sổ trình duyệt riêng của Aivin (`AIVIN_BROWSER_PROFILE_DIR`) khỏi thanh tác vụ Windows và Alt+Tab
+ * bằng cờ Win32 `WS_EX_TOOLWINDOW` (bỏ `WS_EX_APPWINDOW`) + giữ cửa sổ ở `(10000, 10000)` trạng thái hiển thị
+ * (`SW_SHOWNOACTIVATE`) để Chromium vẫn vẽ khung hình bình thường cho WebRTC `tabCapture` và CDP screencast.
+ * Không đụng vào trình duyệt hằng ngày của người dùng.
+ */
+export function hideAivinBrowserFromTaskbar(profileDir = AIVIN_BROWSER_PROFILE_DIR, { platform = process.platform, force = false } = {}) {
+  if (platform !== 'win32') return false;
+  if (!force && process.env.NODE_TEST_CONTEXT) return false;
+  try {
+    const script = buildHideTaskbarPowerShellScript(profileDir);
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded],
+      { detached: true, stdio: 'ignore', windowsHide: true },
+    );
+    child.on('error', () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Launches a browser window dedicated to `aivin browser`, on ITS OWN profile
  *  (AIVIN_BROWSER_PROFILE_DIR) - never the user's real daily-driver one. This is what makes local
  *  mode zero-friction after the first run: because it's a separate profile, it never collides with
@@ -315,9 +429,25 @@ export async function launchLocalChromeWithDebugging(port = CHROME_DEBUG_PORT, p
   } else {
     log(`   Opening your dedicated AI Browser window...`);
   }
+  const extensionDir = ensureCastExtension();
   const child = spawn(
     browser.exe,
-    [`--remote-debugging-port=${port}`, `--user-data-dir=${AIVIN_BROWSER_PROFILE_DIR}`, '--no-first-run', '--start-maximized', EXTENSION_DEBUGGING_FLAG],
+    [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${AIVIN_BROWSER_PROFILE_DIR}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--window-position=10000,10000',
+      '--window-size=1280,800',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
+      `--load-extension=${extensionDir}`,
+      `--disable-extensions-except=${extensionDir}`,
+      '--allowlisted-extension-id=mfbaifggkmifehjhddocjfikbegaonjg',
+      '--auto-accept-this-tab-capture',
+      EXTENSION_DEBUGGING_FLAG,
+    ],
     { detached: true, stdio: 'ignore' },
   );
   // Without a listener, a failed spawn (exe gone since lookup, no permission) is an unhandled 'error'
@@ -333,7 +463,10 @@ export async function launchLocalChromeWithDebugging(port = CHROME_DEBUG_PORT, p
         : `Could not start ${browser.name}: ${spawnError.message}`);
     }
     const { wsUrl, conflict } = await probeLocalChromeDebugger(port);
-    if (wsUrl) return wsUrl;
+    if (wsUrl) {
+      hideAivinBrowserFromTaskbar(AIVIN_BROWSER_PROFILE_DIR);
+      return wsUrl;
+    }
     if (conflict) {
       throw new Error(
         `Port ${port} is already in use by something else (reported itself as "${conflict}", not Chrome/Edge) - ` +

@@ -199,6 +199,7 @@ test('open_tunnel: có trình duyệt hằng ngày → đường hầm qua bộ 
   let ensureCalls = 0;
   const notes = [];
   const tunnels = createBrowserTunnels({
+    useDailyBrowser: true,
     serverUrl, deviceToken: 'tok', browser: { id: 'chrome', name: 'Google Chrome' }, downloadsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'dl-')),
     findDaily: async () => ({ id: 'chrome', name: 'Google Chrome', wsUrl: chrome.url }),
     ensureBrowser: async () => { ensureCalls++; return { wsUrl: chrome.url }; },

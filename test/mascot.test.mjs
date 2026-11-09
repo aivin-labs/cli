@@ -7,7 +7,7 @@ import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
-const { createMascot, loadMascotSettings, HostCommand, HostEvent, MascotState, LogStatus } = await import('../bin/lib/remote/mascot/index.mjs');
+const { createMascot, loadMascotSettings, requestMascotAttach, saveMascotSettings, takeAttachRequests, takeWorkFolderRequest, HostCommand, HostEvent, MascotState, LogStatus } = await import('../bin/lib/remote/mascot/index.mjs');
 const { describeStep, argsPreview, targetOf } = await import('../bin/lib/remote/mascot/labels.mjs');
 const { MascotText, SUPPORTED_LANGS, mascotLang, mascotText } = await import('../bin/lib/remote/mascot/strings.mjs');
 const { MASCOT_PS1, MASCOT_XAML } = await import('../bin/lib/remote/mascot/hostSource.mjs');
@@ -86,6 +86,126 @@ test('không phải Windows → no-op; đã tắt → không mở cửa sổ (ng
   sleeping.callStarted({ call_id: 'x', tool: 'fs.read' }, readTool);
   sleeping.close();
   assert.equal(host.spawned.length, 0);
+});
+
+test('tệp mascot-show cũ còn sót lại không bật lại linh vật đã tắt mỗi lần daemon khởi động; yêu cầu mới thì có (02/11/2026)', async () => {
+  const host = fakeHost();
+  const dir = tmp();
+  const settingsFile = path.join(dir, 'm.json');
+  const showFile = path.join(dir, 'show');
+  fs.writeFileSync(settingsFile, JSON.stringify({ enabled: false }));
+  fs.writeFileSync(showFile, '1');
+  const old = new Date(Date.now() - 3600_000);
+  fs.utimesSync(showFile, old, old);
+  const m = createMascot({ platform: 'win32', spawnImpl: host.spawnImpl, settingsFile, dir, showFile, hideFile: path.join(dir, 'hide') });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(host.spawned.length, 0);
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).enabled, false);
+  fs.writeFileSync(showFile, String(Date.now()));
+  await new Promise((r) => setTimeout(r, 400));
+  m.close();
+  assert.equal(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).enabled, true);
+});
+
+test('Quick voice từ khay: yêu cầu mới bật linh vật rồi bắt đầu voice trực tiếp, xoá tệp; yêu cầu cũ chỉ bị dọn, không tự mở mic (02/11/2026)', async () => {
+  const host = fakeHost();
+  const dir = tmp();
+  const voiceFile = path.join(dir, 'voice');
+  fs.writeFileSync(voiceFile, '1');
+  const old = new Date(Date.now() - 3600_000);
+  fs.utimesSync(voiceFile, old, old);
+  const settingsFile = path.join(dir, 'm.json');
+  fs.writeFileSync(settingsFile, JSON.stringify({ enabled: false }));
+  const m = createMascot({ platform: 'win32', spawnImpl: host.spawnImpl, settingsFile, dir, showFile: path.join(dir, 'show'), hideFile: path.join(dir, 'hide'), voiceFile, hotkeysFile: path.join(dir, 'keys') });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(host.spawned.length, 0);
+  assert.equal(fs.existsSync(voiceFile), false);
+  fs.writeFileSync(voiceFile, String(Date.now()));
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(host.spawned.length, 1);
+  assert.equal(fs.existsSync(voiceFile), false);
+  const child = host.spawned[0];
+  child.stdout.write(`${JSON.stringify({ t: HostEvent.READY })}\n`);
+  await tick();
+  assert.equal(child.sent.filter((c) => c.t === HostCommand.QUICK_VOICE).length, 1);
+  assert.equal(child.sent.filter((c) => c.t === HostCommand.OPEN_ASK).length, 0);
+  m.close();
+});
+
+test('"Gửi cho AIVIN Bot": mỗi yêu cầu một tệp, gom lại không trùng, yêu cầu quá hạn bị bỏ, đọc xong xoá (05/11/2026)', () => {
+  const dir = path.join(tmp(), 'attach');
+  requestMascotAttach(['a.docx', 'b.pdf'], dir);
+  requestMascotAttach([path.resolve('b.pdf'), 'c.xlsx'], dir);
+  fs.writeFileSync(path.join(dir, '1-1.txt'), 'C:\\cu.docx');
+  const old = new Date(Date.now() - 3600_000);
+  fs.utimesSync(path.join(dir, '1-1.txt'), old, old);
+  fs.writeFileSync(path.join(dir, '2-2.txt.tmp'), 'C:\\dang-ghi.docx');
+  assert.deepEqual(takeAttachRequests(dir), ['a.docx', 'b.pdf', 'c.xlsx'].map((p) => path.resolve(p)));
+  assert.deepEqual(fs.readdirSync(dir), ['2-2.txt.tmp']);
+  assert.deepEqual(takeAttachRequests(dir), []);
+  assert.deepEqual(takeAttachRequests(path.join(dir, 'khong-co')), []);
+});
+
+test('"Gửi cho AIVIN Bot": nhiều yêu cầu trong cùng một mili giây vẫn giữ thứ tự gửi (CI v1.0.26 đỏ ngẫu nhiên)', (t) => {
+  const sameMs = Date.now();
+  t.mock.method(Date, 'now', () => sameMs);
+  const dir = path.join(tmp(), 'attach');
+  const names = Array.from({ length: 30 }, (_, i) => `f${i}.docx`);
+  for (const name of names) requestMascotAttach([name], dir);
+  assert.deepEqual(takeAttachRequests(dir), names.map((p) => path.resolve(p)));
+});
+
+test('"Gửi cho AIVIN Bot": linh vật đang tắt vẫn bật lên, tệp vào onDrop, mở ô hỏi (05/11/2026)', async () => {
+  const host = fakeHost();
+  const dir = tmp();
+  const attachDir = path.join(dir, 'attach');
+  const settingsFile = path.join(dir, 'm.json');
+  fs.writeFileSync(settingsFile, JSON.stringify({ enabled: false }));
+  const dropped = [];
+  const m = createMascot({
+    platform: 'win32', spawnImpl: host.spawnImpl, settingsFile, dir, showFile: path.join(dir, 'show'), hideFile: path.join(dir, 'hide'), voiceFile: path.join(dir, 'voice'),
+    hotkeysFile: path.join(dir, 'keys'), attachDir, onDrop: (files) => dropped.push(files),
+  });
+  requestMascotAttach(['x.docx'], attachDir);
+  await sleep(400);
+  assert.deepEqual(dropped, [[path.resolve('x.docx')]]);
+  assert.equal(host.spawned.length, 1);
+  const child = host.spawned[0];
+  child.stdout.write(`${JSON.stringify({ t: HostEvent.READY })}\n`);
+  await tick();
+  assert.equal(child.sent.filter((c) => c.t === HostCommand.OPEN_ASK).length, 1);
+  m.close();
+});
+
+test('"Làm việc ở đây": lần chọn sau cùng thắng, không lẫn với yêu cầu gửi tệp, work_dir không mất khi lưu cài đặt khác (05/11/2026)', () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, '1.workdir'), 'C:\\a');
+  fs.writeFileSync(path.join(dir, '2.workdir'), 'C:\\b');
+  fs.writeFileSync(path.join(dir, '3.txt'), 'C:\\tep.docx');
+  assert.equal(takeWorkFolderRequest(dir), 'C:\\b');
+  assert.deepEqual(fs.readdirSync(dir), ['3.txt']);
+  assert.equal(takeWorkFolderRequest(dir), null);
+  const settings = path.join(dir, 'm.json');
+  saveMascotSettings({ work_dir: 'C:\\a' }, settings);
+  saveMascotSettings({ x: 1, y: 2 }, settings);
+  assert.equal(loadMascotSettings(settings).work_dir, 'C:\\a');
+  saveMascotSettings({ work_dir: null }, settings);
+  assert.equal(loadMascotSettings(settings).work_dir, undefined);
+});
+
+test('phím tắt đang giữ: cửa sổ báo → ghi tệp cho khay, cửa sổ đóng → xoá (02/11/2026)', async () => {
+  const host = fakeHost();
+  const dir = tmp();
+  const hotkeysFile = path.join(dir, 'keys');
+  const m = createMascot({ platform: 'win32', spawnImpl: host.spawnImpl, settingsFile: path.join(dir, 'm.json'), dir, showFile: path.join(dir, 'show'), hideFile: path.join(dir, 'hide'), voiceFile: path.join(dir, 'voice'), hotkeysFile });
+  m.connected();
+  const child = host.spawned[0];
+  child.stdout.write(`${JSON.stringify({ t: HostEvent.HOTKEYS, chat: 'Win+Alt+C', voice: null })}\n`);
+  await tick();
+  assert.deepEqual(JSON.parse(fs.readFileSync(hotkeysFile, 'utf8')), { chat: 'Win+Alt+C' });
+  child.emit('close');
+  assert.equal(fs.existsSync(hotkeysFile), false);
+  m.close();
 });
 
 test('ui --demo: không cần ghép máy, chạy đủ 8 trạng thái theo vòng và dọn timer khi đóng', async () => {
@@ -226,5 +346,170 @@ test('ô hỏi: cửa sổ chủ máy đang dùng (từ cửa sổ linh vật) t
   assert.equal(asked[1].window, null);
   assert.equal(voice[0].t, 'voice_start');
   assert.equal(voice[0].window.title.length, 200);
+  m.close();
+});
+
+
+test('ngôn ngữ linh vật: nhận ngôn ngữ từ người dùng liên kết; setLang cập nhật linh vật và dựng lại cửa sổ', async () => {
+  const { m, host } = makeMascot({ lang: 'en', env: {} });
+  assert.equal(m.lang, 'en');
+
+  // Đổi sang ngôn ngữ tiếng Việt (vi)
+  m.setLang('vi');
+  assert.equal(m.lang, 'vi');
+
+  // Dựng lại cửa sổ với ngôn ngữ mới (cửa sổ cũ được báo quit, không tự thoát thì bị kill sau 300 ms)
+  await sleep(400);
+  assert.ok(host.spawned.length >= 2, 'cửa sổ được dựng lại với ngôn ngữ mới');
+  m.close();
+});
+
+test('ngôn ngữ ban đầu = ngôn ngữ đã lưu → HELLO cùng ngôn ngữ không dựng lại cửa sổ; đang nói chuyện thì chờ xong mới dựng lại, không tính là lần chết', async () => {
+  const { m, host } = makeMascot({ lang: 'vi', env: {}, restartDelaysMs: [] });
+  m.setLang('vi');
+  await sleep(400);
+  assert.equal(host.spawned.length, 1, 'cùng ngôn ngữ: không kill / mở lại');
+  const first = host.spawned[0];
+  first.send({ t: HostEvent.READY });
+  first.send({ t: HostEvent.VOICE_START });
+  await tick();
+  m.setLang('en');
+  assert.equal(m.lang, 'en');
+  await sleep(400);
+  assert.equal(host.spawned.length, 1, 'đang nói chuyện: chưa dựng lại');
+  assert.ok(!first.sent.some((c) => c.t === HostCommand.QUIT));
+  first.send({ t: HostEvent.VOICE_STOP });
+  await sleep(400);
+  assert.equal(host.spawned.length, 2, 'nói xong → dựng lại ngay (restartDelaysMs rỗng vẫn mở: không tính là cửa sổ chết)');
+  assert.ok(first.sent.some((c) => c.t === HostCommand.QUIT));
+  m.close();
+});
+
+test('tin chat tới lúc cửa sổ chưa sẵn sàng → giữ lại (dòng cập nhật theo id), gửi khi ready; url lạ trong báo bị bỏ', async () => {
+  const { m, host } = makeMascot();
+  m.chat({ t: 'chat', role: 'user', id: 'u1', text: 'hỏi' });
+  m.chat({ t: 'chat', role: 'assistant', id: 'a1', text: 'đang viết', partial: true });
+  m.chat({ t: 'chat', role: 'assistant', id: 'a1', text: 'xong rồi' });
+  m.chat({ t: 'chat_busy', busy: false });
+  m.alert({ kind: 'done', text: 'Xong việc', url: 'file:///C:/Windows/System32/calc.exe' });
+  const child = host.spawned[0];
+  assert.equal(child.sent.length, 0, 'chưa ready: chưa gửi gì');
+  child.send({ t: HostEvent.READY });
+  await tick();
+  const chats = child.sent.filter((c) => c.t === 'chat');
+  assert.deepEqual(chats.map((c) => c.text), ['hỏi', 'xong rồi']);
+  assert.ok(child.sent.some((c) => c.t === 'chat_busy' && c.busy === false));
+  assert.ok(!child.sent.some((c) => c.url), 'không gửi url file: cho cửa sổ');
+  m.alert({ kind: 'done', text: 'Xong việc 2', url: 'https://beta.aivin.vn/?session_id=s1' });
+  assert.ok(child.sent.some((c) => c.t === HostCommand.MAIN && c.url === 'https://beta.aivin.vn/?session_id=s1'));
+  m.close();
+});
+
+test('báo khách cần nhân viên: hiện chữ + link, không chuyển sang "xong", không phát nét mặt theo emoji trong lời khách', async () => {
+  const { m, host } = makeMascot();
+  const child = host.spawned[0];
+  child.send({ t: HostEvent.READY });
+  await tick();
+  child.sent.length = 0;
+  m.alert({ kind: 'customer', text: 'Khách trên shop.vn muốn gặp nhân viên 🎉', url: 'https://beta.aivin.vn/?session_id=s1' });
+  assert.ok(child.sent.some((c) => c.t === HostCommand.MAIN && c.text.startsWith('Khách trên shop.vn') && c.url === 'https://beta.aivin.vn/?session_id=s1'));
+  assert.ok(!child.sent.some((c) => c.t === HostCommand.GESTURE), 'không nét mặt');
+  assert.ok(!child.sent.some((c) => c.t === HostCommand.STATE), 'không đổi trạng thái');
+  m.close();
+});
+
+test('mascot.json: ghi nguyên tử, giữ phím tắt khi lưu vị trí; tệp hỏng thì không ghi đè', async () => {
+  const { saveMascotSettings, MascotSettingsUnreadable } = await import('../bin/lib/remote/mascot/index.mjs');
+  const dir = tmp();
+  const file = path.join(dir, 'mascot.json');
+  saveMascotSettings({ hotkey: 'Win+Alt+K', notify_freq: 2 }, file);
+  saveMascotSettings({ x: 10, y: 20 }, file);
+  assert.deepEqual(loadMascotSettings(file), { enabled: true, notify_freq: 2, hotkey: 'Win+Alt+K', x: 10, y: 20 });
+  saveMascotSettings({ hotkey: null }, file);
+  assert.equal(loadMascotSettings(file).hotkey, undefined, 'hotkey default = bỏ khoá');
+  assert.deepEqual(fs.readdirSync(dir), ['mascot.json'], 'không sót tệp tạm');
+  fs.writeFileSync(file, '{"enabled": false, "x": 1, "y"');
+  assert.throws(() => saveMascotSettings({ x: 5, y: 6 }, file), MascotSettingsUnreadable);
+  assert.equal(fs.readFileSync(file, 'utf8'), '{"enabled": false, "x": 1, "y"', 'tệp hỏng giữ nguyên');
+  fs.writeFileSync(file, '\uFEFF{"enabled": false}');
+  assert.equal(loadMascotSettings(file).enabled, false, 'đọc được tệp có BOM');
+});
+
+test('config.json của cửa sổ mang danh sách phím tắt theo mascot.json; hotkey off → rỗng', async () => {
+  const { writeHostFiles } = await import('../bin/lib/remote/mascot/index.mjs');
+  const dir = tmp();
+  const cfg = (settings) => JSON.parse(fs.readFileSync(path.join(writeHostFiles({ dir, lang: 'vi', settings }), 'config.json'), 'utf8'));
+  const def = cfg({}).hotkeys;
+  assert.deepEqual(def.voice[0], { n: 'Alt+Shift+Space', m: 0x4005, v: 0x20 });
+  assert.equal(def.chat[0].n, 'Alt+Space');
+  assert.equal(cfg({ hotkey: 'ctrl+shift+f9' }).hotkeys.voice[0].n, 'Ctrl+Shift+F9');
+  assert.deepEqual(cfg({ hotkey: 'off' }).hotkeys, { voice: [], chat: [] });
+});
+
+test('host.ps1: phím tắt đọc từ config + lọc WM_HOTKEY trong C# (không hook PowerShell); mở link chỉ qua OpenWebUrl (http/https)', async () => {
+  const { hostScript } = await import('../bin/lib/remote/mascot/index.mjs');
+  const script = hostScript();
+  assert.ok(script.includes('$cfg.hotkeys.voice') && script.includes('$cfg.hotkeys.chat'));
+  assert.ok(script.includes('public static class HotKeys') && script.includes('msg == 0x0312'));
+  assert.ok(!script.includes('[System.Windows.Interop.HwndSourceHook]{'), 'không còn hook bằng scriptblock PowerShell');
+  assert.ok(!/Ctrl\+Alt\+(Space|V|C)'/.test(script), 'không còn tổ hợp cứng');
+  assert.equal((script.match(/Diagnostics\.Process\]::Start\(/g) || []).length, 1, 'chỉ một chỗ Process.Start — trong OpenWebUrl');
+  assert.ok(script.includes("@('http', 'https', 'mailto', 'tel', 'sms') -contains $uri.Scheme"), 'chỉ mở link web, gọi, thư, tin nhắn');
+});
+
+test('mã C# nhúng của cửa sổ linh vật biên dịch được (Windows có .NET Framework)', { skip: process.platform !== 'win32', timeout: 120_000 }, async () => {
+  const { execFileSync } = await import('child_process');
+  const { hostScript } = await import('../bin/lib/remote/mascot/index.mjs');
+  const fw = path.join(process.env.WINDIR || 'C:/Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319');
+  const csc = path.join(fw, 'csc.exe');
+  if (!fs.existsSync(csc)) return;
+  const blocks = [...hostScript().matchAll(/-TypeDefinition @'\r?\n([\s\S]*?)\r?\n'@/g)].map((x) => x[1]);
+  assert.ok(blocks.length >= 2, 'khối Add-Type của cửa sổ + ô hỏi');
+  const dir = tmp();
+  const wpf = path.join(fw, 'WPF');
+  const refs = ['PresentationCore.dll', 'PresentationFramework.dll', 'WindowsBase.dll'].map((r) => `-r:${path.join(wpf, r)}`).concat(['-r:System.Xaml.dll']);
+  blocks.forEach((src, i) => {
+    const file = path.join(dir, `b${i}.cs`);
+    fs.writeFileSync(file, src);
+    const out = (() => {
+      try { return execFileSync(csc, ['-nologo', '-codepage:65001', '-target:library', `-out:${path.join(dir, `b${i}.dll`)}`, ...refs, file], { encoding: 'utf8' }); } catch (e) { return String(e.stdout || e.message); }
+    })();
+    assert.doesNotMatch(out, /error CS\d+/, out);
+  });
+});
+
+test('mức báo là 3 nấc bấm (không còn thanh trượt): đủ nhãn từng nấc ở mọi ngôn ngữ', async () => {
+  const { MASCOT_XAML: xaml } = await import('../bin/lib/remote/mascot/hostSource.mjs');
+  const { SUPPORTED_LANGS, windowStrings } = await import('../bin/lib/remote/mascot/strings.mjs');
+  assert.ok(!xaml.includes('NotifySlider'));
+  for (const i of [0, 1, 2]) assert.ok(xaml.includes(`x:Name="NotifyStep${i}" Tag="${i}"`));
+  for (const lang of SUPPORTED_LANGS) {
+    const s = windowStrings(lang);
+    for (const k of ['notify_step_min', 'notify_step_mid', 'notify_step_max']) assert.ok(s[k] && s[k] !== k, `${lang}.${k}`);
+  }
+});
+
+test('mất kết nối thoáng qua (< offlineGraceMs) rồi nối lại → giữ im lặng; mất lâu hơn → báo mất kết nối rồi khôi phục', async () => {
+  const { m, host } = makeMascot({ offlineGraceMs: 40 });
+  const child = host.spawned[0];
+  child.send({ t: HostEvent.READY });
+  m.connected();
+  await tick();
+  child.sent.length = 0;
+
+  // Rớt mạng 15 ms (< 40 ms) rồi nối lại ngay → không hiện bong bóng hay dòng log mất kết nối
+  m.disconnected();
+  await sleep(15);
+  m.connected();
+  await sleep(40);
+  assert.equal(child.sent.length, 0, 'rớt mạng thoáng qua không phát cảnh báo');
+
+  // Rớt mạng quá 40 ms → chuyển trạng thái OFFLINE + hiện bong bóng, nối lại thì về IDLE
+  m.disconnected();
+  await sleep(55);
+  assert.ok(child.sent.some((c) => c.t === HostCommand.STATE && c.state === MascotState.OFFLINE));
+  assert.ok(child.sent.some((c) => c.t === HostCommand.MAIN && !c.quiet && /Mất kết nối/.test(c.text)));
+  m.connected();
+  assert.ok(child.sent.some((c) => c.t === HostCommand.STATE && c.state === MascotState.IDLE));
   m.close();
 });

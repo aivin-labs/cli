@@ -42,6 +42,21 @@ test('chữ menu khay: vi và en đủ cùng bộ khoá', () => {
   assert.deepEqual(Object.keys(TRAY_STRINGS.vi).sort(), Object.keys(TRAY_STRINGS.en).sort());
 });
 
+test('khay: Quick chat / Quick voice có chữ trong launch.cfg, gửi yêu cầu qua tệp và đọc phím đang giữ từ tệp daemon ghi', () => {
+  const text = launchConfigText({ argv: ['aivin.exe', 'remote', 'start'], lang: 'en' });
+  assert.ok(text.includes('s.quickChat=Quick chat') && text.includes('s.quickVoice=Quick voice'));
+  const src = launcherSource('C:\\h');
+  assert.ok(src.includes('"mascot-voice"') && src.includes('"mascot-hotkeys.json"'));
+  assert.ok(src.includes('RequestMascot(VoiceFile)'));
+});
+
+test('khay tự mở lại khi Aivin.exe bị thay: chờ hết daemon, mở sau khi nhả mutex', () => {
+  const src = launcherSource('C:\\h');
+  assert.ok(src.includes('if (child != null || pairing || browserConnectInProgress || pairForm != null'), 'đang giữ daemon hoặc luồng đăng nhập thì không chuyển');
+  assert.ok(src.indexOf('GC.KeepAlive(mutex);') < src.indexOf('if (Relaunch)'), 'mở lại sau khi nhả mutex');
+  assert.ok(src.indexOf('OnChildExit();\n      if (SwapIfExeReplaced())') > 0, 'kiểm tra ngay sau khi daemon thoát');
+});
+
 test('StartupApproved: 02 = bật, 03 + FILETIME = tắt (như Task Manager)', () => {
   assert.equal(startupApprovedHex(true), '020000000000000000000000');
   const off = startupApprovedHex(false, Date.UTC(2026, 9, 29));
@@ -80,7 +95,7 @@ test('biên dịch được Aivin.exe (Windows): tên + hãng hiện ở Task Ma
   const res = ensureLauncher({ exe, home: path.join(dir, 'home'), dir: path.join(dir, 'build') });
   assert.equal(res.built, true);
   const info = execFileSync('powershell.exe', ['-NoProfile', '-Command', `$v = (Get-Item '${exe}').VersionInfo; "$($v.FileDescription)|$($v.CompanyName)"`], { encoding: 'utf8' }).trim();
-  assert.equal(info, 'AIVIN Bot CLI|Aivin Labs');
+  assert.equal(info, 'AIVIN Bot|Aivin Labs');
   assert.equal(ensureLauncher({ exe, home: path.join(dir, 'home'), dir: path.join(dir, 'build') }).built, false, 'mã không đổi → không biên dịch lại');
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -125,7 +140,7 @@ test('Linux: Exec= bọc nháy theo Desktop Entry spec, tắt / bật nhận c�
   assert.equal(desktopExecArg('/home/$x"y'), '"/home/\\\\$x\\\\"y"');
   const entry = linuxDesktopEntry({ launcher: '/h/aivin-desktop.sh', icon: '/h/logo.png', lang: 'en', autostart: true });
   assert.match(entry, /^Exec="\/h\/aivin-desktop\.sh" --autostart$/m);
-  assert.match(entry, /^Name=AIVIN Bot CLI$/m);
+  assert.match(entry, /^Name=AIVIN Bot$/m);
   assert.equal(isAutostartEnabled(entry), true);
   assert.equal(isAutostartEnabled(entry.replace('Hidden=false', 'Hidden=true')), false);
   assert.equal(isAutostartEnabled(entry.replace('X-GNOME-Autostart-enabled=true', 'X-GNOME-Autostart-enabled=false')), false);
@@ -148,4 +163,69 @@ test('chữ menu theo hệ điều hành; launch.cfg mang khoá riêng; kịch b
   assert.ok(cfg.split('\r\n').includes('agent=/h/a.plist'));
   assert.ok(cfg.split('\r\n').includes('s.startup=Open at login'));
   assert.match(posixRunScript(['/x/aivin', 'remote', 'start'], { supervisor: 'tray' }), /^'\/x\/aivin' 'remote' 'start' "\$@"$/m);
+});
+
+
+const { packDesktopFrame, unpackDesktopFrame } = await import('../bin/lib/remote/desktop/desktopWebRtc.mjs');
+const { DESKTOP_CAST_CSHARP } = await import('../bin/lib/remote/desktop/desktopCastSource.mjs');
+
+test('packDesktopFrame + unpackDesktopFrame: đóng gói và giải mã khung hình nhị phân kèm toạ độ màn hình', () => {
+  const rawJpeg = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0xFF, 0xD9]);
+  const packed = packDesktopFrame({
+    seq: 42,
+    ts: 1730000000000,
+    width: 1280,
+    height: 720,
+    screenWidth: 1920,
+    screenHeight: 1080,
+    screenX: 1920,
+    screenY: 0,
+    monitor: 1,
+    screens: [{ index: 0, name: '\\\\.\\DISPLAY1' }, { index: 1, name: '\\\\.\\DISPLAY2' }],
+    image: rawJpeg.toString('base64'),
+  });
+  const unpacked = unpackDesktopFrame(packed);
+  assert.ok(unpacked);
+  assert.equal(unpacked.meta.seq, 42);
+  assert.equal(unpacked.meta.width, 1280);
+  assert.equal(unpacked.meta.height, 720);
+  assert.equal(unpacked.meta.screenWidth, 1920);
+  assert.equal(unpacked.meta.screenHeight, 1080);
+  assert.equal(unpacked.meta.screenX, 1920);
+  assert.equal(unpacked.meta.screenY, 0);
+  assert.equal(unpacked.meta.monitor, 1);
+  assert.equal(unpacked.meta.screens.length, 2);
+  assert.deepEqual(unpacked.jpeg, rawJpeg);
+});
+
+test('DESKTOP_CAST_CSHARP: chỉ dùng cú pháp C# 5 và hỗ trợ LockBits, modifiers, cuộn ngang', () => {
+  assert.ok(!/\$"/.test(DESKTOP_CAST_CSHARP), 'không có chuỗi nội suy C# 6');
+  assert.ok(!/\?\./.test(DESKTOP_CAST_CSHARP), 'không có ?. của C# 6');
+  assert.ok(DESKTOP_CAST_CSHARP.includes('LockBits'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('ExtractModifiers'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('MOUSEEVENTF_HWHEEL'));
+});
+
+test('DESKTOP_CAST_CSHARP: có DXGI + đường lùi GDI, thu âm WASAPI Loopback, con trỏ gửi riêng, biên dịch được bằng C# 5', { skip: process.platform !== 'win32', timeout: 120_000 }, () => {
+  assert.ok(DESKTOP_CAST_CSHARP.includes('class DxgiScreen'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('CaptureGdi'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('class CursorTracker'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('class LoopbackAudio'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('class ClipboardSync'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('IsSecureDesktop'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('Parallel.For'));
+  assert.ok(DESKTOP_CAST_CSHARP.includes('WriteAudio'));
+  assert.ok(!DESKTOP_CAST_CSHARP.includes('`'), 'không còn dấu backtick làm hỏng chuỗi nguồn');
+  const tmp = path.join(os.tmpdir(), `aivin-cast-compile-${process.pid}.cs`);
+  fs.writeFileSync(tmp, DESKTOP_CAST_CSHARP);
+  try {
+    const out = execFileSync('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      `Add-Type -Path '${tmp}' -ReferencedAssemblies 'UIAutomationClient','UIAutomationTypes','WindowsBase','System.Drawing','System.Windows.Forms','System.Web.Extensions','System.Core'; [AivinDesktopCast.LoopbackAudio]::SetEnabled($true); [AivinDesktopCast.LoopbackAudio]::Enabled`,
+    ], { encoding: 'utf8' }).trim();
+    assert.equal(out, 'True');
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
 });

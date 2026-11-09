@@ -1,0 +1,6 @@
+{
+  "_comment": "Lịch sử (tên file service worker → băm nội dung, xuống dòng chuẩn hoá LF). Chrome giữ script worker cũ trong hồ sơ trình duyệt kể cả khi tăng version (đo 30/09/2026) → đổi nội dung worker PHẢI đổi tên file (manifest background.service_worker) rồi THÊM dòng mới vào đây; không sửa/xoá dòng cũ. Kiểm bởi src/base/BrowserCastExtensionHelper.spec.ts.",
+  "workers": {
+    "cast-worker-2.js": "421a9afbb5dde3d4f320892280d3da136b6be7fbf223a41bf4fcf52710b13b48"
+  }
+}

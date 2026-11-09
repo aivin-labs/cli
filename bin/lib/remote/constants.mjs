@@ -55,6 +55,8 @@ export const DeviceEvent = Object.freeze({
   WATCHES: 'device:watches',
   /** CLI → BE (29/10/2026): sắp thoát để chuyển sang bản CLI vừa tự cập nhật — `{ reason, version, expect_back_ms }`; máy sẽ nối lại ngay. */
   RESTARTING: 'device:restarting',
+  /** BE -> CLI: Bản phát hành mới đã sẵn sàng, yêu cầu client tự kiểm tra/cập nhật ngay. */
+  UPDATE: 'device:update',
   /** CLI → BE (29/10/2026): chủ máy hỏi / giao việc qua linh vật — `{ text, request_id }`, ack `{ ok, request_id, session_id, error? }`. */
   CHAT: 'device:chat',
   /** BE → CLI: tiến trình / câu trả lời của lượt chat — `{ request_id, kind: progress | answer | timeout | error, text }`. */
@@ -82,14 +84,38 @@ export const DeviceEvent = Object.freeze({
   NOTIFY_ACK: 'device:notify_ack',
   /** CLI → BE: câu hỏi còn ghim đã đóng chưa `{ items: [{ session_id, reply_id }] }` — ack `{ ok, closed: reply_id[] }`. */
   QUESTIONS: 'device:questions',
+  /** BE → CLI (09/11/2026): câu hỏi ghim đã xử lý ở nơi khác (duyệt trên web / máy khác) `{ reply_ids }` → bỏ nút ngay. */
+  QUESTION_CLOSED: 'device:question_closed',
   /** CLI → BE: dừng lượt chat đang chạy `{ request_id }` — lượt kết thúc bằng `error` mã `cancelled`. */
   CHAT_CANCEL: 'device:chat_cancel',
+  WEBVIEW: 'device:webview',
   /** CLI → BE (30/10/2026): mở phiên chat mới cho linh vật — câu hỏi kế đi vào phiên mới (phiên cũ vẫn trên Aivin). Ack `{ ok, error? }`. */
   CHAT_NEW: 'device:chat_new',
+  /** BE → CLI: yêu cầu bắt đầu phát hình màn hình máy tính trực tiếp (scenecast). */
+  DESKTOP_CAST_START: 'device:desktop_cast_start',
+  /** BE → CLI: yêu cầu dừng phát hình màn hình máy tính trực tiếp. */
+  DESKTOP_CAST_STOP: 'device:desktop_cast_stop',
+  /** CLI → BE: một khung hình màn hình máy tính (JPEG base64) kèm kích thước. */
+  DESKTOP_CAST_FRAME: 'device:desktop_cast_frame',
+  /** BE → CLI: thao tác điều khiển chuột / bàn phím từ xa. */
+  DESKTOP_CAST_INPUT: 'device:desktop_cast_input',
+  /** BE → CLI: cập nhật cấu hình chất lượng / tốc độ khung hình (FPS, quality). */
+  DESKTOP_CAST_CONFIG: 'device:desktop_cast_config',
+  DESKTOP_CAST_SIGNAL: 'device:desktop_cast_signal',
+  DESKTOP_CAST_STATUS: 'device:desktop_cast_status',
+  /** CLI → BE: ô có tiêu điểm sau cú nhấp có phải ô nhập chữ — cho người xem đường JPEG (WebRTC đi kênh thao tác). */
+  DESKTOP_CAST_INPUT_FOCUS: 'device:desktop_cast_input_focus',
+  /** BE → CLI: người xem tạm cầm lái khi AI đang chạy / trả lại — `{ session_id, active, idle_ms, max_wait_ms }`. */
+  DESKTOP_CAST_TAKEOVER: 'device:desktop_cast_takeover',
+});
+
+/** Trạng thái phiên xem màn hình gửi BE (`device:desktop_cast_status`) — khớp BE `DesktopCastState`. */
+export const CastState = Object.freeze({
+  READY: 'ready', CONNECTED: 'connected', DEGRADED: 'degraded', STOPPED: 'stopped', REFUSED: 'refused', INPUT_BLOCKED: 'input_blocked', AWAITING_CONSENT: 'awaiting_consent', DEVICE_CHALLENGE: 'device_challenge', PASTE_FAILED: 'paste_failed', DROP_REFUSED: 'drop_refused',
 });
 
 /** Loại báo chủ động (`device:notify`). */
-export const NotifyKind = Object.freeze({ DONE: 'done', FAILED: 'failed', NEEDS_YOU: 'needs_you' });
+export const NotifyKind = Object.freeze({ DONE: 'done', FAILED: 'failed', NEEDS_YOU: 'needs_you', CUSTOMER: 'customer' });
 
 /** Loại sự kiện của phiên nói chuyện (`device:voice_event`). */
 export const VoiceEventKind = Object.freeze({
@@ -120,6 +146,8 @@ export const ServerFeature = Object.freeze({
   CHAT_CANCEL: 'chat_cancel',
   /** Mở phiên chat mới cho linh vật (`device:chat_new`). */
   CHAT_NEW: 'chat_new',
+  /** Giao thêm việc khi lượt trước chưa xong (`device:chat` + `parallel`) — chạy ở phiên riêng, kết quả tới bằng báo chủ động. */
+  CHAT_PARALLEL: 'chat_parallel',
 });
 
 /** Nhóm giới hạn song song trên máy — mỗi công cụ thuộc một nhóm. */
@@ -188,6 +216,8 @@ export const DeviceErrorCode = Object.freeze({
   CANCELLED: 'CANCELLED',
   /** Bước có tác dụng đã bắt đầu thì daemon khởi động lại — không biết đã làm tới đâu, không tự làm lại. */
   INTERRUPTED: 'INTERRUPTED',
+  /** Bước CHƯA chạy (vd người đang tạm cầm lái từ web tới hết hạn chờ) — gửi lại an toàn. */
+  NOT_STARTED: 'NOT_STARTED',
   TOOL_UNKNOWN: 'TOOL_UNKNOWN',
   INVALID_ARGS: 'INVALID_ARGS',
   NOT_FOUND: 'NOT_FOUND',
@@ -202,8 +232,13 @@ export const DeviceErrorCode = Object.freeze({
   GUI_UNAVAILABLE: 'GUI_UNAVAILABLE',
   /** node_id của lần observe cũ hoặc phần tử đã biến mất — observe lại. */
   GUI_STALE_NODE: 'GUI_STALE_NODE',
+  GUI_TARGET_NOT_FOUND: 'GUI_TARGET_NOT_FOUND',
+  GUI_AMBIGUOUS_TARGET: 'GUI_AMBIGUOUS_TARGET',
+  GUI_NO_EFFECT: 'GUI_NO_EFFECT',
   /** Người dùng đang dùng chuột / bàn phím — AI dừng, hỏi trước khi làm tiếp. */
   GUI_USER_ACTIVE: 'GUI_USER_ACTIVE',
+  /** Chuột / phím thật không tới được cửa sổ đích (không lên được trên cùng / cửa sổ khác che điểm bấm / mất focus giữa lúc gõ) — không bấm, không gõ tiếp. */
+  GUI_FOCUS_LOST: 'GUI_FOCUS_LOST',
   /** Ứng dụng không được điều khiển (quản lý mật khẩu, hộp nâng quyền, terminal khi không toàn quyền…). */
   GUI_BLOCKED_APP: 'GUI_BLOCKED_APP',
   /** Gõ vào ô mật khẩu — người dùng tự gõ. */
@@ -212,6 +247,8 @@ export const DeviceErrorCode = Object.freeze({
   GUI_LOCKED: 'GUI_LOCKED',
   /** `gui.wait_for` hết giờ mà giao diện chưa tới trạng thái chờ. */
   GUI_WAIT_TIMEOUT: 'GUI_WAIT_TIMEOUT',
+  /** Cửa sổ ứng dụng đích bị treo (Not Responding) — không gọi UI Automation để tránh đơ host. */
+  GUI_WINDOW_HUNG: 'GUI_WINDOW_HUNG',
   /** OCR của Windows không dùng được (không có gói ngôn ngữ OCR / WinRT lỗi) — observe vẫn trả cây + ảnh. */
   GUI_OCR_UNAVAILABLE: 'GUI_OCR_UNAVAILABLE',
 });

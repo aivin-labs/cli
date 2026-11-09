@@ -1,5 +1,6 @@
 import { AIVIN_BRAND } from '../brand.mjs';
 import { BOT_FACES, BOT_LAYER_FILES, BOT_XAML } from './bot.mjs';
+import { EMOJI_CS } from './emojiSource.mjs';
 import { RIG_CS, RIG_REFERENCES_PS } from './rigSource.mjs';
 import { VOICE_CS } from './voiceSource.mjs';
 
@@ -9,8 +10,9 @@ import { VOICE_CS } from './voiceSource.mjs';
  *
  * - Không viền, nền trong suốt (vùng trong suốt bấm xuyên qua), luôn nằm trên, không có trên thanh tác vụ / Alt+Tab.
  * - KHÔNG cướp focus (WS_EX_NOACTIVATE): người dùng đang gõ, hoặc AI đang điều khiển một ứng dụng, không bị cửa sổ này giật phím.
- * - Không có trong ảnh chụp màn hình (WDA_EXCLUDEFROMCAPTURE, Windows 10 2004+): ảnh AI chụp để điều khiển giao diện, chia sẻ màn hình
- *   khi họp không thấy linh vật. Thử nghiệm cần chụp được thì đặt AIVIN_MASCOT_CAPTURABLE=1.
+ * - CÓ trong ảnh chụp màn hình (từ 01/11/2026, commit efa202c): WDA_EXCLUDEFROMCAPTURE trên cửa sổ layered trong suốt làm linh vật vô
+ *   hình ngay trên màn hình thật ở một số máy, nên đã tắt. Ảnh AI chụp / chia sẻ màn hình khi họp / Desktop Cast thấy linh vật; khi AI
+ *   bấm / chụp cửa sổ (lệnh `gui`) linh vật tự tránh đường. AIVIN_MASCOT_CAPTURABLE không còn tác dụng.
  * - Kéo để di chuyển (nhớ chỗ), bấm để mở / thu bảng nhật ký; bảng mở về phía còn chỗ trên màn hình, kẹp trong vùng màn hình.
  * - Chuyển động của bot: rigSource.mjs (C#, theo nhịp màn hình) — PowerShell chỉ báo trạng thái / rê chuột / nhấn / kéo cho rig.
  * Lệnh vào: state | main | log | gui | show | quit. Sự kiện ra: ready | pos | pause | resume | hide | off.
@@ -23,8 +25,8 @@ const B = AIVIN_BRAND;
 // The rendered bot is a MASCOT_BOX-sized Viewbox. Keep the hit/layout box equally large so the rounded lower body is not clipped.
 const MASCOT_BOX = { w: 60, h: 60 };
 export const MASCOT_CENTER = Object.freeze({ x: 30, y: 28.5 });
-/** Rảnh (idle) liền chừng này phút mà không ai rê chuột → bot ngủ gật; có việc / rê chuột vào thì thức. */
-const MASCOT_DOZE_MIN = 10;
+/** Rảnh (idle) liền chừng này giây mà không ai rê chuột → bot ngủ gật; có việc / rê chuột vào thì thức. */
+const MASCOT_DOZE_SEC = 60;
 /** Không chạm chuột / bàn phím chừng này phút = chủ máy đi vắng (khoá máy, đi họp…) → daemon gom việc xảy ra để báo khi quay lại. */
 const MASCOT_AWAY_MIN = 10;
 /** Lề trong cửa sổ quanh bot / các hộp (chỗ cho bóng đổ). */
@@ -40,9 +42,9 @@ const DROP_ZONE_R = 90;
 
 /** Màu từng trạng thái: `fg` chấm / chữ, `bg` nền chip. */
 export const MASCOT_PALETTE = Object.freeze({
-  idle: { fg: '#00B42A', bg: '#E8FFEA' },
+  idle: { fg: '#14C9C9', bg: '#E6FFFB' },
   working: { fg: B.brand, bg: '#E8F3FF' },
-  thinking: { fg: B.light, bg: '#E6F9FF' },
+  thinking: { fg: '#722ED1', bg: '#F9F0FF' },
   waiting: { fg: B.warn, bg: B.warnBg },
   paused: { fg: B.muted, bg: '#F2F3F5' },
   offline: { fg: B.muted, bg: '#F2F3F5' },
@@ -116,16 +118,49 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
   ${motion('BubbleIn', 1, 1, 160, 'EaseOut')}
   ${motion('BubbleOut', 0, 0.94, 140, 'EaseIn')}
   <Style TargetType="ScrollBar">
-   <Setter Property="Width" Value="6"/>
-   <Setter Property="MinWidth" Value="6"/>
+   <Setter Property="Width" Value="5"/>
+   <Setter Property="MinWidth" Value="5"/>
    <Setter Property="Template"><Setter.Value>
     <ControlTemplate TargetType="ScrollBar">
      <Track x:Name="PART_Track" IsDirectionReversed="True">
       <Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType="Thumb">
-       <Border x:Name="ThumbBar" CornerRadius="3" Background="#D5D8DE" Margin="1,2"/>
-       <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ThumbBar" Property="Background" Value="#AEB3BC"/></Trigger></ControlTemplate.Triggers>
+       <Border x:Name="ThumbBar" CornerRadius="2.5" Background="#D5D8DE" Margin="0,1"/>
+       <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ThumbBar" Property="Background" Value="#9EA4AF"/></Trigger></ControlTemplate.Triggers>
       </ControlTemplate></Thumb.Template></Thumb></Track.Thumb>
      </Track>
+    </ControlTemplate>
+   </Setter.Value></Setter>
+  </Style>
+  <Style TargetType="ScrollViewer">
+   <Setter Property="Template"><Setter.Value>
+    <ControlTemplate TargetType="ScrollViewer">
+     <Grid>
+      <Grid.ColumnDefinitions>
+       <ColumnDefinition Width="*"/>
+       <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <ScrollContentPresenter Grid.Column="0"/>
+      <ScrollBar x:Name="PART_VerticalScrollBar" Grid.Column="1"
+                 Value="{TemplateBinding VerticalOffset}"
+                 Maximum="{TemplateBinding ScrollableHeight}"
+                 ViewportSize="{TemplateBinding ViewportHeight}"
+                 Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"
+                 Width="5" Margin="0,2,1,2" Opacity="0"/>
+     </Grid>
+     <ControlTemplate.Triggers>
+      <Trigger Property="IsMouseOver" Value="True">
+       <Trigger.EnterActions>
+        <BeginStoryboard>
+         <Storyboard><DoubleAnimation Storyboard.TargetName="PART_VerticalScrollBar" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.180"/></Storyboard>
+        </BeginStoryboard>
+       </Trigger.EnterActions>
+       <Trigger.ExitActions>
+        <BeginStoryboard>
+         <Storyboard><DoubleAnimation Storyboard.TargetName="PART_VerticalScrollBar" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.250"/></Storyboard>
+        </BeginStoryboard>
+       </Trigger.ExitActions>
+      </Trigger>
+     </ControlTemplate.Triggers>
     </ControlTemplate>
    </Setter.Value></Setter>
   </Style>
@@ -162,23 +197,38 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
     </DockPanel>
     <TextBlock x:Name="NowLabel" DockPanel.Dock="Top" Margin="0,14,0,4" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
     <TextBlock x:Name="NowText" DockPanel.Dock="Top" Margin="0,0,6,0" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap" LineHeight="20"/>
+    <!-- Tần suất thông báo: 3 nấc (Ít = phiên này + cần xử lý, Vừa = thêm việc trên máy, Tất cả), khối trắng trượt tới nấc đang chọn -->
+    <TextBlock x:Name="NotifyFreqLabel" DockPanel.Dock="Top" Margin="0,14,0,6" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
+    <Grid x:Name="NotifySteps" DockPanel.Dock="Top" Margin="0,0,6,0" Height="30">
+     <Border CornerRadius="9" Background="#F2F3F5"/>
+     <Border x:Name="NotifyThumb" HorizontalAlignment="Left" Margin="2" CornerRadius="7" Background="#FFFFFF" BorderBrush="#E5E6EB" BorderThickness="1">
+      <Border.Effect><DropShadowEffect BlurRadius="6" ShadowDepth="1" Direction="270" Opacity="0.10" Color="#0B1B3F"/></Border.Effect>
+      <Border.RenderTransform><TranslateTransform/></Border.RenderTransform>
+     </Border>
+     <UniformGrid Rows="1" Columns="3">
+${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Background="Transparent" Cursor="Hand">
+       <TextBlock x:Name="NotifyStepText${i}" FontSize="11.5" FontWeight="SemiBold" Foreground="${B.muted}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>`).join('\n')}
+     </UniformGrid>
+    </Grid>
+    <TextBlock x:Name="NotifyFreqValue" DockPanel.Dock="Top" Margin="2,6,6,6" FontSize="11" Foreground="${B.muted}" TextWrapping="Wrap"/>
     <!-- Hàng nút: phiên chat mới (nút chính); "Cho AI làm tiếp" chỉ hiện khi AI đang tạm dừng (dừng bằng aivin remote pause); tắt linh vật (đỏ). -->
     <DockPanel DockPanel.Dock="Bottom" Margin="0,12,6,0" LastChildFill="False">
-     <Button x:Name="NewChatBtn" Style="{StaticResource Btn}" Height="34" Padding="12,0,14,0" Background="${B.brand}" Foreground="White"
+     <Button x:Name="NewChatBtn" Style="{StaticResource Btn}" Height="28" FontSize="12" Padding="9,0,11,0" Background="${B.brand}" Foreground="White"
              BorderThickness="0" Tag="#1F000000">
       <StackPanel Orientation="Horizontal">
        <Path Data="${ICON_NEW_CHAT}" Stroke="White" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-             Width="14" Height="14" Stretch="Uniform" Margin="0,0,7,0" VerticalAlignment="Center"/>
+             Width="12" Height="12" Stretch="Uniform" Margin="0,0,5,0" VerticalAlignment="Center"/>
        <TextBlock x:Name="NewChatText" VerticalAlignment="Center"/>
       </StackPanel>
      </Button>
-     <Button x:Name="PauseBtn" Style="{StaticResource Btn}" Height="34" Padding="14,0" Margin="8,0,0,0" Background="White" Foreground="${B.ink}"
+     <Button x:Name="PauseBtn" Style="{StaticResource Btn}" Height="28" FontSize="12" Padding="10,0" Margin="8,0,0,0" Background="White" Foreground="${B.ink}"
              BorderBrush="#C9CDD4" BorderThickness="1" Tag="#0F000000" Visibility="Collapsed"/>
-     <Button x:Name="OffBtn" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="34" Padding="10,0" Background="Transparent"
+     <Button x:Name="OffBtn" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="28" FontSize="12" Padding="8,0" Background="Transparent"
              Foreground="${OFF_RED}" BorderThickness="0" Tag="#FFECE8" FontWeight="Normal">
       <StackPanel Orientation="Horizontal">
        <Path Data="${ICON_POWER}" Stroke="${OFF_RED}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-             Width="13" Height="13" Stretch="Uniform" Margin="0,0,6,0" VerticalAlignment="Center"/>
+             Width="12" Height="12" Stretch="Uniform" Margin="0,0,5,0" VerticalAlignment="Center"/>
        <TextBlock x:Name="OffText" VerticalAlignment="Center"/>
       </StackPanel>
      </Button>
@@ -187,7 +237,7 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
     <Border CornerRadius="10" Background="#F7F8FA" BorderBrush="#EEF0F4" BorderThickness="1" Margin="0,0,6,0">
      <Grid>
       <TextBlock x:Name="Empty" Margin="12,14" FontSize="12.5" Foreground="${B.muted}" TextWrapping="Wrap"/>
-      <ScrollViewer Height="260" VerticalScrollBarVisibility="Auto"><StackPanel x:Name="LogList" Margin="0,4"/></ScrollViewer>
+      <ScrollViewer Height="210" VerticalScrollBarVisibility="Auto"><StackPanel x:Name="LogList" Margin="0,4"/></ScrollViewer>
      </Grid>
     </Border>
    </DockPanel>
@@ -205,11 +255,15 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
    <Border.RenderTransform><ScaleTransform ScaleX="0.96" ScaleY="0.96"/></Border.RenderTransform>
    <Border.Effect><DropShadowEffect BlurRadius="12" ShadowDepth="1" Direction="270" Opacity="0.10" Color="#6B5CE7"/></Border.Effect>
    <StackPanel Margin="12,8,7,7">
-    <ScrollViewer x:Name="ChatScroll" MaxHeight="160" VerticalScrollBarVisibility="Hidden" Visibility="Collapsed" Margin="0,3,4,5">
-     <StackPanel x:Name="ChatList"/>
+    <ScrollViewer x:Name="ChatScroll" MaxHeight="220" VerticalScrollBarVisibility="Auto" Visibility="Collapsed" Margin="0,3,-4,5">
+     <StackPanel Margin="0,0,10,0">
+      <StackPanel x:Name="ChatList"/>
+      <!-- Nút trả lời nhanh khi Aivin hỏi lại (thẻ chọn của agent) — askHostSource.mjs dựng theo lệnh ask_choices. -->
+      <StackPanel x:Name="Choices" Visibility="Collapsed" Margin="0,2,0,2"/>
+     </StackPanel>
     </ScrollViewer>
-    <!-- Nút trả lời nhanh khi Aivin hỏi lại (thẻ chọn của agent) — askHostSource.mjs dựng theo lệnh ask_choices. -->
-    <StackPanel x:Name="Choices" Visibility="Collapsed" Margin="0,0,4,5"/>
+    <!-- Tệp thả vào bot, chờ đi kèm câu kế tiếp: chip icon + màu theo loại tệp, nút x để bỏ (askHostSource.mjs dựng theo ask_files). -->
+    <WrapPanel x:Name="AttachBar" Visibility="Collapsed" Margin="-4,0,0,5"/>
     <DockPanel>
      <Button x:Name="MicBtn" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Width="26" Height="26" Margin="6,0,0,0" VerticalAlignment="Bottom"
              Background="${ASK_BTN.bg}" BorderThickness="0" Tag="#14000000">
@@ -222,12 +276,12 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
       </Grid>
      </Button>
      <Grid MinHeight="40">
-      <TextBox x:Name="AskBox" BorderThickness="0" Background="Transparent" FontSize="13" Foreground="${B.ink}" TextWrapping="Wrap"
+      <TextBox x:Name="AskBox" BorderThickness="0" Background="Transparent" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap"
                MaxHeight="60" VerticalScrollBarVisibility="Hidden" CaretBrush="#8B7CF6" MaxLength="2000" Padding="0,1,0,1"/>
-      <TextBlock x:Name="AskHint" IsHitTestVisible="False" FontSize="13" Foreground="#A9AEB8" Margin="2,1,0,0" TextTrimming="CharacterEllipsis"/>
+      <TextBlock x:Name="AskHint" IsHitTestVisible="False" FontSize="14" Foreground="#A9AEB8" Margin="2,1,0,0" TextTrimming="CharacterEllipsis"/>
      </Grid>
     </DockPanel>
-    <TextBlock x:Name="AskStatus" Visibility="Collapsed" FontSize="11" Foreground="${B.muted}" Margin="0,2,4,1" TextTrimming="CharacterEllipsis"/>
+    <TextBlock x:Name="AskStatus" Visibility="Collapsed" FontSize="13" Foreground="${B.muted}" Margin="0,2,4,1" TextTrimming="CharacterEllipsis"/>
    </StackPanel>
   </Border>
   <Grid x:Name="Bubble" Visibility="Collapsed" Opacity="0" RenderTransformOrigin="0.5,1">
@@ -237,7 +291,7 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
     <DockPanel>
      <!-- Chấm trạng thái đã có ở quả cầu ăng-ten trên đầu bot — bong bóng không lặp lại (giữ phần tử ẩn vì SetState còn tô màu nó). -->
      <Ellipse x:Name="BubbleDot" Width="6" Height="6" Margin="0,5,7,0" VerticalAlignment="Top" Visibility="Collapsed"/>
-     <TextBlock x:Name="BubbleText" FontSize="12" Foreground="${B.ink}" TextWrapping="Wrap" MaxHeight="34" TextTrimming="CharacterEllipsis" LineHeight="17"/>
+     <TextBlock x:Name="BubbleText" FontSize="13" Foreground="${B.ink}" TextWrapping="Wrap" MaxHeight="36" TextTrimming="CharacterEllipsis" LineHeight="18"/>
     </DockPanel>
    </Border>
    <Path x:Name="Tail" Data="M0,0 L14,0 L7,7 Z" Fill="#D9DCE1" VerticalAlignment="Bottom" HorizontalAlignment="Center" RenderTransformOrigin="0.5,0.5"/>
@@ -254,8 +308,27 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
 </Window>`;
 
 export const MASCOT_PS1 = String.raw`$ErrorActionPreference = 'Stop'
+# Single mascot instance check
+try {
+  # Only mascot hosts (any version: each lives in <mascot dir>\<hash>\host.ps1, an orphan of an old version would hold the mutex), same Windows
+  # session: a bare 'host.ps1' match also killed the user's localhost.ps1, ghost.ps1...
+  $myPid = $PID; $mySession = (Get-Process -Id $PID).SessionId
+  $mascotBase = if ($PSCommandPath) { Split-Path (Split-Path $PSCommandPath -Parent) -Parent } else { $null }
+  if ($mascotBase) {
+    Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+      if ($_.ProcessId -ne $myPid -and $_.SessionId -eq $mySession -and $_.CommandLine -and $_.CommandLine.IndexOf($mascotBase, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $_.CommandLine.IndexOf('host.ps1', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+} catch {}
+$createdNew = $false
+$script:mascotMutex = New-Object System.Threading.Mutex($true, "Local\AivinMascotSingleInstance", [ref]$createdNew)
+if (-not $createdNew) { exit 0 }
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
 $utf8 = New-Object Text.UTF8Encoding $false
+# stderr (errors, Dbg) in UTF-8: the daemon reads it as UTF-8 (stdout has its own UTF-8 writer, AivinMascot.Output).
+try { [Console]::OutputEncoding = $utf8 } catch {}
 $dir = $env:AIVIN_MASCOT_DIR
 function ReadText($name) { [IO.File]::ReadAllText((Join-Path $dir $name), $utf8) }
 $cfg = ReadText 'config.json' | ConvertFrom-Json
@@ -264,6 +337,15 @@ $T = $cfg.strings; $P = $cfg.palette
 function Send($o) { [AivinMascot.Output]::Line(($o | ConvertTo-Json -Compress)) }
 # Debug trace: stderr + debug.log in the host folder (stderr is only kept as the last error line by the daemon).
 function Dbg($text) { if ($env:AIVIN_MASCOT_DEBUG) { $line = "$([DateTime]::Now.ToString('HH:mm:ss.fff')) $text"; [Console]::Error.WriteLine("mascot: $line"); try { [IO.File]::AppendAllText((Join-Path $dir 'debug.log'), ($line + [Environment]::NewLine), $utf8) } catch {} } }
+# Clicking a bubble / log row / chat row opens its link: http(s), or a call / mail / text from an answer's button (the daemon filters too) - Process.Start
+# would run file:, shell: or a program path as is.
+function OpenWebUrl($u) {
+  $s = [string]$u; if (-not $s) { return }
+  $uri = $null
+  if ([Uri]::TryCreate($s, [UriKind]::Absolute, [ref]$uri) -and @('http', 'https', 'mailto', 'tel', 'sms') -contains $uri.Scheme) {
+    try { [void][System.Diagnostics.Process]::Start($uri.AbsoluteUri) } catch {}
+  } else { Dbg "open url refused: $s" }
+}
 # Win32 calls + a background thread that reads stdin lines into a queue (stream ReadLineAsync faults on a console pipe in .NET Framework)
 # + the bot's per-frame motion rig (C#, see rigSource.mjs) + live voice: mic / speaker streaming (C#, see voiceSource.mjs).
 Add-Type -ReferencedAssemblies ${RIG_REFERENCES_PS} -TypeDefinition @'
@@ -308,6 +390,30 @@ namespace AivinMascot {
       // WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE + SPI_SETWORKAREA.
       if (msg == 0x007E || msg == 0x02E0 || (msg == 0x001A && wp.ToInt64() == 0x2F)) {
         System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, changed);
+      }
+      return IntPtr.Zero;
+    }
+  }
+  /** Global hotkeys (RegisterHotKey): the first free combination of each list (the daemon writes the lists into config.json). WM_HOTKEY is
+      picked out here in C# and only then handed to PowerShell (a PowerShell hook would run for every window message). */
+  public static class HotKeys {
+    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr h, int id, uint mods, uint vk);
+    static Action<int> pressed; static System.Windows.Interop.HwndSourceHook hook;
+    public static void Start(IntPtr h, Action<int> onPressed) {
+      if (hook != null) return;
+      pressed = onPressed; hook = Hook;
+      System.Windows.Interop.HwndSource.FromHwnd(h).AddHook(hook);
+    }
+    /** Registers the first combination that is free; returns its index in the list, -1 = none (all taken / empty list). */
+    public static int RegisterFirst(IntPtr h, int id, uint[] mods, uint[] vks) {
+      if (mods == null || vks == null) return -1;
+      for (int i = 0; i < mods.Length && i < vks.Length; i++) if (RegisterHotKey(h, id, mods[i], vks[i])) return i;
+      return -1;
+    }
+    static IntPtr Hook(IntPtr h, int msg, IntPtr wp, IntPtr lp, ref bool handled) {
+      if (msg == 0x0312 && pressed != null) {
+        int id = wp.ToInt32(); var cb = pressed; handled = true;
+        System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Normal, (Action)(() => cb(id)));
       }
       return IntPtr.Zero;
     }
@@ -374,11 +480,15 @@ namespace AivinMascot {
   }
 ${RIG_CS}
 ${VOICE_CS}
+${EMOJI_CS}
 }
 '@
 
 $w = [Windows.Markup.XamlReader]::Parse((ReadText 'mascot.xaml'))
 function E($n) { $w.FindName($n) }
+# Text that may hold emoji from the AI: WPF draws color fonts in one color, AivinMascot.Emoji (emojiSource.mjs) draws them in color. Read back with
+# [AivinMascot.Emoji]::Text - TextBlock.Text does not return the same string once it holds pictures.
+function SetText($el, $text) { [AivinMascot.Emoji]::Set($el, [string]$text) }
 $conv = New-Object Windows.Media.BrushConverter
 function Brush($hex) { $conv.ConvertFromString($hex) }
 function Img($file) { $b = New-Object Windows.Media.Imaging.BitmapImage; $b.BeginInit(); $b.UriSource = New-Object Uri (Join-Path $dir $file); $b.CacheOption = 'OnLoad'; $b.EndInit(); $b.Freeze(); $b }
@@ -387,13 +497,56 @@ $script:rig = [AivinMascot.Rig]::new($w)
 $w.Title = $T.window_title; (E 'Mascot').ToolTip = $T.tooltip; (E 'PanelTitle').Text = $T.panel_title
 (E 'NowLabel').Text = $T.now_label; (E 'LogLabel').Text = $T.log_label; (E 'Empty').Text = $T.nothing_yet; (E 'NowText').Text = $T.ready
 (E 'OffText').Text = $T.turn_off; (E 'PanelClose').ToolTip = $T.close
+(E 'NotifyFreqLabel').Text = $T.notify_freq_label
+(E 'NotifyStepText0').Text = $T.notify_step_min; (E 'NotifyStepText1').Text = $T.notify_step_mid; (E 'NotifyStepText2').Text = $T.notify_step_max
+# Notification level: 3 steps; the white thumb slides to the chosen step (width = a third of the track, set on resize).
+function PlaceNotifyThumb([bool]$animate) {
+  $track = E 'NotifySteps'; $thumb = E 'NotifyThumb'
+  $w3 = [Math]::Max(0, ($track.ActualWidth - 4) / 3)
+  if ($w3 -le 0) { return }
+  $thumb.Width = $w3
+  $x = $w3 * $script:notifyFreq
+  $tt = $thumb.RenderTransform
+  if ($animate) {
+    $a = New-Object Windows.Media.Animation.DoubleAnimation $x, ([TimeSpan]::FromMilliseconds(180))
+    $ce = New-Object Windows.Media.Animation.CubicEase; $ce.EasingMode = 'EaseOut'; $a.EasingFunction = $ce
+    $tt.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $a)
+  } else {
+    $tt.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $null); $tt.X = $x
+  }
+}
+function SyncNotifyDesc($val, [bool]$animate = $true) {
+  (E 'NotifyFreqValue').Text = switch ([int]$val) {
+    0 { $T.notify_freq_min }
+    1 { $T.notify_freq_mid }
+    default { $T.notify_freq_max }
+  }
+  for ($i = 0; $i -lt 3; $i++) { (E "NotifyStepText$i").Foreground = if ($i -eq [int]$val) { Brush $P.working.fg } else { Brush $P.muted } }
+  PlaceNotifyThumb $animate
+}
+$script:notifyFreq = if ($cfg.notify_freq -ne $null) { [int]$cfg.notify_freq } else { 1 }
+SyncNotifyDesc $script:notifyFreq $false
+(E 'NotifySteps').Add_SizeChanged({ PlaceNotifyThumb $false })
+for ($i = 0; $i -lt 3; $i++) {
+  $step = E "NotifyStep$i"
+  $step.Add_MouseEnter({ param($s, $e) if ([int]$s.Tag -ne $script:notifyFreq) { $s.Child.Foreground = Brush $P.ink } })
+  $step.Add_MouseLeave({ param($s, $e) if ([int]$s.Tag -ne $script:notifyFreq) { $s.Child.Foreground = Brush $P.muted } })
+  $step.Add_MouseLeftButtonUp({ param($s, $e)
+    $v = [int]$s.Tag
+    if ($v -ne $script:notifyFreq) {
+      $script:notifyFreq = $v
+      SyncNotifyDesc $v
+      Send @{ t = 'notify_freq'; value = $v }
+    }
+  })
+}
 
-# No focus stealing + no Alt+Tab entry; hidden from screen capture (AI screenshots, screen sharing).
+# No focus stealing + no Alt+Tab entry. NOT hidden from screen capture: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE = 0x11) on this
+# transparent layered window made the bot invisible on the real desktop on some machines (commit efa202c, 01/11/2026), so it stays off.
 $w.Add_SourceInitialized({
   $h = (New-Object Windows.Interop.WindowInteropHelper $w).Handle
   $ex = [AivinMascot.Native]::GetWindowLong($h, -20)
   [void][AivinMascot.Native]::SetWindowLong($h, -20, ($ex -bor 0x08000000 -bor 0x00000080))
-  if (-not $env:AIVIN_MASCOT_CAPTURABLE) { [void][AivinMascot.Native]::SetWindowDisplayAffinity($h, 0x11) }
   $script:hwnd = $h
   [AivinMascot.TopKeeper]::Start($h)
   [AivinMascot.DisplayWatch]::Start($h, [Action]{ Dbg 'display changed'; Place })
@@ -410,7 +563,7 @@ $script:topTimer.Start()
 # change: the bot sits at the anchor inside it, the boxes (ask box, bubble, activity panel) are laid out around the bot (ArrangeBoxes).
 $wa = [Windows.SystemParameters]::WorkArea
 $script:cx = if ($cfg.x -ne $null) { [double]$cfg.x } else { $wa.Right - 76 }
-$script:cy = if ($cfg.y -ne $null) { [double]$cfg.y } else { $wa.Bottom - 70 }
+$script:cy = if ($cfg.y -ne $null) { [double]$cfg.y } else { [Windows.SystemParameters]::PrimaryScreenHeight - ${MASCOT_BOX.h - MASCOT_CENTER.y} }
 # Bot center inside the window (DIPs).
 $script:mx = ${WINDOW.w / 2}; $script:my = ${WINDOW.h - ROOT_MARGIN - (MASCOT_BOX.h - MASCOT_CENTER.y)}
 function DeviceScale {
@@ -433,7 +586,7 @@ function Place {
   # inside it instead. One SetWindowPos (device pixels) - setting Left then Top moved the window twice.
   $px = [Math]::Round((Clamp ($script:cx - ${WINDOW.w / 2}) $ml ($mr - ${WINDOW.w})) * $k)
   $py = [Math]::Round((Clamp ($script:cy - ${WINDOW.h - ROOT_MARGIN - (MASCOT_BOX.h - MASCOT_CENTER.y)}) $mt ($mb - ${WINDOW.h})) * $k)
-  if ($script:hwnd) { [void][AivinMascot.Native]::SetWindowPos($script:hwnd, [IntPtr]::Zero, [int]$px, [int]$py, 0, 0, 0x0015) }
+  if ($script:hwnd) { [void][AivinMascot.Native]::SetWindowPos($script:hwnd, [IntPtr]::Zero, [int]$px, [int]$py, 0, 0, 0x0055) }
   else { $w.Left = $px / $k; $w.Top = $py / $k }
   $script:mx = $script:cx - $px / $k; $script:my = $script:cy - $py / $k
   $m = E 'Mascot'; [Windows.Controls.Canvas]::SetLeft($m, $script:mx - ${MASCOT_CENTER.x}); [Windows.Controls.Canvas]::SetTop($m, $script:my - ${MASCOT_CENTER.y})
@@ -488,7 +641,7 @@ function React($prev, $s) {
   if ($s -eq 'waiting' -and ($prev -eq 'working' -or $prev -eq 'thinking')) { $script:rig.Play('startle') }
   elseif ($s -eq 'done') {
     if (($now - $script:errorAt).TotalMinutes -lt 5) { $script:errorAt = [DateTime]::MinValue; PlayFace 'relief' 'relief' 1.3 }
-    elseif ($busyFor -ge 60) { $script:rig.Play('cheer') }
+    elseif ($busyFor -ge 60) { PlayFace 'cheer' 'star' 2.2 }
     elseif ($busyFor -gt 0 -and $busyFor -lt 10) { $script:rig.Play('small') }
   }
 }
@@ -510,17 +663,41 @@ function SetState($s) {
 
 # Pointer: the rig follows the cursor with its eyes on its own (anywhere near the bot). Hovering greets with a happy face and a lean-in.
 function IsBusy { $script:state -eq 'working' -or $script:state -eq 'thinking' }
-(E 'Mascot').Add_MouseEnter({ Wake; $script:rig.Hover = $true; if (-not (IsBusy) -and -not $script:rig.Dizzy) { SetFace 'hello' } })
+(E 'Mascot').Add_MouseEnter({
+  $startled = Wake $true
+  $script:rig.Hover = $true
+  if ($startled) { return }
+  if (-not (IsBusy) -and -not $script:rig.Dizzy) { if ((Get-Random -Minimum 0 -Maximum 10) -lt 3) { PlayFace 'wink' 'wink' 1.4 } else { SetFace 'hello' } }
+})
 
-# Doze: idle for a long while with nobody around -> the bot nods off (closed eyes, zzz); new work or the pointer wakes it up.
+# Doze: idle for a short while with nobody around -> the bot nods off (closed eyes, zzz); new work or the pointer wakes it up.
 $script:lastActive = Get-Date
-function Wake { $script:lastActive = Get-Date; $script:yawned = $false; if ($script:rig.Dozing) { $script:rig.Doze($false); SetFace $script:state } }
-$script:dozeTimer = New-Object Windows.Threading.DispatcherTimer; $script:dozeTimer.Interval = [TimeSpan]::FromSeconds(15)
+function Wake($fromHover = $false) {
+  $wasSleeping = $script:rig.Dozing -or $script:yawned
+  $script:lastActive = Get-Date
+  $script:yawned = $false
+  if ($wasSleeping) {
+    if ($script:rig.Dozing) { $script:rig.Doze($false) }
+    if ($fromHover) {
+      $script:rig.Play('startle')
+      SetFace 'waiting'
+      $script:faceTimer.Stop()
+      $script:faceTimer.Interval = [TimeSpan]::FromSeconds(0.85)
+      $script:faceTimer.Start()
+      return $true
+    } else {
+      SetFace $script:state
+    }
+  }
+  return $false
+}
+$script:remoteView = $false
+$script:dozeTimer = New-Object Windows.Threading.DispatcherTimer; $script:dozeTimer.Interval = [TimeSpan]::FromSeconds(3)
 $script:dozeTimer.Add_Tick({
-  if ($script:state -eq 'idle' -and -not $script:rig.Dozing -and -not $script:rig.Hover -and ((Get-Date) - $script:lastActive).TotalMinutes -ge ${MASCOT_DOZE_MIN}) {
-    # A yawn first, nodding off on the next tick (PlayFace would count as activity: keep the idle clock and the yawn flag).
-    if (-not $script:yawned) { $script:rig.Play('yawn'); SetFace 'yawn'; $script:faceTimer.Stop(); $script:faceTimer.Interval = [TimeSpan]::FromSeconds(2); $script:faceTimer.Start(); $script:yawned = $true }
-    else { $script:rig.Doze($true); SetFace 'offline' }
+  if (-not $script:remoteView -and $script:state -eq 'idle' -and -not $script:rig.Dozing -and -not $script:rig.Hover -and (E 'AskBox').Visibility -ne 'Visible' -and (E 'Panel').Visibility -ne 'Visible' -and ((Get-Date) - $script:lastActive).TotalSeconds -ge ${MASCOT_DOZE_SEC}) {
+    # A yawn first, nodding off when yawn finishes (or on next tick).
+    if (-not $script:yawned) { $script:yawned = $true; $script:rig.Play('yawn'); SetFace 'yawn'; $script:faceTimer.Stop(); $script:faceTimer.Interval = [TimeSpan]::FromSeconds(2.2); $script:faceTimer.Start() }
+    elseif (-not $script:faceTimer.IsEnabled) { $script:rig.Doze($true); SetFace 'offline' }
   }
 })
 $script:dozeTimer.Start()
@@ -528,7 +705,14 @@ $script:dozeTimer.Start()
 
 # Play: a one-shot face for a reaction, then back to the normal face (hello while hovered and free, else the state's face).
 $script:faceTimer = New-Object Windows.Threading.DispatcherTimer
-$script:faceTimer.Add_Tick({ $script:faceTimer.Stop(); SetFace $(if ($script:rig.Hover -and -not (IsBusy)) { 'hello' } else { $script:state }) })
+$script:faceTimer.Add_Tick({
+  $script:faceTimer.Stop()
+  if ($script:yawned -and -not $script:rig.Dozing -and -not $script:rig.Hover -and $script:state -eq 'idle') {
+    $script:rig.Doze($true); SetFace 'offline'
+  } else {
+    SetFace $(if ($script:rig.Hover -and -not (IsBusy)) { 'hello' } else { $script:state })
+  }
+})
 function PlayFace($gesture, $face, $sec) {
   Wake; $script:rig.Play($gesture); SetFace $face
   $script:faceTimer.Stop(); $script:faceTimer.Interval = [TimeSpan]::FromSeconds($sec); $script:faceTimer.Start()
@@ -615,49 +799,94 @@ function HideBubble {
   $b = E 'Bubble'; if ($b.Visibility -ne 'Visible') { return }
   $sb = $w.FindResource('BubbleOut').Clone(); $sb.Add_Completed({ (E 'Bubble').Visibility = 'Collapsed' }); $sb.Begin($b)
 }
-function ShowBubble($text) {
-  (E 'NowText').Text = $text
+$script:bubbleUrl = $null
+function ShowBubble($text, $url = $null) {
+  $script:bubbleUrl = $url
+  SetText (E 'NowText') $text
   if ((E 'Panel').Visibility -eq 'Visible') { return }
-  (E 'BubbleText').Text = $text
+  SetText (E 'BubbleText') $text
+  (E 'BubbleBox').Cursor = if ($url) { [Windows.Input.Cursors]::Hand } else { [Windows.Input.Cursors]::Arrow }
   $b = E 'Bubble'
   if ($b.Visibility -ne 'Visible') { $b.Visibility = 'Visible'; $w.FindResource('BubbleIn').Begin($b) }
   $script:bubbleTimer.Stop()
   if ($script:state -ne 'working' -and $script:state -ne 'thinking' -and $script:state -ne 'waiting') { $script:bubbleTimer.Start() }
 }
+(E 'BubbleBox').Add_MouseLeftButtonUp({
+  if ($script:bubbleUrl) { OpenWebUrl $script:bubbleUrl }
+})
 
 $script:rows = @{}; $script:order = New-Object System.Collections.Generic.Queue[string]
 function LogEntry($m) {
   $row = $null; if ($m.id) { $row = $script:rows[[string]$m.id] }
   if (-not $row) {
-    $dp = New-Object Windows.Controls.DockPanel; $dp.Margin = '10,6,10,6'
+    $dp = New-Object Windows.Controls.DockPanel; $dp.Margin = '10,3,10,3'
     $g = New-Object Windows.Controls.TextBlock; $g.Width = 16; $g.FontSize = 12; $g.FontWeight = 'Bold'; $g.Margin = '0,1,6,0'; [Windows.Controls.DockPanel]::SetDock($g, 'Left')
     $tm = New-Object Windows.Controls.TextBlock; $tm.FontSize = 11; $tm.Foreground = Brush $P.muted; $tm.Margin = '8,2,0,0'; [Windows.Controls.DockPanel]::SetDock($tm, 'Right')
     $sp = New-Object Windows.Controls.StackPanel
     $ti = New-Object Windows.Controls.TextBlock; $ti.FontSize = 13; $ti.Foreground = Brush $P.ink; $ti.TextWrapping = 'Wrap'
-    $sub = New-Object Windows.Controls.TextBlock; $sub.FontSize = 11.5; $sub.Foreground = Brush $P.muted; $sub.TextWrapping = 'Wrap'; $sub.MaxHeight = 32; $sub.TextTrimming = 'CharacterEllipsis'; $sub.Margin = '0,1,0,0'
+    $sub = New-Object Windows.Controls.TextBlock; $sub.FontSize = 11.5; $sub.Foreground = Brush $P.muted; $sub.TextWrapping = 'Wrap'; $sub.MaxHeight = 32; $sub.TextTrimming = 'CharacterEllipsis'; $sub.Margin = '0,1,0,0'; $sub.Visibility = 'Collapsed'
     [void]$sp.Children.Add($ti); [void]$sp.Children.Add($sub)
     [void]$dp.Children.Add($g); [void]$dp.Children.Add($tm); [void]$dp.Children.Add($sp)
     $list = E 'LogList'; $list.Children.Insert(0, $dp); (E 'Empty').Visibility = 'Collapsed'
-    $row = @{ glyph = $g; time = $tm; title = $ti; sub = $sub }
+    $row = @{ glyph = $g; time = $tm; title = $ti; sub = $sub; url = [string]$m.url }
+    if ($m.url) {
+      $dp.Cursor = [Windows.Input.Cursors]::Hand
+      $dp.ToolTip = [string]$m.url; $dp.Tag = [string]$m.url
+      # The link rides on the row itself (Tag): the handler is not a closure, $row at click time is not this row.
+      $dp.Add_MouseLeftButtonUp({ param($s) OpenWebUrl $s.Tag })
+    }
     if ($m.id) { $script:rows[[string]$m.id] = $row; $script:order.Enqueue([string]$m.id) }
     while ($list.Children.Count -gt 150) { $list.Children.RemoveAt($list.Children.Count - 1) }
     while ($script:order.Count -gt 150) { $script:rows.Remove($script:order.Dequeue()) }
   }
   if ($m.status) { $row.glyph.Text = $cfg.glyphs.($m.status); $row.glyph.Foreground = Brush $P.log.($m.status) }
-  if ($m.title) { $row.title.Text = $m.title }
-  if ($m.PSObject.Properties['sub']) { $row.sub.Text = [string]$m.sub; $row.sub.Visibility = if ($m.sub) { 'Visible' } else { 'Collapsed' } }
+  if ($m.title) { SetText $row.title $m.title }
+  if ($m.PSObject.Properties['sub']) { SetText $row.sub $m.sub; $row.sub.Visibility = if ($m.sub) { 'Visible' } else { 'Collapsed' } }
   if ($m.time) { $row.time.Text = $m.time }
+}
+
+function ClosePanel {
+  $p = E 'Panel'
+  if ($p.Visibility -eq 'Visible') {
+    if ($script:panelHideTimer) { $script:panelHideTimer.Stop() }
+    $sb = $w.FindResource('PanelOut').Clone(); $sb.Add_Completed({ (E 'Panel').Visibility = 'Collapsed' }); $sb.Begin($p)
+  }
+}
+
+function OpenPanel {
+  $script:bubbleTimer.Stop(); (E 'Bubble').Visibility = 'Collapsed'; (E 'Bubble').Opacity = 0
+  $p = E 'Panel'
+  if ($p.Visibility -ne 'Visible') {
+    $p.Visibility = 'Visible'; $w.FindResource('PanelIn').Begin($p)
+  }
 }
 
 function TogglePanel {
   $p = E 'Panel'
-  if ($p.Visibility -eq 'Visible') {
-    $sb = $w.FindResource('PanelOut').Clone(); $sb.Add_Completed({ (E 'Panel').Visibility = 'Collapsed' }); $sb.Begin($p)
-  } else {
-    $script:bubbleTimer.Stop(); (E 'Bubble').Visibility = 'Collapsed'; (E 'Bubble').Opacity = 0
-    $p.Visibility = 'Visible'; $w.FindResource('PanelIn').Begin($p)
-  }
+  if ($p.Visibility -eq 'Visible') { ClosePanel }
+  else { OpenPanel }
 }
+
+# Auto-hide panel when mouse leaves panel area
+$script:panelHideTimer = New-Object Windows.Threading.DispatcherTimer
+$script:panelHideTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+$script:panelHideTimer.Add_Tick({
+  $script:panelHideTimer.Stop()
+  if ((E 'Panel').Visibility -eq 'Visible') {
+    if (-not (E 'Panel').IsMouseOver -and -not (E 'Mascot').IsMouseOver) {
+      ClosePanel
+    }
+  }
+})
+
+(E 'Panel').Add_MouseEnter({ $script:panelHideTimer.Stop() })
+(E 'Mascot').Add_MouseEnter({ $script:panelHideTimer.Stop() })
+
+(E 'Panel').Add_MouseLeave({
+  if ((E 'Panel').Visibility -eq 'Visible') {
+    $script:panelHideTimer.Start()
+  }
+})
 
 $script:userHidden = $false; $script:guiHidden = $false
 function ApplyVisibility { $w.Visibility = if ($script:userHidden -or $script:guiHidden) { 'Hidden' } else { 'Visible' } }
@@ -726,12 +955,25 @@ function Handle($m) {
   if ($env:AIVIN_MASCOT_DEBUG) { Dbg "recv $($m.t) $($m.state)$($m.text)$($m.title)" }
   switch ($m.t) {
     'state' { SetState $m.state }
-    'main' { if ($m.quiet) { (E 'NowText').Text = $m.text } else { ShowBubble $m.text } }
+    'notify_freq' {
+      $script:notifyFreq = [int]$m.value
+      SyncNotifyDesc $script:notifyFreq
+    }
+    'main' { if ($m.quiet) { SetText (E 'NowText') $m.text } else { ShowBubble $m.text $m.url } }
     'log' { LogEntry $m }
     'gui' { $script:guiHidden = [bool]$m.active; ApplyVisibility }
+    # Someone is viewing / controlling this computer: wave eyes for the whole session.
+    'remote_view' {
+      $script:remoteView = [bool]$m.on
+      if ($script:remoteView) { [void](Wake) }
+      $script:rig.RemoteWave($script:remoteView)
+    }
     'show' { $script:userHidden = $false; ApplyVisibility }
-    # Daemon-driven reaction, e.g. 'wave' when the user comes back.
-    'gesture' { if (-not (IsBusy)) { PlayFace ([string]$m.g) 'hello' 1.6 } else { $script:rig.Play([string]$m.g) } }
+    # Daemon-driven reaction, e.g. 'wave' when the user comes back, or the mood of an answer's emoji (mood.mjs: its own face + time).
+    'gesture' {
+      $face = if ($m.face) { [string]$m.face } else { 'hello' }; $sec = if ($m.sec) { [double]$m.sec } else { 1.6 }
+      if (-not (IsBusy)) { PlayFace ([string]$m.g) $face $sec } else { $script:rig.Play([string]$m.g) }
+    }
     # Files dropped on the bot still waiting for the next question (0 = sent / cleared): the tray in the bot's arms + its badge.
     'ask_files' { $script:files = [int]$m.n; if (-not $script:dragFiles) { TrayRest } }
     'quit' { CloseAnimated }
@@ -739,10 +981,51 @@ function Handle($m) {
 }
 
 # @ASK_HOOK
+# Watch mascot-hide and mascot.json so toggling from system tray closes the mascot immediately.
+$script:aivinHome = if ($dir) { Split-Path (Split-Path $dir) } else { $null }
+if (-not $script:aivinHome -or -not [System.IO.Directory]::Exists($script:aivinHome)) {
+  $script:aivinHome = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.aivin'
+}
+$script:hideFile = Join-Path $script:aivinHome 'mascot-hide'
+$script:mascotJson = Join-Path $script:aivinHome 'mascot.json'
+$script:lastHideTime = [DateTime]::UtcNow
+if ([System.IO.File]::Exists($script:hideFile)) {
+  try { $script:lastHideTime = [System.IO.File]::GetLastWriteTimeUtc($script:hideFile) } catch {}
+}
+$script:lastMascotJsonTime = [DateTime]::UtcNow
+if ([System.IO.File]::Exists($script:mascotJson)) {
+  try { $script:lastMascotJsonTime = [System.IO.File]::GetLastWriteTimeUtc($script:mascotJson) } catch {}
+}
+
 # Commands arrive as JSON lines on stdin (background thread -> queue); the UI drains the queue. stdin closed = daemon gone -> close.
 [AivinMascot.Input]::Start()
 $pump = New-Object Windows.Threading.DispatcherTimer; $pump.Interval = [TimeSpan]::FromMilliseconds(80)
 $pump.Add_Tick({
+  if ($script:hideFile -and [System.IO.File]::Exists($script:hideFile)) {
+    try {
+      $ht = [System.IO.File]::GetLastWriteTimeUtc($script:hideFile)
+      if ($ht -gt $script:lastHideTime) {
+        $script:lastHideTime = $ht
+        Send @{ t = 'off' }
+        CloseAnimated
+        return
+      }
+    } catch {}
+  }
+  if ($script:mascotJson -and [System.IO.File]::Exists($script:mascotJson)) {
+    try {
+      $mj = [System.IO.File]::GetLastWriteTimeUtc($script:mascotJson)
+      if ($mj -gt $script:lastMascotJsonTime) {
+        $script:lastMascotJsonTime = $mj
+        $txt = [System.IO.File]::ReadAllText($script:mascotJson)
+        if ($txt -match '"enabled"\s*:\s*false') {
+          Send @{ t = 'off' }
+          CloseAnimated
+          return
+        }
+      }
+    } catch {}
+  }
   $line = $null
   while ([AivinMascot.Input]::Lines.TryDequeue([ref]$line)) {
     if ($line) { try { Handle ($line | ConvertFrom-Json) } catch { [Console]::Error.WriteLine($_.Exception.Message) } }
@@ -752,7 +1035,10 @@ $pump.Add_Tick({
 $w.Add_ContentRendered({
   SetState 'idle'; Place; $w.FindResource('WindowIn').Begin($w); $script:rig.Start(); $script:rig.Intro(); $pump.Start(); Send @{ t = 'ready' }
 })
-$w.Add_Closed({ $script:rig.Stop() })
+$w.Add_Closed({
+  try { if ($script:mascotMutex) { $script:mascotMutex.ReleaseMutex(); $script:mascotMutex.Dispose() } } catch {}
+  $script:rig.Stop()
+})
 $app = New-Object Windows.Application
 $app.ShutdownMode = 'OnMainWindowClose'
 [void]$app.Run($w)
