@@ -143,6 +143,8 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     onCursor,
     onCursorShape,
     onInputFocus,
+    onPasteFailed,
+    onDropRefused,
     onClipboard,
     onSecureDesktop,
     onCapture,
@@ -238,6 +240,10 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
         onCursor?.({ x: msg.x, y: msg.y, visible: msg.visible, shape: msg.shape });
       } else if (msg.t === 'cursor_shape') {
         onCursorShape?.({ id: msg.id, png: msg.png, hotX: msg.hotX, hotY: msg.hotY });
+      } else if (msg.t === 'drop_refused') {
+        onDropRefused?.();
+      } else if (msg.t === 'paste_failed') {
+        onPasteFailed?.();
       } else if (msg.t === 'input_focus') {
         onInputFocus?.({ editable: msg.editable === true });
       } else if (msg.t === 'clipboard') {

@@ -47,7 +47,7 @@ import { createAutoUpdater } from './autoUpdate.mjs';
 import { createDesktopCastManager } from './desktop/desktopCast.mjs';
 import { createDesktopWebRtcWorker } from './desktop/webrtcWorker.mjs';
 import { CastInputRejection, createCastInputGate } from './desktop/castInput.mjs';
-import { createCastFileDrop, FileDropReason, revealInExplorer } from './desktop/castFileDrop.mjs';
+import { createCastFileDrop, createDropBatches, FileDropReason, revealInExplorer } from './desktop/castFileDrop.mjs';
 import {
   askCastConsent, checkCastAction, clearCastSession, isCastLocked, lockCast, recordCastSession, unlockCast,
 } from './desktop/castAuth.mjs';
@@ -470,16 +470,22 @@ export async function startRemoteClient(options = {}) {
       emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.AWAITING_CONSENT });
     },
   });
+  const castDropBatches = createDropBatches();
   const castFileDrop = createCastFileDrop({
     reply: (viewerId, msg) => desktopWebRtc.replyFile(viewerId, msg),
     checkAllowed: () => (isRemotePaused() ? FileDropReason.PAUSED : aiGuiBusy > 0 ? FileDropReason.AI_ACTIVE : null),
-    onSaved: ({ path: file, name, bytes, reveal, paste, x, y, rx, ry }) => {
+    onSaved: ({ viewerId, path: file, name, bytes, reveal, paste, image, drop, batch, last, x, y, rx, ry }) => {
       say(chalk.cyan(`  📥 Đã nhận tệp từ web: ${file}`));
       logActivity({ type: 'desktop_cast_file', id: desktopCast.sessionId(), name, bytes });
-      if (paste) {
+      if (drop) {
+        const paths = castDropBatches.add({ viewerId, batch, path: file, last });
+        // Kiểm lại lúc thả: chủ máy có thể vừa tạm dừng, AI có thể vừa bắt đầu bấm trong lúc tệp đang truyền.
+        if (paths && !isRemotePaused() && aiGuiBusy === 0) desktopCast.sendInput({ action: 'drop_files', paths, x, y, rx, ry });
+      } else if (paste) {
         desktopCast.sendInput({
           action: 'paste_file',
           path: file,
+          as_image: image === true,
           x,
           y,
           rx,
@@ -1109,6 +1115,8 @@ export async function startRemoteClient(options = {}) {
             socket.emit(DeviceEvent.DESKTOP_CAST_INPUT_FOCUS, { session_id: sessionId, editable: focus?.editable === true });
           }
         },
+        onPasteFailed: () => emitCastStatus({ session_id: sessionId, state: CastState.PASTE_FAILED }),
+        onDropRefused: () => emitCastStatus({ session_id: sessionId, state: CastState.DROP_REFUSED }),
         onCapture: ({ mode, reason }) => say(chalk.gray(`  🖥️  Chụp màn hình: ${mode}${reason ? ` (${reason})` : ''}`)),
         onClipboard: (clip) => desktopWebRtc.pushClipboard?.(clip),
         onSecureDesktop: (sec) => {

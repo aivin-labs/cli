@@ -6,7 +6,7 @@
 
 export const CAST_INPUT_ACTIONS = Object.freeze([
   'move', 'click', 'dblclick', 'rightclick', 'mousedown', 'mouseup', 'scroll', 'type', 'paste', 'clipboard', 'key', 'hotkey',
-  'paste_image'
+  'paste_image', 'paste_html'
 ]);
 
 export const CastInputRejection = Object.freeze({
@@ -23,6 +23,8 @@ const MAX_SCROLL = 10_000;
 const RATIO_SCALE = 65_535;
 const MAX_KEY_CHARS = 24;
 const MAX_PASTE_CHARS = 65_536;
+const MAX_PASTE_IMAGE_CHARS = 25_000_000;
+const MAX_PASTE_HTML_CHARS = 12_000_000;
 
 function finiteIn(value, limit) {
   const n = Number(value);
@@ -53,7 +55,7 @@ export function sanitizeCastInput(raw, maxTypeChars = 2000) {
   const deltaY = finiteIn(raw.deltaY, MAX_SCROLL);
   if (deltaX !== undefined) cmd.deltaX = Math.round(deltaX);
   if (deltaY !== undefined) cmd.deltaY = Math.round(deltaY);
-  const charLimit = action === 'paste' || action === 'clipboard' ? MAX_PASTE_CHARS : maxTypeChars;
+  const charLimit = action === 'paste' || action === 'clipboard' || action === 'paste_html' ? MAX_PASTE_CHARS : maxTypeChars;
   if (typeof raw.text === 'string' && raw.text) cmd.text = raw.text.slice(0, charLimit);
   if (typeof raw.key === 'string' && raw.key && raw.key.length <= MAX_KEY_CHARS) cmd.key = raw.key;
   const keys = shortStrings(raw.keys, 6);
@@ -61,10 +63,16 @@ export function sanitizeCastInput(raw, maxTypeChars = 2000) {
   const modifiers = shortStrings(raw.modifiers, 4);
   if (modifiers) cmd.modifiers = modifiers;
   if (action === 'paste_image') {
-    if (typeof raw.data !== 'string' || !raw.data) return null;
-    cmd.data = raw.data.slice(0, 25_000_000); // Tối đa ~18MB ảnh base64
+    // Quá trần thì bỏ hẳn: cắt ngắn base64 là ảnh hỏng.
+    if (typeof raw.data !== 'string' || !raw.data || raw.data.length > MAX_PASTE_IMAGE_CHARS) return null;
+    cmd.data = raw.data;
     if (typeof raw.mime === 'string') cmd.mime = raw.mime.slice(0, 64);
     if (raw.click) cmd.click = true;
+    return cmd;
+  }
+  if (action === 'paste_html') {
+    if (typeof raw.html !== 'string' || !raw.html || raw.html.length > MAX_PASTE_HTML_CHARS) return null;
+    cmd.html = raw.html;
     return cmd;
   }
   if ((action === 'type' || action === 'paste' || action === 'clipboard') && !cmd.text) return null;

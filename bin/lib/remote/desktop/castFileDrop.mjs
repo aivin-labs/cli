@@ -84,6 +84,26 @@ export function revealInExplorer(file, spawnImpl = spawn) {
   } catch { /* không mở được thì tệp vẫn đã lưu, FE báo đường dẫn */ }
 }
 
+/**
+ * Thả nhiều tệp là một thao tác: gom theo lô của từng người xem, tệp cuối tới thì trả cả lô. Lô mới thay lô dở (một tệp giữa chừng bị hỏng).
+ */
+export function createDropBatches({ maxFiles = 200 } = {}) {
+  const open = new Map();
+  return {
+    add({ viewerId, batch, path: file, last }) {
+      const current = open.get(viewerId);
+      const paths = current?.batch === batch ? current.paths : [];
+      if (paths.length < maxFiles) paths.push(file);
+      if (last) {
+        open.delete(viewerId);
+        return paths;
+      }
+      open.set(viewerId, { batch, paths });
+      return null;
+    },
+  };
+}
+
 export function createCastFileDrop({
   dir = DEFAULT_DIR, reply = () => {}, checkAllowed = () => null, onSaved = () => {},
   maxBytes = MAX_DROP_BYTES, idleMs = IDLE_TIMEOUT_MS, statfs = fs.promises.statfs, now = Date.now,
@@ -208,6 +228,10 @@ export function createCastFileDrop({
       bytes: active.size,
       reveal: msg.reveal === true && !msg.paste,
       paste: msg.paste === true,
+      image: msg.image === true,
+      drop: msg.drop === true,
+      batch: typeof msg.batch === 'string' ? msg.batch.slice(0, MAX_ID_CHARS) : '',
+      last: msg.last === true,
       x: msg.x,
       y: msg.y,
       rx: msg.rx,

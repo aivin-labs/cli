@@ -65,3 +65,10 @@ test('mắt sóng có đủ phần tử trong hình linh vật và bộ điều 
   for (const name of ['WaveL', 'WaveR', 'Eyes_wave_L', 'Eyes_wave_R']) assert.ok(BOT_XAML.includes(`x:Name="${name}"`), name);
   assert.match(RIG_CS, /public void RemoteWave\(bool on\)/);
 });
+
+test('tệp chạy không tự nạp .env, bunfig.toml của thư mục hiện tại', async () => {
+  const { readFileSync } = await import('node:fs');
+  const script = readFileSync(new URL('../scripts/build-binary.mjs', import.meta.url), 'utf8');
+  assert.match(script, /autoloadDotenv: false/);
+  assert.match(script, /autoloadBunfig: false/);
+});

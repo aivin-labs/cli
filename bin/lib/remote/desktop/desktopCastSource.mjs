@@ -159,6 +159,207 @@ namespace AivinDesktopCast {
     }
   }
 
+  /** Đưa nội dung vào clipboard của máy rồi bấm Ctrl + V. Không ghi được clipboard thì không bấm: bấm sẽ dán nội dung cũ vào chỗ người dùng đang đứng. */
+  public static class CastPaste {
+    public static bool Run(Func<System.Windows.Forms.DataObject> build, bool notifyOnFail) {
+      bool ok = false;
+      var sta = new Thread(() => {
+        try {
+          System.Windows.Forms.Clipboard.SetDataObject(build(), true, 10, 100);
+          ok = true;
+        } catch { }
+      });
+      sta.SetApartmentState(ApartmentState.STA);
+      sta.Start();
+      bool done = sta.Join(3000) && ok;
+      if (done) PressPaste();
+      else if (notifyOnFail) Out.Send(Out.Msg("paste_failed"));
+      return done;
+    }
+
+    static void PressPaste() {
+      Thread.Sleep(60);
+      Native.keybd_event(0x11, 0, 0, UIntPtr.Zero);
+      Thread.Sleep(20);
+      Native.keybd_event(0x56, 0, 0, UIntPtr.Zero);
+      Thread.Sleep(30);
+      Native.keybd_event(0x56, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+      Thread.Sleep(15);
+      Native.keybd_event(0x11, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+    }
+
+    /** Chỉ dạng ảnh, không kèm dạng tệp: có dạng tệp thì nhiều ứng dụng coi là gửi tệp đính kèm thay vì chèn ảnh. Dạng PNG giữ trong suốt; dạng bitmap nền trắng vì ứng dụng cũ vẽ vùng trong suốt thành đen. */
+    public static System.Windows.Forms.DataObject ImageData(byte[] bytes) {
+      var data = new System.Windows.Forms.DataObject();
+      using (var input = new MemoryStream(bytes))
+      using (var src = Image.FromStream(input)) {
+        var flat = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(flat)) {
+          g.Clear(Color.White);
+          g.DrawImage(src, 0, 0, src.Width, src.Height);
+        }
+        data.SetImage(flat);
+        var png = new MemoryStream();
+        src.Save(png, ImageFormat.Png);
+        png.Position = 0;
+        data.SetData("PNG", false, png);
+      }
+      return data;
+    }
+
+    public static System.Windows.Forms.DataObject FileData(string filePath) {
+      var data = new System.Windows.Forms.DataObject();
+      var list = new System.Collections.Specialized.StringCollection();
+      list.Add(filePath);
+      data.SetFileDropList(list);
+      string ext = Path.GetExtension(filePath).ToLowerInvariant();
+      if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".gif" || ext == ".webp") {
+        try {
+          using (var src = Image.FromFile(filePath)) {
+            var bmp = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bmp)) g.DrawImage(src, 0, 0, src.Width, src.Height);
+            data.SetImage(bmp);
+          }
+        } catch { }
+      }
+      return data;
+    }
+
+    public static System.Windows.Forms.DataObject HtmlData(string html, string plain) {
+      var data = new System.Windows.Forms.DataObject();
+      data.SetData(System.Windows.Forms.DataFormats.Html, false, new MemoryStream(BuildCfHtml(html)));
+      if (!string.IsNullOrEmpty(plain)) data.SetData(System.Windows.Forms.DataFormats.UnicodeText, plain);
+      return data;
+    }
+
+    /** Định dạng CF_HTML của Windows: phần đầu ghi vị trí theo BYTE của bản UTF-8, lệch một byte là ứng dụng đọc sai. */
+    public static byte[] BuildCfHtml(string html) {
+      const string pre = "<!DOCTYPE html><html><body><!--StartFragment-->";
+      const string post = "<!--EndFragment--></body></html>";
+      const string layout = "Version:0.9\r\nStartHTML:{0:D10}\r\nEndHTML:{1:D10}\r\nStartFragment:{2:D10}\r\nEndFragment:{3:D10}\r\n";
+      int headerLength = string.Format(layout, 0, 0, 0, 0).Length;
+      int fragmentStart = headerLength + pre.Length;
+      int fragmentEnd = fragmentStart + Encoding.UTF8.GetByteCount(html);
+      int end = fragmentEnd + post.Length;
+      return Encoding.UTF8.GetBytes(string.Format(layout, headerLength, end, fragmentStart, fragmentEnd) + pre + html + post);
+    }
+  }
+
+  /**
+   * Thả tệp thật vào vị trí trên màn hình: mở một thao tác kéo tệp của Windows rồi đưa chuột tới đích, nên ứng dụng nhận như người kéo thật
+   * (vùng tải lên sáng lên, nhận nhiều tệp một lần). Thao tác kéo phải bắt đầu từ một cửa sổ của chính mình: nút chuột được nhấn trên ô gần như
+   * trong suốt này, không chạm vào thứ gì của người dùng.
+   */
+  public static class CastDrop {
+    const int SOURCE_SIZE = 16;
+    const int SOURCE_OFFSET = 36;
+    const int MOVE_STEPS = 10;
+    const int MOVE_STEP_MS = 25;
+    const int HOVER_TICKS = 8;
+    const int HOVER_TICK_MS = 40;
+    const int WINDOW_WAIT_MS = 2000;
+    const int START_WAIT_MS = 1000;
+    const int FINISH_WAIT_MS = 8000;
+
+    sealed class SourceWindow : Form {
+      readonly DataObject data;
+      public volatile bool Started;
+      public DragDropEffects Result = DragDropEffects.None;
+
+      public SourceWindow(DataObject payload, int centerX, int centerY) {
+        data = payload;
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        Bounds = new Rectangle(centerX - SOURCE_SIZE / 2, centerY - SOURCE_SIZE / 2, SOURCE_SIZE, SOURCE_SIZE);
+        Opacity = 0.02;
+        BackColor = Color.Black;
+      }
+
+      protected override bool ShowWithoutActivation { get { return true; } }
+
+      protected override CreateParams CreateParams {
+        get {
+          var p = base.CreateParams;
+          p.ExStyle |= 0x08000000 | 0x00000080; // Không lấy tiêu điểm, không hiện trong Alt + Tab.
+          return p;
+        }
+      }
+
+      protected override void OnMouseDown(MouseEventArgs e) {
+        base.OnMouseDown(e);
+        Started = true;
+        try { Result = DoDragDrop(data, DragDropEffects.Copy | DragDropEffects.Move); } catch { }
+        Close();
+      }
+    }
+
+    static int Away(int target, int min, int max) {
+      int start = target - SOURCE_OFFSET;
+      return start - SOURCE_SIZE < min ? Math.Min(target + SOURCE_OFFSET, max - SOURCE_SIZE) : start;
+    }
+
+    /** Di chuột từng bước rồi dừng một lúc ở đích: trang web và ứng dụng cần vài sự kiện rê mới bật vùng thả. Luôn nhả nút, kể cả khi lỗi. */
+    static void Drive(SourceWindow window, int fromX, int fromY, int toX, int toY) {
+      Native.SetCursorPos(fromX, fromY);
+      Thread.Sleep(80);
+      Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+      try {
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while (!window.Started && waited.ElapsedMilliseconds < START_WAIT_MS) Thread.Sleep(10);
+        if (!window.Started) return;
+        Thread.Sleep(80);
+        for (int i = 1; i <= MOVE_STEPS; i++) {
+          Native.SetCursorPos(fromX + (toX - fromX) * i / MOVE_STEPS, fromY + (toY - fromY) * i / MOVE_STEPS);
+          Thread.Sleep(MOVE_STEP_MS);
+        }
+        for (int i = 0; i < HOVER_TICKS; i++) {
+          Native.SetCursorPos(toX + (i % 2 == 0 ? 1 : 0), toY);
+          Thread.Sleep(HOVER_TICK_MS);
+        }
+        Native.SetCursorPos(toX, toY);
+        Thread.Sleep(60);
+      } finally {
+        Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+      }
+    }
+
+    /** Trả về đúng khi ứng dụng ở đích nhận thả. */
+    public static bool Run(IList<string> paths, int targetX, int targetY) {
+      var list = new System.Collections.Specialized.StringCollection();
+      foreach (var path in paths) list.Add(path);
+      var data = new DataObject();
+      data.SetFileDropList(list);
+
+      var area = System.Windows.Forms.Screen.FromPoint(new Point(targetX, targetY)).Bounds;
+      int fromX = Away(targetX, area.Left, area.Right);
+      int fromY = Away(targetY, area.Top, area.Bottom);
+
+      SourceWindow window = null;
+      var shown = new ManualResetEvent(false);
+      var host = new Thread(() => {
+        try {
+          window = new SourceWindow(data, fromX, fromY);
+          window.Shown += (sender, e) => shown.Set();
+          Application.Run(window);
+        } catch { shown.Set(); }
+      });
+      host.IsBackground = true;
+      host.SetApartmentState(ApartmentState.STA);
+      host.Start();
+      if (!shown.WaitOne(WINDOW_WAIT_MS) || window == null) return false;
+
+      Drive(window, fromX, fromY, targetX, targetY);
+      if (!window.Started) {
+        try { window.BeginInvoke(new Action(window.Close)); } catch { }
+        return false;
+      }
+      host.Join(FINISH_WAIT_MS);
+      return window.Result != DragDropEffects.None;
+    }
+  }
+
   /** Named pipe một chiều gửi khung thô I420 + âm thanh PCM cho tiến trình Node (một khách). Khách rớt → chờ khách mới. */
   static class RawPipe {
     static readonly object gate = new object();
@@ -1054,95 +1255,33 @@ namespace AivinDesktopCast {
         } else if (action == "paste_image") {
           string b64 = cmd.ContainsKey("data") ? Convert.ToString(cmd["data"]) : "";
           if (!string.IsNullOrEmpty(b64)) {
-            if (cmd.ContainsKey("click") && Convert.ToBoolean(cmd["click"])) {
-              Native.SetCursorPos(targetX, targetY);
-              Thread.Sleep(20);
-              Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-              Thread.Sleep(15);
-              Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-              Thread.Sleep(35);
-            }
-            var sta = new Thread(() => {
-              try {
-                byte[] bytes = Convert.FromBase64String(b64);
-                using (var ms = new System.IO.MemoryStream(bytes)) {
-                  using (var src = System.Drawing.Image.FromStream(ms)) {
-                    var dataObj = new System.Windows.Forms.DataObject();
-                    var bmp = new System.Drawing.Bitmap(src.Width, src.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-                    using (var g = System.Drawing.Graphics.FromImage(bmp)) {
-                      g.DrawImage(src, 0, 0, src.Width, src.Height);
-                    }
-                    dataObj.SetImage(bmp);
-                    try {
-                      string tempFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "aivin_paste_" + DateTime.Now.Ticks + ".png");
-                      bmp.Save(tempFile, System.Drawing.Imaging.ImageFormat.Png);
-                      var sc = new System.Collections.Specialized.StringCollection();
-                      sc.Add(tempFile);
-                      dataObj.SetFileDropList(sc);
-                    } catch { }
-                    System.Windows.Forms.Clipboard.SetDataObject(dataObj, true);
-                  }
-                }
-              } catch { }
-            });
-            sta.SetApartmentState(ApartmentState.STA);
-            sta.Start();
-            if (sta.Join(3000)) {
-              Thread.Sleep(60);
-              Native.keybd_event(0x11, 0, 0, UIntPtr.Zero);
-              Thread.Sleep(20);
-              Native.keybd_event(0x56, 0, 0, UIntPtr.Zero);
-              Thread.Sleep(30);
-              Native.keybd_event(0x56, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
-              Thread.Sleep(15);
-              Native.keybd_event(0x11, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
-            }
+            ClickIfAsked(cmd, targetX, targetY);
+            CastPaste.Run(() => CastPaste.ImageData(Convert.FromBase64String(b64)), true);
           }
+        } else if (action == "paste_html") {
+          string html = cmd.ContainsKey("html") ? Convert.ToString(cmd["html"]) : "";
+          string plain = cmd.ContainsKey("text") ? Convert.ToString(cmd["text"]) : "";
+          if (!string.IsNullOrEmpty(html)) CastPaste.Run(() => CastPaste.HtmlData(html, plain), true);
         } else if (action == "paste_file") {
           string filePath = cmd.ContainsKey("path") ? Convert.ToString(cmd["path"]) : "";
+          bool asImage = cmd.ContainsKey("as_image") && Convert.ToBoolean(cmd["as_image"]);
           if (!string.IsNullOrEmpty(filePath) && System.IO.File.Exists(filePath)) {
-            if (cmd.ContainsKey("click") && Convert.ToBoolean(cmd["click"])) {
-              Native.SetCursorPos(targetX, targetY);
-              Thread.Sleep(20);
-              Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-              Thread.Sleep(15);
-              Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-              Thread.Sleep(35);
-            }
-            var sta = new Thread(() => {
-              try {
-                var dataObj = new System.Windows.Forms.DataObject();
-                var sc = new System.Collections.Specialized.StringCollection();
-                sc.Add(filePath);
-                dataObj.SetFileDropList(sc);
-                string ext = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
-                if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".gif" || ext == ".webp") {
-                  try {
-                    using (var src = System.Drawing.Image.FromFile(filePath)) {
-                      var bmp = new System.Drawing.Bitmap(src.Width, src.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-                      using (var g = System.Drawing.Graphics.FromImage(bmp)) {
-                        g.DrawImage(src, 0, 0, src.Width, src.Height);
-                      }
-                      dataObj.SetImage(bmp);
-                    }
-                  } catch { }
-                }
-                System.Windows.Forms.Clipboard.SetDataObject(dataObj, true);
-              } catch { }
-            });
-            sta.SetApartmentState(ApartmentState.STA);
-            sta.Start();
-            if (sta.Join(3000)) {
-              Thread.Sleep(60);
-              Native.keybd_event(0x11, 0, 0, UIntPtr.Zero);
-              Thread.Sleep(20);
-              Native.keybd_event(0x56, 0, 0, UIntPtr.Zero);
-              Thread.Sleep(30);
-              Native.keybd_event(0x56, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
-              Thread.Sleep(15);
-              Native.keybd_event(0x11, 0, Native.KEYEVENTF_KEYUP, UIntPtr.Zero);
+            ClickIfAsked(cmd, targetX, targetY);
+            // Ảnh từ clipboard của người xem: dán như ảnh, tệp lưu tạm không còn cần nữa. Không đọc được thì dán như tệp.
+            if (asImage && CastPaste.Run(() => CastPaste.ImageData(System.IO.File.ReadAllBytes(filePath)), false)) {
+              try { System.IO.File.Delete(filePath); } catch { }
+            } else {
+              CastPaste.Run(() => CastPaste.FileData(filePath), true);
             }
           }
+        } else if (action == "drop_files") {
+          var dropPaths = new List<string>();
+          var rawPaths = cmd.ContainsKey("paths") ? cmd["paths"] as System.Collections.ArrayList : null;
+          if (rawPaths != null) foreach (var item in rawPaths) {
+            string one = Convert.ToString(item);
+            if (System.IO.File.Exists(one)) dropPaths.Add(one);
+          }
+          if (dropPaths.Count > 0 && !CastDrop.Run(dropPaths, targetX, targetY)) Out.Send(Out.Msg("drop_refused"));
         } else if (action == "key") {
           string key = cmd.ContainsKey("key") ? Convert.ToString(cmd["key"]) : "";
           HandleSpecialKey(key);
@@ -1244,6 +1383,16 @@ namespace AivinDesktopCast {
       } catch {
       }
       return false;
+    }
+
+    static void ClickIfAsked(Dictionary<string, object> cmd, int x, int y) {
+      if (!cmd.ContainsKey("click") || !Convert.ToBoolean(cmd["click"])) return;
+      Native.SetCursorPos(x, y);
+      Thread.Sleep(20);
+      Native.mouse_event(Native.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+      Thread.Sleep(15);
+      Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+      Thread.Sleep(35);
     }
 
     static void HandleSpecialKey(string key) {

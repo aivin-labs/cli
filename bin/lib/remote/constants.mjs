@@ -109,7 +109,7 @@ export const DeviceEvent = Object.freeze({
 
 /** Trạng thái phiên xem màn hình gửi BE (`device:desktop_cast_status`) — khớp BE `DesktopCastState`. */
 export const CastState = Object.freeze({
-  READY: 'ready', CONNECTED: 'connected', DEGRADED: 'degraded', STOPPED: 'stopped', REFUSED: 'refused', INPUT_BLOCKED: 'input_blocked', AWAITING_CONSENT: 'awaiting_consent',
+  READY: 'ready', CONNECTED: 'connected', DEGRADED: 'degraded', STOPPED: 'stopped', REFUSED: 'refused', INPUT_BLOCKED: 'input_blocked', AWAITING_CONSENT: 'awaiting_consent', PASTE_FAILED: 'paste_failed', DROP_REFUSED: 'drop_refused',
 });
 
 /** Loại báo chủ động (`device:notify`). */

@@ -122,6 +122,8 @@ export function buildDeviceProfile(roots) {
     binaries: detectBinaries(),
     projects: detectProjects(roots),
     desktop_cast: process.platform === 'win32',
+    // Giao diện chỉ gửi lệnh mà bản CLI này hiểu; CLI cũ không khai thì giao diện đi đường cũ.
+    cast_features: ['paste_html', 'drop_files'],
   };
 }
 
