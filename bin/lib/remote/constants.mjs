@@ -84,6 +84,8 @@ export const DeviceEvent = Object.freeze({
   NOTIFY_ACK: 'device:notify_ack',
   /** CLI → BE: câu hỏi còn ghim đã đóng chưa `{ items: [{ session_id, reply_id }] }` — ack `{ ok, closed: reply_id[] }`. */
   QUESTIONS: 'device:questions',
+  /** BE → CLI (09/11/2026): câu hỏi ghim đã xử lý ở nơi khác (duyệt trên web / máy khác) `{ reply_ids }` → bỏ nút ngay. */
+  QUESTION_CLOSED: 'device:question_closed',
   /** CLI → BE: dừng lượt chat đang chạy `{ request_id }` — lượt kết thúc bằng `error` mã `cancelled`. */
   CHAT_CANCEL: 'device:chat_cancel',
   WEBVIEW: 'device:webview',

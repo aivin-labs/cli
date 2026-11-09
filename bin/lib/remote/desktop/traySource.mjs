@@ -352,6 +352,7 @@ namespace AivinDesktop {
     static readonly string MascotFile = Path.Combine(Program.Home, "mascot.json");
     static readonly string CfgFile = Path.Combine(Program.Home, "desktop", "launch.cfg");
     static readonly string LogoFile = Path.Combine(Program.Home, "desktop", "logo.png");
+    static readonly string IcoFile = Path.Combine(Program.Home, "desktop", "aivin.ico");
     static readonly string StateFile = Path.Combine(Program.Home, "desktop", "tray-state.txt");
     static readonly string LogFile = Path.Combine(Program.Home, "remote-service.log");
     static readonly string CastSessionFile = Path.Combine(Program.Home, "desktop-cast-session.json");
@@ -376,7 +377,7 @@ namespace AivinDesktop {
 
     Config cfg;
     NotifyIcon tray;
-    Icon colorIcon, greyIcon, shownIcon;
+    Icon colorIcon, greyIcon, shownIcon, appIcon;
     ToolStripMenuItem status, updateItem, open, connectCodeItem, quickChat, quickVoice, pause, startup, mascot, terminal, quit, serverMenu, serverCloud, serverVn, serverLocal;
     ToolStripSeparator quickSeparator, stopCastSeparator;
     ToolStripMenuItem stopCastItem;
@@ -1214,7 +1215,7 @@ namespace AivinDesktop {
       if (pairForm != null) { pairForm.Activate(); return; }
       Form f = new Form();
       f.Text = "AIVIN Bot";
-      f.Icon = colorIcon;
+      f.Icon = appIcon ?? colorIcon;
       f.Font = SystemFonts.MessageBoxFont;
       f.AutoScaleDimensions = new SizeF(96F, 96F);
       f.AutoScaleMode = AutoScaleMode.Dpi;
@@ -1314,13 +1315,20 @@ namespace AivinDesktop {
       return sb.ToString();
     }
 
+    // aivin.ico (ensureLauncher ghi) có sẵn từng cỡ 16…256: lấy đúng khung theo DPI thay vì thu nhỏ ảnh 64×64; cửa sổ dùng nguyên bộ để taskbar nét.
     void LoadIcons() {
+      Size size = SystemInformation.SmallIconSize;
       Bitmap src = null;
-      try { src = new Bitmap(LogoFile); } catch { }
+      try {
+        appIcon = new Icon(IcoFile);
+        using (Icon fit = new Icon(appIcon, size)) src = fit.ToBitmap();
+      } catch { appIcon = null; src = null; }
+      if (src == null) {
+        try { src = new Bitmap(LogoFile); } catch { }
+      }
       if (src == null) {
         try { src = Icon.ExtractAssociatedIcon(Application.ExecutablePath).ToBitmap(); } catch { }
       }
-      Size size = SystemInformation.SmallIconSize;
       colorIcon = MakeIcon(src, size, false);
       greyIcon = MakeIcon(src, size, true);
     }

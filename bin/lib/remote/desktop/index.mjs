@@ -6,6 +6,7 @@ import { execFileSync, spawn } from 'child_process';
 import { REMOTE_CONFIG_DIR } from '../constants.mjs';
 import { lockHolder } from '../daemonLock.mjs';
 import { AIVIN_LOGO_PNG_BASE64 } from '../brand.mjs';
+import { AIVIN_ICO_BASE64 } from './aivinIco.mjs';
 import { TRAY_CS } from './traySource.mjs';
 import { trayStrings } from './strings.mjs';
 import { associationStamp, ensureFileAssociations, ensureUninstallEntry, registerFileAssociations, registerUninstallEntry, unregisterFileAssociations, unregisterUninstallEntry } from './fileAssociation.mjs';
@@ -205,8 +206,9 @@ function cleanupOldLaunchers(exe) {
  */
 export function ensureLauncher({ exe = launcherExePath(), home = REMOTE_CONFIG_DIR, dir = DESKTOP_DIR, force = false } = {}) {
   const source = launcherSource(home);
-  const png = Buffer.from(AIVIN_LOGO_PNG_BASE64, 'base64');
-  const hash = createHash('sha256').update(source).update(png).digest('hex');
+  // .ico nhiều cỡ (16…256): một ảnh 64×64 duy nhất bị Windows co giãn → nhoè trên taskbar / Start (09/11/2026).
+  const icoBytes = Buffer.from(AIVIN_ICO_BASE64, 'base64');
+  const hash = createHash('sha256').update(source).update(icoBytes).digest('hex');
   fs.mkdirSync(dir, { recursive: true });
   const hashFile = path.join(dir, path.basename(SOURCE_HASH_FILE));
   let current = null;
@@ -218,7 +220,7 @@ export function ensureLauncher({ exe = launcherExePath(), home = REMOTE_CONFIG_D
   const src = path.join(dir, 'tray.cs');
   const ico = path.join(dir, 'aivin.ico');
   fs.writeFileSync(src, source);
-  fs.writeFileSync(ico, pngToIco(png));
+  fs.writeFileSync(ico, icoBytes);
   const out = `${exe}.new`;
   fs.rmSync(out, { force: true });
   runSetup({ Src: src, Ico: ico, Out: out }, dir);

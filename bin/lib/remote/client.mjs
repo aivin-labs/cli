@@ -1266,6 +1266,7 @@ export async function startRemoteClient(options = {}) {
     socket.on(DeviceEvent.CHAT_EVENT, guarded(DeviceEvent.CHAT_EVENT, (payload) => mascotChat.onChatEvent(payload)));
     // Báo chủ động: việc của chủ máy (web, chạy nền, automation…) xong / lỗi / cần trả lời.
     socket.on(DeviceEvent.NOTIFY, guarded(DeviceEvent.NOTIFY, (payload) => mascotChat.onNotify(payload)));
+    socket.on(DeviceEvent.QUESTION_CLOSED, guarded(DeviceEvent.QUESTION_CLOSED, (payload) => mascotChat.onQuestionClosed(payload)));
     socket.on(DeviceEvent.VOICE_EVENT, guarded(DeviceEvent.VOICE_EVENT, (payload) => mascotChat.onVoiceEvent(payload)));
   }
   socket.on(DeviceEvent.UPDATE, guarded(DeviceEvent.UPDATE, (payload) => {

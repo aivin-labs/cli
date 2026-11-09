@@ -102,6 +102,84 @@ test('câu hỏi đã trả lời nơi khác: kiểm lúc nối lại → bỏ n
   assert.deepEqual(pendingFlags, [true, false], 'hết câu hỏi → bỏ ghim');
 });
 
+test('việc chờ duyệt của kênh canh (không gắn phiên): nút Duyệt gửi / Bỏ qua + mở hội thoại; bấm → device:chat chỉ reply_id + option_ids; kiểm câu hỏi gửi cả mục không phiên', async () => {
+  const sent = [];
+  const emitted = [];
+  let closed = [];
+  const socket = {
+    connected: true, timeout() { return this; }, emit() {},
+    async emitWithAck(event, payload) { emitted.push({ event, payload }); return event === DeviceEvent.QUESTIONS ? { ok: true, closed } : { ok: true }; },
+  };
+  const chat = createMascotChat({ socket: () => socket, send: (c) => sent.push(c), lang: 'vi' });
+  chat.setServerFeatures([ServerFeature.INBOX]);
+  const question = { reply_id: 'watch-draft:d1', kind: 'choice', question: 'x', options: [{ id: 'approve', text: 'Duyệt gửi', icon: 'check' }, { id: 'discard', text: 'Bỏ qua', icon: 'x' }] };
+  chat.onNotify({
+    id: 'n1', kind: 'needs_you', title: 'Kênh FB: có việc chờ bạn duyệt', text: 'Hằng: “alo”\nAI định trả lời: “Dạ em đây”', question,
+    links: [{ text: 'Mở hội thoại', url: 'https://www.facebook.com/messages/t/1', icon: 'external-link' }],
+  });
+  const choices = sent.filter((c) => c.t === AskCommand.CHOICES).at(-1);
+  assert.deepEqual(choices.options.map((o) => [o.id, o.text]), [['approve', 'Duyệt gửi'], ['discard', 'Bỏ qua']]);
+  const qRow = rows(sent).find((r) => r.id === 'q-watch-draft:d1');
+  assert.equal(qRow.links[0].url, 'https://www.facebook.com/messages/t/1');
+
+  await chat.checkQuestions();
+  assert.deepEqual(emitted.at(-1).payload.items, [{ reply_id: 'watch-draft:d1' }]);
+
+  await chat.choose('approve');
+  const ask = emitted.find((e) => e.event === DeviceEvent.CHAT).payload;
+  assert.equal(ask.reply_id, 'watch-draft:d1');
+  assert.deepEqual(ask.option_ids, ['approve']);
+  assert.equal(ask.session_id, undefined);
+  chat.onChatEvent({ request_id: ask.request_id, kind: 'answer', text: 'Đã duyệt — đang gửi cho Hằng.' });
+  assert.equal(chat.busy(), false);
+  assert.equal(chat.hasPending(), false, 'duyệt xong → bỏ nút');
+});
+
+test('câu chỉ nhận nút: gõ chữ không khớp nút → câu hỏi mới, nút vẫn còn; gõ đúng tên nút → như bấm nút', async () => {
+  const sent = [];
+  const emitted = [];
+  const socket = {
+    connected: true, timeout() { return this; }, emit() {},
+    async emitWithAck(event, payload) { emitted.push({ event, payload }); return { ok: true, request_id: payload.request_id }; },
+  };
+  const chat = createMascotChat({ socket: () => socket, send: (c) => sent.push(c), lang: 'vi' });
+  chat.onNotify({ id: 'n1', kind: 'needs_you', title: 'A', text: 'a', question: { reply_id: 'watch-draft:d1', kind: 'choice', question: 'x', buttons_only: true, options: [{ id: 'discard', text: 'Bỏ qua' }] } });
+
+  await chat.reply('thời tiết hôm nay sao');
+  const first = emitted.at(-1).payload;
+  assert.equal(first.reply_id, undefined, 'không gửi như câu trả lời');
+  assert.equal(chat.hasPending(), true, 'nút vẫn còn');
+  chat.onChatEvent({ request_id: first.request_id, kind: 'answer', text: 'Nắng' });
+
+  await chat.reply('bỏ qua');
+  assert.equal(emitted.at(-1).payload.reply_id, 'watch-draft:d1');
+  assert.deepEqual(emitted.at(-1).payload.option_ids, ['discard']);
+});
+
+test('BE báo câu hỏi đã xử lý nơi khác (device:question_closed) → bỏ nút ngay; câu chính máy này đang trả lời thì không báo "nơi khác"', async () => {
+  const sent = [];
+  let release;
+  const socket = {
+    connected: true, timeout() { return this; }, emit() {},
+    emitWithAck: () => new Promise((r) => { release = r; }),
+  };
+  const chat = createMascotChat({ socket: () => socket, send: (c) => sent.push(c), lang: 'vi' });
+  const q = (id) => ({ reply_id: id, kind: 'choice', question: 'x', options: [{ id: 'approve', text: 'Duyệt gửi' }] });
+  chat.onNotify({ id: 'n1', kind: 'needs_you', title: 'A', text: 'a', question: q('watch-draft:d1') });
+  chat.onNotify({ id: 'n2', kind: 'needs_you', title: 'B', text: 'b', question: q('watch-draft:d2') });
+  chat.onQuestionClosed({ reply_ids: ['watch-draft:d2', 'không-có'] });
+  assert.equal(chat.hasPending(), true, 'd1 còn');
+  assert.equal(rows(sent).at(-1).text, 'Câu hỏi này đã được trả lời ở nơi khác');
+
+  const pending = chat.choose('approve');
+  const before = rows(sent).length;
+  chat.onQuestionClosed({ reply_ids: ['watch-draft:d1'] });
+  assert.equal(rows(sent).slice(before).some((r) => r.text === 'Câu hỏi này đã được trả lời ở nơi khác'), false, 'máy này vừa bấm');
+  release({ ok: true });
+  await pending;
+  assert.equal(chat.hasPending(), false);
+});
+
 test('nút dừng: chat_busy báo cancel khi BE dừng được; bấm → device:chat_cancel đúng lượt; BE báo cancelled → "Đã dừng", ô hỏi rảnh', async () => {
   const { chat, sent, emitted } = setup();
   await chat.ask('Việc dài');
