@@ -53,6 +53,7 @@ import {
   CAST_ACTION_FILE, askCastConsent, checkCastAction, clearCastSession, isCastLocked, lockCast, recordCastSession, unlockCast,
 } from './desktop/castAuth.mjs';
 import { CastConsentDecision, createCastConsent } from './desktop/castConsent.mjs';
+import { createCastTouchViewers, shouldDrawCursorInFrame } from './desktop/castTouchViewers.mjs';
 import { createConfirmBarrier } from './confirmBarrier.mjs';
 import { newInputTag } from './humanInput.mjs';
 import {
@@ -550,14 +551,16 @@ export async function startRemoteClient(options = {}) {
   });
   /**
    * Chỉ nén JPEG khi còn người xem cần: chưa có WebRTC / không có video, hoặc khung thô chưa tới bộ mã hoá (pipe chưa nối).
-   * Con trỏ tách khỏi khung chỉ khi mọi người xem đều có video + tự vẽ con trỏ (FE cũ, đường JPEG vẫn thấy con trỏ trong hình).
+   * Con trỏ tách khỏi khung khi mọi người xem đều có video + tự vẽ con trỏ (FE cũ, đường JPEG vẫn thấy con trỏ trong hình),
+   * hoặc khi tất cả đều xem bằng màn hình cảm ứng.
    */
   const syncCastJpeg = () => {
     const jpeg = desktopWebRtc.needsJpeg() || !desktopWebRtc.videoLive();
     desktopCast.setJpeg(jpeg);
-    desktopCast.setCursorInFrame(jpeg || !desktopWebRtc.localCursor());
+    desktopCast.setCursorInFrame(shouldDrawCursorInFrame({ jpeg, localCursor: desktopWebRtc.localCursor(), allTouch: castTouchViewers.allTouch() }));
     desktopCast.setAudio(desktopWebRtc.needsAudio());
   };
+  const castTouchViewers = createCastTouchViewers();
   /** Phiên daemon tự dừng (khác với tiến trình quay tự thoát / sập) — `onStop` của phiên phân biệt hai trường hợp. */
   const castStopsRequested = new Set();
   /**
@@ -578,6 +581,7 @@ export async function startRemoteClient(options = {}) {
     castDisconnectTimer = null;
     clearTimeout(castReconfirmTimer);
     castReconfirmTimer = null;
+    castTouchViewers.clear();
     desktopWebRtc.closeAll();
     void castFileDrop.closeAll();
     castGate.takeHeldInput(); // Tiến trình điều khiển tự nhả khi dừng.
@@ -1307,6 +1311,7 @@ export async function startRemoteClient(options = {}) {
       monitor: payload?.monitor ?? -1,
     };
     if (desktopCast.isActive() && desktopCast.sessionId() !== sessionId) stopDesktopCast('replaced', false);
+    castTouchViewers.add(viewerId, viewerDevice);
     if (desktopCast.sessionId() === sessionId) {
       clearTimeout(castReconfirmTimer);
       castReconfirmTimer = null;
@@ -1340,6 +1345,7 @@ export async function startRemoteClient(options = {}) {
     clearTimeout(castReconfirmTimer);
     castReconfirmTimer = null;
     if (payload?.viewer_id) {
+      castTouchViewers.remove(payload.viewer_id);
       desktopWebRtc.close(payload.viewer_id);
       void castFileDrop.close(payload.viewer_id);
       releaseViewerInput(payload.viewer_id);
