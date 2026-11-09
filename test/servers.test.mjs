@@ -16,6 +16,21 @@ const servers = await import('../bin/lib/servers.mjs?server-test');
 const context = await import('../bin/lib/context.mjs?server-test');
 const credentials = await import('../bin/lib/remote/credentials.mjs?server-test');
 
+test('web URL stays on the Aivin server root domain', () => {
+  const vn = 'https://api.aivin.vn';
+  const cloud = 'https://api.aivin.cloud';
+  assert.equal(servers.webUrlForServer(vn, 'https://brain.aivin.cloud'), 'https://app.aivin.vn');
+  assert.equal(servers.webUrlForServer(vn, 'https://beta.aivin.vn'), 'https://beta.aivin.vn');
+  assert.equal(servers.webUrlForServer(vn, 'not a url'), 'https://app.aivin.vn');
+  assert.equal(servers.webUrlForServer(cloud, 'https://brain.aivin.cloud'), 'https://brain.aivin.cloud');
+  assert.equal(servers.webUrlForServer(cloud, 'https://app.aivin.vn'), 'https://app.aivin.cloud');
+  assert.equal(servers.defaultWebUrl(cloud), 'https://app.aivin.cloud');
+  assert.equal(servers.webUrlForServer('https://self.example', 'https://web.other.example'), 'https://web.other.example');
+  assert.equal(servers.webUrlForServer('local', 'https://brain.aivin.cloud'), 'https://brain.aivin.cloud');
+  assert.equal(servers.defaultWebUrl(vn), 'https://app.aivin.vn');
+  assert.equal(servers.defaultWebUrl('https://self.example'), null);
+});
+
 test('server aliases normalize safely and keep explicit API/self-hosted hosts', () => {
   assert.equal(servers.resolveServerUrl('cloud'), 'https://api.aivin.cloud');
   assert.equal(servers.resolveServerUrl('brain.aivin.cloud'), 'https://api.aivin.cloud');

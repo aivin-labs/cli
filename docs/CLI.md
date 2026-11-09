@@ -965,7 +965,7 @@ Options:
 aivin login
 ```
 
-Opens your default browser to the platform's actual login page (`https://brain.aivin.cloud`) with
+Opens your default browser to the platform's actual login page (`https://app.aivin.cloud`) with
 a one-time state token and a `localhost` callback URL. Log in exactly the way you normally would in the
 browser - custom-domain org, password, Google, OTP, whatever applies to your account. Once you
 confirm on the "Aivin CLI wants to create an API Key" prompt that appears after login, a fresh key
@@ -1585,7 +1585,7 @@ machine picks it up automatically - there's no per-project credential to manage.
 | -------------------- | -------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------- |
 | `SDK_ENDPOINT`  | SDK calls, `aivin start`                   | `sdk.aivin.cloud:443`      | Point `main()`'s SDK calls at a local/dev/staging backend instead of production. Staging: `sdk.aivin.vn:50052` (dedicated Cloudflare Tunnel TLS port - production goes through a load balancer on the standard 443 port instead, a different setup). |
 | `AIVIN_BASE_URL`     | `deploy`, `test`, `plugin make/convert/trigger`, `login --basic` | `https://api.aivin.cloud`    | Only for a self-hosted or staging instance. Staging: `https://api.aivin.vn`. |
-| `AIVIN_WEB_URL`      | `login` (browser flow)                             | `https://brain.aivin.cloud`  | Only for a self-hosted or staging instance.                   |
+| `AIVIN_WEB_URL`      | `login` (browser flow)                             | `https://app.aivin.cloud`  | Only for a self-hosted or staging instance.                   |
 | `LOCAL_TEST_PORT`    | `aivin start`                                       | `4001`                       | Only if `4001` is already taken on your machine.              |
 | `LOCAL_TEST_HOST`    | `aivin start`                                       | `127.0.0.1`                  | Loopback-only by default (`/invoke` has no auth) - only widen this if you deliberately want another device on your network to reach it. See [sdk repo's SECURITY.md](https://github.com/aivin-labs/AIVIN-SDK/blob/main/docs/SECURITY.md). |
 | `AIVIN_SANDBOX_WORKER` | `aivin start`, deployed containers                | `false`                      | Set `true` to run `src/main.ts` inside an isolated `worker_threads.Worker` (no direct access to the container's secret, restricted fs/child_process) instead of loading it in-process. Off by default - see [sdk repo's worker-sandbox.md](https://github.com/aivin-labs/AIVIN-SDK/blob/main/docs/draft/plugins/worker-sandbox.md). |

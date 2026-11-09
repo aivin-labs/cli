@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import axios from 'axios';
 import { execFileSync } from 'child_process';
-import { readActiveServer, resolveServerUrl, serverKey, setActiveServer } from './servers.mjs';
+import { readActiveServer, resolveServerUrl, serverKey, setActiveServer, webUrlForServer } from './servers.mjs';
 
 export const GLOBAL_CREDENTIALS_PATH = path.join(os.homedir(), '.aivin', 'credentials');
 export const DEFAULT_AIVIN_BASE_URL = 'https://api.aivin.cloud';
@@ -19,7 +19,7 @@ export function deriveSdkEndpoint(baseUrl) {
 export async function fetchWebUrl(baseUrl) {
   try {
     const res = await axios.get(`${resolveServerUrl(baseUrl)}/setting/lang/default`, { timeout: 5000 });
-    return typeof res.data?.app_url === 'string' && res.data.app_url ? res.data.app_url : null;
+    return typeof res.data?.app_url === 'string' && res.data.app_url ? webUrlForServer(baseUrl, res.data.app_url) : null;
   } catch { return null; }
 }
 

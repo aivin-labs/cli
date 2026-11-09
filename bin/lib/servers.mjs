@@ -45,6 +45,36 @@ export function resolveServerUrl(input, { fallback = DEFAULT_SERVER_URL } = {}) 
   return url.toString().replace(/\/+$/, '');
 }
 
+const AIVIN_WEB_BY_ZONE = Object.freeze({
+  'aivin.vn': 'https://app.aivin.vn',
+  'aivin.cloud': 'https://app.aivin.cloud',
+});
+
+function aivinZone(hostname) {
+  const host = hostname.toLowerCase();
+  return Object.keys(AIVIN_WEB_BY_ZONE).find((zone) => host === zone || host.endsWith(`.${zone}`)) || null;
+}
+
+/** Web mặc định theo gốc tên miền của máy chủ Aivin; null với máy chủ tự dựng / localhost. */
+export function defaultWebUrl(serverUrl) {
+  try {
+    return AIVIN_WEB_BY_ZONE[aivinZone(new URL(resolveServerUrl(serverUrl)).hostname)] || null;
+  } catch { return null; }
+}
+
+/**
+ * Chọn địa chỉ web từ `app_url` máy chủ khai. Máy chủ Aivin chính thức chỉ được dùng web cùng gốc tên miền:
+ * các máy chủ có thể dùng chung cấu hình nên `app_url` của api.aivin.vn có thể là brain.aivin.cloud.
+ */
+export function webUrlForServer(serverUrl, appUrl) {
+  const fallback = defaultWebUrl(serverUrl);
+  if (!fallback) return appUrl || null;
+  try {
+    if (aivinZone(new URL(appUrl).hostname) === aivinZone(new URL(fallback).hostname)) return appUrl;
+  } catch { /* app_url hỏng thì dùng web mặc định */ }
+  return fallback;
+}
+
 export function serverKey(serverUrl) {
   return createHash('sha256').update(resolveServerUrl(serverUrl)).digest('hex').slice(0, 24);
 }
