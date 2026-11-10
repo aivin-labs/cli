@@ -56,6 +56,7 @@ namespace AivinGui {
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int index);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
     [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
@@ -223,9 +224,16 @@ namespace AivinGui {
         case "to_back": {
           IntPtr h = ResolveWindow(a);
           IntPtr prev = ParseWindow(Str(a, "restore_to"));
-          bool restored = prev != IntPtr.Zero && RestoreForeground(prev, h);
+          long contentWait = Bool(a, "wait_content", false) ? WaitForUwpContent(h, 3000) : 0;
+          bool restored = false;
+          IntPtr fgNow = Native.GetForegroundWindow();
+          if (prev != IntPtr.Zero && fgNow != prev && TookForeground(fgNow, h)) {
+            restored = RestoreForeground(prev, h);
+            // Ứng dụng Store không nhường bằng cách gắn luồng input → cách của gui.focus; lúc này focus đang ở ứng dụng AI vừa mở, phím Alt không rơi vào việc của người dùng.
+            if (!restored) { try { restored = ForceForeground(prev); } catch (GuiError) { } }
+          }
           SendToBack(h);
-          return new Dictionary<string, object> { { "sent_to_back", true }, { "focus_returned_to_user", restored } };
+          return new Dictionary<string, object> { { "sent_to_back", true }, { "focus_returned_to_user", restored }, { "content_wait_ms", contentWait } };
         }
         case "act": return Act(a);
         case "wait_for": return WaitFor(a);
@@ -345,9 +353,12 @@ namespace AivinGui {
       }
       if (!string.IsNullOrEmpty(w)) {
         string q = w.ToLowerInvariant();
-        foreach (Dictionary<string, object> info in ListWindows(false)) {
-          if (Convert.ToString(info["title"]).ToLowerInvariant().Contains(q) || Convert.ToString(info["process"]).ToLowerInvariant() == q) {
-            return ParseWindow(Convert.ToString(info["window"]));
+        // Cửa sổ chính trước, rồi tới hộp thoại con (Save as, Options…) — nêu tiêu đề hộp thoại phải tìm được nó.
+        foreach (bool withDialogs in new[] { false, true }) {
+          foreach (Dictionary<string, object> info in ListWindows(withDialogs)) {
+            if (Convert.ToString(info["title"]).ToLowerInvariant().Contains(q) || Convert.ToString(info["process"]).ToLowerInvariant() == q) {
+              return ParseWindow(Convert.ToString(info["window"]));
+            }
           }
         }
         throw new GuiError("NOT_FOUND", "No window matches: " + w);
@@ -368,10 +379,37 @@ namespace AivinGui {
       return fg;
     }
 
+    /** Tiêu điểm đang ở ứng dụng vừa mở. Mọi ứng dụng Store chung tiến trình ApplicationFrameHost nên phải so đúng cửa sổ, kẻo giật focus khỏi ứng dụng Store người dùng vừa chuyển sang. */
+    static bool TookForeground(IntPtr fg, IntPtr h) {
+      if (fg == IntPtr.Zero || h == IntPtr.Zero) return false;
+      if (ClassOf(h) == "ApplicationFrameWindow") return fg == h;
+      uint pa, pb; Native.GetWindowThreadProcessId(fg, out pa); Native.GetWindowThreadProcessId(h, out pb);
+      return pa != 0 && pa == pb;
+    }
+
+    /** Ứng dụng Store: khung ApplicationFrameWindow có trước, nội dung (CoreWindow) gắn vào sau; lúc đang khởi động / bị treo tạm thì chưa có. */
+    static bool IsUwpFrameOnly(IntPtr h) {
+      if (ClassOf(h) != "ApplicationFrameWindow") return false;
+      // Chỉ còn thanh tiêu đề + lớp nhận input của khung. Ứng dụng không dùng CoreWindow (Sticky Notes…) vẫn có cửa sổ con khác.
+      for (IntPtr c = Native.FindWindowEx(h, IntPtr.Zero, null, null); c != IntPtr.Zero; c = Native.FindWindowEx(h, c, null, null)) {
+        string cls = ClassOf(c);
+        if (cls != "ApplicationFrameTitleBarWindow" && cls != "ApplicationFrameInputSinkWindow") return false;
+      }
+      return true;
+    }
+
+    /** Đẩy ứng dụng Store xuống quá sớm thì nó có thể bị treo tạm khi chưa dựng xong nội dung — chờ nội dung gắn vào khung (có giới hạn). */
+    static long WaitForUwpContent(IntPtr h, int timeoutMs) {
+      var sw = Stopwatch.StartNew();
+      while (IsUwpFrameOnly(h) && sw.ElapsedMilliseconds < timeoutMs) Thread.Sleep(100);
+      return sw.ElapsedMilliseconds;
+    }
+
     /** Đẩy cửa sổ xuống đáy chồng cửa sổ, không kích hoạt — nằm dưới cửa sổ người dùng, thao tác theo pattern vẫn chạy được. */
     static void SendToBack(IntPtr h) {
       if (h == IntPtr.Zero || !Native.IsWindow(h)) return;
-      Native.SetWindowPos(h, new IntPtr(1), 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010);
+      // SWP_ASYNCWINDOWPOS: cửa sổ của ứng dụng đang treo thì lệnh đồng bộ sẽ chờ tới khi nó hết treo.
+      Native.SetWindowPos(h, new IntPtr(1), 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010 | 0x4000);
     }
 
     /** Cửa sổ trên cùng bị thao tác vừa rồi đổi đi → đưa cửa sổ cũ lên lại (gắn luồng input tạm, không phát phím giả). */
@@ -381,7 +419,7 @@ namespace AivinGui {
       uint pid;
       uint curThread = Native.GetWindowThreadProcessId(cur, out pid);
       uint me = Native.GetCurrentThreadId();
-      bool attached = curThread != 0 && curThread != me && Native.AttachThreadInput(me, curThread, true);
+      bool attached = curThread != 0 && curThread != me && IsWindowResponsive(cur, 200) && Native.AttachThreadInput(me, curThread, true);
       try { Native.SetForegroundWindow(prev); } finally { if (attached) Native.AttachThreadInput(me, curThread, false); }
       return Native.GetForegroundWindow() == prev;
     }
@@ -432,6 +470,10 @@ namespace AivinGui {
       IntPtr hit = Native.WindowFromPoint(new Native.POINT { X = x, Y = y });
       uint pid = 0;
       if (hit != IntPtr.Zero) Native.GetWindowThreadProcessId(hit, out pid);
+      // Hộp Windows Security làm tối cả màn hình bằng một lớp phủ: nói thẳng nguyên nhân để Planner hỏi người dùng thay vì thử lại.
+      if (hit != IntPtr.Zero && ClassOf(RootOf(hit)) == "Shell_SystemDim") {
+        throw new GuiError("GUI_FOCUS_LOST", "A Windows Security prompt is covering the screen — nothing was clicked. Ask the person at this computer to answer it, or use an accessibility action (click by node_id / set_value)");
+      }
       string who = pid == 0 ? "nothing" : ProcessName(pid);
       throw new GuiError("GUI_FOCUS_LOST", "Another window (" + who + ") is on top of the target point — nothing was clicked. Observe again, or use an accessibility action (click by node_id / set_value)");
     }
@@ -486,7 +528,7 @@ namespace AivinGui {
 
     static CacheRequest BuildCache() {
       var c = new CacheRequest();
-      c.TreeScope = TreeScope.Element | TreeScope.Children;
+      c.TreeScope = TreeScope.Element;
       c.TreeFilter = Automation.ControlViewCondition;
       c.AutomationElementMode = AutomationElementMode.Full;
       c.Add(AutomationElement.NameProperty); c.Add(AutomationElement.ControlTypeProperty); c.Add(AutomationElement.AutomationIdProperty);
@@ -571,11 +613,41 @@ namespace AivinGui {
       return role == "button" || role == "edit" || role == "menuitem" || role == "hyperlink" || role == "listitem" || role == "tabitem" || role == "treeitem" || role == "checkbox" || role == "radiobutton" || role == "combobox";
     }
 
+    const int FIND_ELEMENT_BUDGET_MS = 3000, OBSERVE_BUDGET_MS = 5000, LIST_BUDGET_MS = 1500, MAX_CHILDREN_PER_NODE = 80;
+
+    /**
+     * Con của một phần tử. Khung thường dùng FindAll (nhanh hơn đi từng bước nhiều lần). Bảng / danh sách đi từng bước để dừng được giữa chừng:
+     * FindAll không huỷ được, và trên bảng dài (DataGridView qua cầu MSAA) mất hàng chục giây. Mỗi danh sách chỉ được dùng một phần ngân sách,
+     * để các nút nằm sau bảng vẫn đọc được.
+     */
+    static List<AutomationElement> ChildrenOf(AutomationElement e, string role, CacheRequest cache, TreeWalker walker, Stopwatch sw, int budgetMs, ref bool cut) {
+      var kids = new List<AutomationElement>();
+      if (role != "table" && role != "datagrid" && role != "list" && role != "tree") {
+        try {
+          using (cache.Activate()) { foreach (AutomationElement k in e.FindAll(TreeScope.Children, Condition.TrueCondition)) kids.Add(k); }
+        } catch { /* phần tử vừa mất giữa chừng */ }
+        return kids;
+      }
+      long stopAt = Math.Min(sw.ElapsedMilliseconds + LIST_BUDGET_MS, budgetMs);
+      try {
+        using (cache.Activate()) {
+          AutomationElement k = walker.GetFirstChild(e, cache);
+          while (k != null) {
+            if (kids.Count >= MAX_CHILDREN_PER_NODE || sw.ElapsedMilliseconds >= stopAt) { cut = true; break; }
+            kids.Add(k);
+            k = walker.GetNextSibling(k, cache);
+          }
+        }
+      } catch { /* phần tử vừa mất giữa chừng: giữ phần đã đọc được */ }
+      return kids;
+    }
+
     static object Observe(Dictionary<string, object> a) {
       IntPtr h = ResolveWindow(a);
       if (h == IntPtr.Zero) throw new GuiError("NOT_FOUND", "No window is focused");
       int maxNodes = Math.Max(20, Math.Min(Int(a, "max_nodes", 300), 1500));
       int maxDepth = Math.Max(2, Math.Min(Int(a, "max_depth", 25), 60));
+      int budgetMs = Math.Max(500, Math.Min(Int(a, "budget_ms", OBSERVE_BUDGET_MS), 30000));
       var sw = Stopwatch.StartNew();
       AssertWindowResponsive(h);
       if (Native.IsIconic(h)) {
@@ -601,8 +673,11 @@ namespace AivinGui {
         root = root.GetUpdatedCache(cache);
       }
       queue.Enqueue(new KeyValuePair<AutomationElement, int>(root, 0));
+      var walker = new TreeWalker(Automation.ControlViewCondition);
+      bool timedOut = false, listCut = false;
       while (queue.Count > 0) {
         if (nodes.Count >= maxNodes) { truncated = true; break; }
+        if (sw.ElapsedMilliseconds >= budgetMs) { truncated = true; timedOut = true; break; }
         var item = queue.Dequeue();
         AutomationElement e = item.Key;
         int idx = nodes.Count;
@@ -616,12 +691,9 @@ namespace AivinGui {
           if (IsInteractive(n)) interactive++;
         }
         if (item.Value >= maxDepth) continue;
-        AutomationElementCollection kids;
-        try {
-          using (cache.Activate()) { kids = e.FindAll(TreeScope.Children, Condition.TrueCondition); }
-        } catch { continue; }
-        foreach (AutomationElement k in kids) queue.Enqueue(new KeyValuePair<AutomationElement, int>(k, item.Value + 1));
+        foreach (AutomationElement k in ChildrenOf(e, Convert.ToString(n["role"]), cache, walker, sw, budgetMs, ref listCut)) queue.Enqueue(new KeyValuePair<AutomationElement, int>(k, item.Value + 1));
       }
+      if (listCut) truncated = true;
       lock (StateLock) {
         Snapshots[snap] = map;
         SnapshotWindow[snap] = h;
@@ -632,12 +704,16 @@ namespace AivinGui {
         }
       }
       // Cây nghèo: ít phần tử có tên / thao tác được (ứng dụng vẽ tay, canvas, Electron tắt trợ năng) → cần ảnh để định vị.
-      string quality = (interactive >= 3 && named >= 5) ? "good" : "poor";
+      // Ứng dụng Store mới chỉ có khung: thanh tiêu đề đủ phần tử để chấm "good" nhưng chưa có nội dung thật.
+      bool frameOnly = IsUwpFrameOnly(h);
+      string quality = (!frameOnly && interactive >= 3 && named >= 5) ? "good" : "poor";
       var res = new Dictionary<string, object> {
         { "snapshot", snap }, { "window", WindowInfo(h, Native.GetForegroundWindow()) }, { "nodes", nodes }, { "node_count", nodes.Count },
         { "interactive_count", interactive }, { "tree_quality", quality }, { "truncated", truncated }, { "tree_ms", sw.ElapsedMilliseconds },
+        { "truncated_by", timedOut ? "time" : listCut ? "long_list" : truncated ? "node_limit" : null },
         { "dpi", (long)SafeDpi(h) },
       };
+      if (frameOnly) res["content_unavailable"] = true;
       bool wantImage = Bool(a, "include_image", false) || (quality == "poor" && Bool(a, "image_when_poor", true));
       // Cây nghèo → đọc chữ trên ảnh (OCR của Windows, chạy trên máy): mỗi cụm chữ thành một node "text" có toạ độ, thang quyết định đích
       // ở BE tìm được "nút Lưu" theo chữ như với phần tử thật thay vì đoán toạ độ trên ảnh.
@@ -880,6 +956,12 @@ namespace AivinGui {
       // Expand → phím người dùng đang gõ ở cửa sổ khác rơi vào ô của AI (chạy thật 28/10/2026: ô Họ tên bị chèn "ã", "x", "ch"). Trả focus
       // về cửa sổ người dùng đang dùng ngay sau thao tác.
       bool restored = used != "mouse" && used != "keyboard" && RestoreForeground(fgBefore, window);
+      // Vẫn chưa trả được (hay gặp với ô hỏi của linh vật) mà tiêu điểm đang ở ứng dụng AI vừa thao tác → cách của gui.focus; GuardInput trong đó
+      // bỏ qua bước này khi người dùng đang gõ, để phím Alt không chen vào giữa.
+      IntPtr fgAfter = Native.GetForegroundWindow();
+      if (!restored && used != "mouse" && used != "keyboard" && fgBefore != IntPtr.Zero && fgAfter != fgBefore && Native.IsWindow(fgBefore) && TookForeground(fgAfter, window)) {
+        try { restored = ForceForeground(fgBefore); } catch (GuiError) { }
+      }
       // Chạy nền: người dùng đang ở cửa sổ khác → cửa sổ của AI về lại dưới đáy (không chồng lên việc của người dùng).
       if (restored || (used != "mouse" && used != "keyboard" && fgBefore != window && window != IntPtr.Zero)) SendToBack(window);
       // Pattern actions expose their new state synchronously in most UIA providers. Keep a short grace for
@@ -890,7 +972,10 @@ namespace AivinGui {
       if (lastMousePoint != null) screenPoint = lastMousePoint;
       if (screenPoint != null) res["screen_point"] = screenPoint;
       if (restored) res["focus_returned_to_user"] = true;
-      if (el != null) res["target"] = Live(el);
+      // Nút khởi chạy việc nặng làm luồng giao diện đứng: đọc bằng chứng lúc đó sẽ kẹt theo ứng dụng, nên báo đang bận rồi trả về ngay.
+      bool appBusy = window != IntPtr.Zero && Native.IsWindow(window) && !IsWindowResponsive(window, 1500);
+      if (appBusy) res["app_busy"] = true;
+      if (el != null && !appBusy) res["target"] = Live(el);
       IntPtr fg = Native.GetForegroundWindow();
       res["foreground"] = WindowInfo(fg, fg);
       if (window != IntPtr.Zero) {
@@ -901,7 +986,7 @@ namespace AivinGui {
           if (after != beforeTitle) res["window_title_changed"] = new Dictionary<string, object> { { "from", beforeTitle }, { "to", after } };
         }
       }
-      try {
+      if (!appBusy) try {
         var fe = AutomationElement.FocusedElement;
         if (fe != null) res["focused_element"] = new Dictionary<string, object> { { "role", fe.Current.ControlType.ProgrammaticName.Replace("ControlType.", "").ToLowerInvariant() }, { "name", Clip(fe.Current.Name, 120) } };
       } catch { }
@@ -1137,18 +1222,20 @@ namespace AivinGui {
           if (IsCancelled(reqId)) throw new GuiError("CANCELLED", "Wait cancelled");
           bool alive = h == IntPtr.Zero || Native.IsWindow(h);
           Dictionary<string, object> match = null;
+          bool incomplete = false;
           if (windowLevel) {
             if (h != IntPtr.Zero) {
               if (alive && WindowText(h).IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0) match = WindowInfo(h, Native.GetForegroundWindow());
             } else {
-              foreach (Dictionary<string, object> info in ListWindows(false)) {
+              foreach (Dictionary<string, object> info in ListWindows(true)) { // gồm cả hộp thoại con: chờ "Save as" là việc hay gặp nhất
                 if (Convert.ToString(info["title"]).IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0) { match = info; break; }
               }
             }
           } else if (alive) {
-            match = FindElement(h, name, aid, role);
+            match = FindElement(h, name, aid, role, ref incomplete);
           }
-          if (gone ? match == null : match != null) {
+          // Chưa duyệt xong cây (hết ngân sách / ứng dụng đang bận) thì chưa thể kết luận phần tử đã mất.
+          if (gone ? (match == null && !incomplete) : match != null) {
             var res = new Dictionary<string, object> { { "met", true }, { "until", gone ? "gone" : "appears" }, { "waited_ms", sw.ElapsedMilliseconds } };
             if (match != null) res["match"] = match;
             if (!alive) res["window_closed"] = true;
@@ -1166,21 +1253,28 @@ namespace AivinGui {
     }
 
     /** Phần tử đầu tiên khớp (AutomationId trùng hẳn, hoặc tên chứa chữ — không phân biệt hoa thường), có lọc vai trò. */
-    static Dictionary<string, object> FindElement(IntPtr h, string name, string aid, string role) {
-      if (!IsWindowResponsive(h, 300)) return null;
+    static Dictionary<string, object> FindElement(IntPtr h, string name, string aid, string role, ref bool incomplete) {
+      if (!IsWindowResponsive(h, 300)) { incomplete = true; return null; }
       AutomationElement root;
       try { root = AutomationElement.FromHandle(h); } catch { return null; }
       var cache = new CacheRequest();
       cache.Add(AutomationElement.NameProperty); cache.Add(AutomationElement.ControlTypeProperty); cache.Add(AutomationElement.AutomationIdProperty);
       cache.Add(AutomationElement.IsOffscreenProperty);
-      cache.AutomationElementMode = AutomationElementMode.None;
-      Condition cond = string.IsNullOrEmpty(aid) ? Condition.TrueCondition : new PropertyCondition(AutomationElement.AutomationIdProperty, aid);
-      AutomationElementCollection all;
-      try { using (cache.Activate()) { all = root.FindAll(TreeScope.Descendants, cond); } } catch (ElementNotAvailableException) { return null; }
-      foreach (AutomationElement e in all) {
+      // Đi theo tầng với trần thời gian, không FindAll(Descendants): trên cửa sổ có bảng dài một lượt hỏi mất hàng chục giây và không huỷ được.
+      var walker = new TreeWalker(Automation.ControlViewCondition);
+      var sw = Stopwatch.StartNew();
+      try { using (cache.Activate()) { root = root.GetUpdatedCache(cache); } } catch (ElementNotAvailableException) { return null; }
+      var queue = new Queue<AutomationElement>();
+      queue.Enqueue(root);
+      bool cut = false;
+      while (queue.Count > 0) {
+        if (sw.ElapsedMilliseconds >= FIND_ELEMENT_BUDGET_MS) { incomplete = true; return null; }
+        AutomationElement e = queue.Dequeue();
         string n = Cached(e, AutomationElement.NameProperty) as string ?? "";
         var ct = Cached(e, AutomationElement.ControlTypeProperty) as ControlType;
         string r = ct == null ? "" : ct.ProgrammaticName.Replace("ControlType.", "").ToLowerInvariant();
+        foreach (AutomationElement k in ChildrenOf(e, r, cache, walker, sw, FIND_ELEMENT_BUDGET_MS, ref cut)) queue.Enqueue(k);
+        if (!string.IsNullOrEmpty(aid) && !string.Equals(Cached(e, AutomationElement.AutomationIdProperty) as string, aid, StringComparison.Ordinal)) continue;
         if (!string.IsNullOrEmpty(name) && n.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0) continue;
         if (!string.IsNullOrEmpty(role) && !string.Equals(r, role, StringComparison.OrdinalIgnoreCase)) continue;
         if (true.Equals(Cached(e, AutomationElement.IsOffscreenProperty)) && string.IsNullOrEmpty(aid)) continue;

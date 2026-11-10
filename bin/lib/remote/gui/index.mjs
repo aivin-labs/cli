@@ -24,7 +24,7 @@ import { isProtectedPromptWindow } from '../humanInput.mjs';
 
 /** Tiến trình không bao giờ điều khiển: quản lý mật khẩu, hộp nâng quyền, bảo mật hệ thống, màn hình khoá. */
 const BLOCKED_PROCESSES = new Set([
-  'consent', 'credentialuihost', 'lockapp', 'logonui', 'securityhealthsystray', 'securityhealthhost', 'windowsdefender', 'msmpeng',
+  'consent', 'credentialuihost', 'credentialuibroker', 'lockapp', 'logonui', 'securityhealthsystray', 'securityhealthhost', 'windowsdefender', 'msmpeng',
   'keepass', 'keepassxc', '1password', 'bitwarden', 'lastpass', 'dashlane', 'enpass', 'nordpass', 'roboform',
 ]);
 /**
@@ -72,8 +72,16 @@ export function detectGui({ disabled = false, multiUser = false, platform = proc
 
 const normalizeProcess = (name) => String(name || '').toLowerCase().replace(/\.exe$/, '');
 
+/** PickerHost còn mở các hộp chọn tệp bình thường, nên chỉ chặn đúng hộp xác thực "Windows Security" của nó. */
+function isWindowsSecurityPrompt(windowInfo) {
+  if (normalizeProcess(windowInfo?.process) !== 'pickerhost') return false;
+  const title = normalizeName(windowInfo?.title);
+  return title === 'windows security' || title === 'bao mat windows';
+}
+
 /** Ứng dụng này có được điều khiển không — ném lỗi nếu bị chặn. */
 export function assertWindowAllowed(windowInfo, { fullAccess }) {
+  if (isWindowsSecurityPrompt(windowInfo)) throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, 'This is a Windows Security prompt — only the person at this computer can answer it');
   // Hộp xác nhận / đồng ý của chính Aivin: chỉ người ở máy trả lời — AI bấm "Cho phép" là tự duyệt việc của mình (humanInput.mjs).
   if (isProtectedPromptWindow(windowInfo?.title)) {
     throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, 'This is an Aivin confirmation box — only the person at this computer can answer it');
@@ -106,15 +114,24 @@ export function rankGuiNodes(nodes, query, role = '', { matchValue = true } = {}
   const words = q.split(' ').filter(Boolean);
   const wantedRole = String(role || '').toLowerCase();
   if (!words.length) return [];
+  // Chữ OCR nằm trên một phần tử đã tắt cũng là đã tắt: bấm vào đó không có tác dụng mà vẫn báo thành công.
+  const disabledRects = (nodes || []).filter((n) => n.disabled && n.rect).map((n) => n.rect);
+  const onDisabled = (n) => n.source === 'ocr' && n.rect && disabledRects.some((r) => {
+    const cx = n.rect.x + n.rect.w / 2;
+    const cy = n.rect.y + n.rect.h / 2;
+    return cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h;
+  });
   return (nodes || [])
-    .filter((n) => (!wantedRole || String(n.role || '').toLowerCase() === wantedRole || n.source === 'ocr') && !n.disabled && !n.offscreen)
+    .filter((n) => (!wantedRole || String(n.role || '').toLowerCase() === wantedRole || n.source === 'ocr') && !n.disabled && !n.offscreen && !onDisabled(n))
     .map((node, order) => {
       const name = normalizeName(node.name);
       const aid = normalizeName(node.automation_id);
       const value = matchValue ? normalizeName(node.value) : '';
       const help = normalizeName(node.help);
       const combined = [name, aid, value, help].filter(Boolean).join(' ');
-      const hits = words.filter((word) => combined.includes(word)).length;
+      // Khớp theo đầu từ; chỉ từ đủ dài mới được khớp giữa chuỗi (AutomationId dính liền) — "ton" (tồn) không được khớp "TogglePaneButton".
+      const tokens = combined.split(' ');
+      const hits = words.filter((word) => tokens.some((token) => token.startsWith(word)) || (word.length >= 4 && combined.includes(word))).length;
       if (!hits) return null;
       let score = Math.round((hits / words.length) * 50);
       const evidence = [];
@@ -206,7 +223,7 @@ export function createGuiController({
 
   async function windows(args, ctx) {
     const list = await host.call('windows', { all: !!args.include_dialogs }, ctx);
-    return { windows: list.map((w) => ({ ...w, blocked: BLOCKED_PROCESSES.has(normalizeProcess(w.process)) || (!fullAccess && SHELL_PROCESSES.has(normalizeProcess(w.process))) || isProtectedPromptWindow(w.title) || undefined })) };
+    return { windows: list.map((w) => ({ ...w, blocked: BLOCKED_PROCESSES.has(normalizeProcess(w.process)) || (!fullAccess && SHELL_PROCESSES.has(normalizeProcess(w.process))) || isProtectedPromptWindow(w.title) || isWindowsSecurityPrompt(w) || undefined })) };
   }
 
   /**
@@ -233,6 +250,7 @@ export function createGuiController({
       ocr: typeof args.ocr === 'boolean' ? args.ocr : undefined,
       image_max_width: Number(args.image_max_width) || 1366,
       image_quality: Number(args.image_quality) || 70,
+      budget_ms: Number(args.budget_ms) || undefined,
     }, ctx);
     assertWindowAllowed(res.window, { fullAccess });
     snapshotWindows.set(String(res.snapshot), res.window);
@@ -250,7 +268,7 @@ export function createGuiController({
     if (!words.length) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give query (words of the element to find)');
     const role = String(args.role || '').toLowerCase();
     const max = Math.max(1, Math.min(Number(args.max) || FIND_DEFAULT, FIND_MAX));
-    const res = await observe({ ...args, max_nodes: 1500 }, ctx);
+    const res = await observe({ ...args, max_nodes: 1500, budget_ms: 10_000 }, ctx);
     // gui.do chọn phần tử để BẤM: không tính nội dung ô — chữ trên màn hình (thư, trang web) không được lái việc chọn nút (02/11/2026).
     const scored = rankGuiNodes(res.nodes, args.query, role, { matchValue: args.match_value !== false });
     const all = scored.filter((x) => x.hits === words.length);
@@ -287,11 +305,13 @@ export function createGuiController({
     const query = String(args.target || '').trim();
     if (!query) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give target');
     let found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, match_value: false }, ctx);
-    if (!found.nodes.length && !found.ocr && found.tree_quality !== 'poor') {
-      found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, match_value: false, ocr: true }, ctx);
+    if ((!found.nodes.length || !found.exact) && !found.ocr && found.tree_quality !== 'poor') {
+      const viaOcr = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, match_value: false, ocr: true }, ctx);
+      if (viaOcr.nodes.length && (viaOcr.exact || !found.nodes.length)) found = viaOcr;
     }
     if (!found.nodes.length) throw new DeviceToolError(DeviceErrorCode.GUI_TARGET_NOT_FOUND, `No enabled visible target matched "${query}"`);
-    if (found.ambiguous) {
+    // Khớp một phần (không phần tử nào có đủ mọi từ) cũng là không chắc: chỉ trả ứng viên để BE phân giải, không bấm thẳng.
+    if (found.ambiguous || !found.exact) {
       return {
         ok: false, code: DeviceErrorCode.GUI_AMBIGUOUS_TARGET,
         choices: found.nodes.map((n) => ({ ref: n.id, label: [n.name || n.automation_id || n.role, n.role].filter(Boolean).join(' — ') })),
@@ -330,6 +350,7 @@ export function createGuiController({
       ok: true, action: command, target: node.name || node.automation_id || node.role,
       ...(verified === undefined ? {} : { verified }),
       ...(result.screen_point ? { screen_point: result.screen_point } : {}),
+      ...(result.app_busy ? { app_busy: true } : {}),
       effect: result.window_title_changed || result.target || result.focused_element || command,
     };
   }
@@ -394,24 +415,44 @@ export function createGuiController({
     return null;
   }
 
-  /** Cửa sổ AI vừa mở được Windows đưa lên trước → đẩy xuống dưới, trả focus cho cửa sổ người dùng đang dùng (chạy nền). */
-  async function sendToBack(win, before, ctx) {
+  /** Cửa sổ đang ở trên cùng trước khi mở ứng dụng, kể cả loại không có trong gui.windows (hộp hệ thống, cửa sổ công cụ). */
+  const currentForeground = (ctx) => host.call('window_info', {}, ctx).then((w) => w?.window).catch(() => undefined);
+
+  /**
+   * Cửa sổ AI vừa mở được Windows đưa lên trước → đẩy xuống dưới, trả focus cho cửa sổ người dùng đang dùng (chạy nền). Ứng dụng thường tự
+   * kích hoạt lại ngay sau khi cửa sổ hiện ra, nên làm thêm vài lượt ngắn; host chỉ trả focus khi nó vẫn đang ở ứng dụng vừa mở.
+   */
+  async function sendToBack(win, userWindow, ctx) {
     if (!win || background === false) return;
-    const userWindow = before.find((w) => w.focused)?.window;
-    await host.call('to_back', { window: win.window, restore_to: userWindow }, ctx).catch(() => undefined);
+    for (const [i, wait] of [0, 350, 600].entries()) {
+      if (wait) await new Promise((r) => setTimeout(r, wait));
+      if (ctx.signal?.aborted) return;
+      await host.call('to_back', { window: win.window, restore_to: userWindow, wait_content: i === 0 }, ctx).catch(() => undefined);
+    }
+  }
+
+  /** Đưa cửa sổ mới xuống nền; cửa sổ đầu tiên đôi khi chỉ là màn hình chờ đã đóng (Sticky Notes) → trả cửa sổ thật thay vì handle đã chết. */
+  async function settleNewWindow(win, before, userWindow, hint, ctx) {
+    if (!win) return win;
+    await sendToBack(win, userWindow, ctx);
+    const alive = await host.call('window_info', { window: win.window }, ctx).then(() => true).catch(() => false);
+    if (alive) return win;
+    const next = await waitNewWindow(before, ctx, hint);
+    await sendToBack(next, userWindow, ctx);
+    return next;
   }
 
   /** Mở ứng dụng theo tên trong danh sách Start, hoặc mở một tệp trong vùng được phép bằng ứng dụng mặc định. Không chạy lệnh tuỳ ý. */
   async function openApp(args, ctx, env) {
     const before = await host.call('windows', {}, ctx);
+    const userWindow = await currentForeground(ctx);
     if (args.file) {
       const abs = resolveInRoots(env.roots, String(args.file));
       if (EXECUTABLE_EXT.test(abs)) throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, 'Opening programs or scripts is not allowed — use an app name, or shell.exec');
       if (!fs.existsSync(abs)) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `File not found: ${args.file}`);
       spawn('explorer.exe', [abs], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
-      const win = await waitNewWindow(before, ctx, path.basename(abs, path.extname(abs)));
-      await sendToBack(win, before, ctx);
-      return { opened: path.basename(abs), window: win, hint: win ? undefined : 'No new window appeared yet — the file may have opened in an existing window; check gui.windows' };
+      const win = await settleNewWindow(await waitNewWindow(before, ctx, path.basename(abs, path.extname(abs))), before, userWindow, path.basename(abs, path.extname(abs)), ctx);
+      return { opened: path.basename(abs), window: win, hint: win ? undefined : 'No new window appeared — the file may have opened in an existing window, or Windows has no working default app for this file type; check gui.windows, or open the app by name' };
     }
     const name = String(args.name || '').trim();
     if (!name) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give name (an installed app) or file');
@@ -421,8 +462,7 @@ export function createGuiController({
     const app = matches[0];
     assertAppAllowed(app.name, { fullAccess });
     spawn('explorer.exe', [`shell:AppsFolder\\${app.app_id}`], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
-    const win = await waitNewWindow(before, ctx, app.name);
-    await sendToBack(win, before, ctx);
+    const win = await settleNewWindow(await waitNewWindow(before, ctx, app.name), before, userWindow, app.name, ctx);
     if (win) assertWindowAllowed(win, { fullAccess });
     return { opened: app.name, window: win, hint: win ? undefined : 'App started but no new window yet — call gui.windows in a moment' };
   }
@@ -448,7 +488,7 @@ export function buildGuiTools(gui) {
       description: 'List open desktop windows: title, app process, handle, position, which is focused/minimized. blocked = the AI may not control it.',
       input_schema: schema({ include_dialogs: bool('also list owned dialogs') }) },
     { name: 'gui.observe', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.observe(a, c),
-      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window. image_error = no screenshot this time (the app can only be captured from the screen and the window is behind/covered — gui.focus it first if a screenshot is needed).',
+      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window. truncated_by = why the list is partial: time / long_list (a very long table or list; scroll it, or use gui.find) / node_limit. content_unavailable = a Store app shows only its frame because it is still starting or suspended — gui.focus it, then observe again. image_error = no screenshot this time (the app can only be captured from the screen and the window is behind/covered — gui.focus it first if a screenshot is needed).',
       input_schema: schema({
         window: target.window, include_image: bool('attach a screenshot even when the tree is good'), max_nodes: num('default 300'),
         ocr: bool('read the text on the window even when the tree is good (default: only when poor)'),
@@ -470,7 +510,7 @@ export function buildGuiTools(gui) {
       description: 'Bring a window to the front (restores it if minimized).',
       input_schema: schema({ window: target.window }, ['window']) },
     { name: 'gui.act', group: ToolGroup.GUI, handler: (a, c) => gui.act(a, c),
-      description: 'Do one action on an element (node_id) or at a point of the last screenshot: click, double_click, right_click, set_value (replace a field\'s text), type (keystrokes into the focused element), key (shortcut like "ctrl+s", "alt+f4", "enter"), scroll, select (option of a list/combo), toggle, expand, collapse, drag. Uses accessibility actions first (works even when the window is behind), real mouse/keyboard otherwise. Returns evidence: the element\'s new value/state, window title change, focused element. OCR text nodes ("4.t2") take click / double_click / right_click, or set_value / type (clicks there, then types). Without node_id give window. Stops with GUI_USER_ACTIVE if the person is using the mouse/keyboard, and with GUI_FOCUS_LOST (nothing clicked / the rest not typed) if real mouse/keyboard input could not reach the window — it could not come to the front, or another window covers the point.',
+      description: 'Do one action on an element (node_id) or at a point of the last screenshot: click, double_click, right_click, set_value (replace a field\'s text), type (keystrokes into the focused element), key (shortcut like "ctrl+s", "alt+f4", "enter"), scroll, select (option of a list/combo), toggle, expand, collapse, drag. Uses accessibility actions first (works even when the window is behind), real mouse/keyboard otherwise. Returns evidence: the element\'s new value/state, window title change, focused element; app_busy = the action ran but the app is still working, so no evidence yet — gui.wait_for or observe later. OCR text nodes ("4.t2") take click / double_click / right_click, or set_value / type (clicks there, then types). Without node_id give window. Stops with GUI_USER_ACTIVE if the person is using the mouse/keyboard, and with GUI_FOCUS_LOST (nothing clicked / the rest not typed) if real mouse/keyboard input could not reach the window — it could not come to the front, or another window covers the point.',
       input_schema: schema({
         action: str(Object.values(GuiAction).join(' | ')), ...target, text: str('text for set_value / type'), keys: str('for key: e.g. "ctrl+s", several separated by spaces'),
         option: str('for select: the option name'), state: str('for toggle: on | off'), direction: str('for scroll: up | down | left | right'), amount: num('scroll steps, default 3'),

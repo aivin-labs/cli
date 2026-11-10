@@ -471,3 +471,50 @@ test('windowsHost: host được báo tệp PID bản Office ẩn để dọn m�
   assert.match(OFFICE_ORPHANS_FILE, /gui[\\/]office-orphans\.txt$/);
   host.close();
 });
+
+test('rank: khớp theo đầu từ, từ ngắn không khớp giữa AutomationId; chữ OCR trên nút đã tắt không được chọn (10/11/2026)', () => {
+  const nodes = [{ id: '1.1', role: 'button', name: 'Open Navigation', automation_id: 'TogglePaneButton' }];
+  assert.equal(rankGuiNodes(nodes, 'tồn').length, 0);
+  assert.equal(rankGuiNodes(nodes, 'navi').length, 1);
+  assert.equal(rankGuiNodes(nodes, 'paneb').length, 1);
+  const ocr = [
+    { id: '2.1', role: 'button', name: 'Khoá sổ', disabled: true, rect: { x: 100, y: 200, w: 100, h: 30 } },
+    { id: '2.t1', role: 'text', name: 'Khoá sổ', source: 'ocr', rect: { x: 120, y: 205, w: 60, h: 20 } },
+    { id: '2.t2', role: 'text', name: 'Khoá sổ', source: 'ocr', rect: { x: 500, y: 205, w: 60, h: 20 } },
+  ];
+  assert.deepEqual(rankGuiNodes(ocr, 'khoá sổ').map((x) => x.node.id), ['2.t2']);
+});
+
+test('gui.do: khớp một phần không bấm thẳng — trả ứng viên, không gọi act (10/11/2026)', async () => {
+  const host = fakeHost({
+    window_info: NOTEPAD,
+    observe: { snapshot: 7, window: NOTEPAD, tree_quality: 'good', nodes: [{ id: '7.1', role: 'button', name: 'Seven', patterns: ['invoke'] }] },
+  });
+  const gui = createGuiController({ host, notify: () => {}, say: () => {} });
+  const res = await gui.semanticDo({ do: 'click', target: 'Seven Hundred', within: 'Notepad' }, {}, {});
+  assert.equal(res.ok, false);
+  assert.equal(res.code, 'GUI_AMBIGUOUS_TARGET');
+  assert.deepEqual(res.choices.map((c) => c.ref), ['7.1']);
+  assert.equal(host.calls.some((c) => c.op === 'act'), false);
+});
+
+test('sàn ứng dụng: hộp xác thực Windows bị chặn, hộp chọn tệp của PickerHost thì không (10/11/2026)', () => {
+  for (const title of ['Windows Security', 'Bảo mật Windows']) {
+    assert.throws(() => assertWindowAllowed({ process: 'PickerHost', title }, { fullAccess: true }), /Windows Security prompt/);
+  }
+  assert.throws(() => assertWindowAllowed({ process: 'CredentialUIBroker.exe', title: 'x' }, { fullAccess: true }), /not allowed/);
+  assert.doesNotThrow(() => assertWindowAllowed({ process: 'PickerHost', title: 'Open' }, { fullAccess: false }));
+});
+
+test('host C#: observe và wait_for có trần thời gian; tìm được hộp thoại con; ứng dụng bận không làm kẹt act (10/11/2026)', async () => {
+  const { WINDOWS_HOST_CSHARP: cs } = await import('../bin/lib/remote/gui/windowsHostSource.mjs');
+  assert.match(cs, /TreeScope = TreeScope\.Element;/);
+  assert.doesNotMatch(cs, /FindAll\(TreeScope\.Descendants, cond\)/);
+  assert.match(cs, /sw\.ElapsedMilliseconds >= budgetMs/);
+  assert.match(cs, /truncated_by/);
+  assert.match(cs, /foreach \(bool withDialogs in new\[\] \{ false, true \}\)/);
+  assert.match(cs, /match == null && !incomplete/);
+  assert.match(cs, /res\["app_busy"\] = true/);
+  assert.match(cs, /Shell_SystemDim/);
+  assert.match(cs, /content_unavailable/);
+});
