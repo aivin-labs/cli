@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CastConsentDecision as D, createCastConsent } from '../bin/lib/remote/desktop/castConsent.mjs';
-import { CAST_TRUST_TTL_MS, createCastTrust, createDeviceProver, verifyDeviceProof } from '../bin/lib/remote/desktop/castTrust.mjs';
+import { CAST_TRUST_TTL_MS, castViewerLabel, createCastTrust, createDeviceProver, verifyDeviceProof } from '../bin/lib/remote/desktop/castTrust.mjs';
 import { CastConsentMode as M } from '../bin/lib/remote/localPolicy.mjs';
 
 const { subtle } = crypto.webcrypto;
@@ -25,6 +25,30 @@ function store(now = () => 1_000_000) {
   const file = path.join(dir, 'trusted.json');
   return { dir, file, trust: createCastTrust({ file, keyFile: path.join(dir, 'trusted.key'), now }) };
 }
+
+test('tên hiện cho chủ máy: cùng loại máy nhưng khác khoá thì khác tên, cùng khoá thì tên giữ nguyên dù đổi mạng', () => {
+  const phone = castViewerLabel('Android', 'key-a', 'vk-wifi');
+  assert.match(phone, /^Android - [0-9A-F]{6}$/);
+  assert.equal(castViewerLabel('Android', 'key-a', 'vk-4g'), phone);
+  assert.notEqual(castViewerLabel('Android', 'key-b', 'vk-wifi'), phone);
+});
+
+test('tên hiện cho chủ máy: không có khoá thì dựa vào mã người xem; không có gì để phân biệt thì giữ nguyên', () => {
+  assert.notEqual(castViewerLabel('Android', '', 'vk-1'), castViewerLabel('Android', '', 'vk-2'));
+  assert.equal(castViewerLabel('Android', '', undefined), 'Android');
+  assert.equal(castViewerLabel(undefined, '', undefined), undefined);
+});
+
+test('tên lưu danh sách tin cậy vẫn còn đủ mã dù tên khai rất dài hoặc có ký tự lạ', () => {
+  const { trust } = store();
+  const label = castViewerLabel(`${'x'.repeat(200)}"<b>`, 'key-a');
+  assert.ok(label.length <= 40);
+  assert.match(label, / - [0-9A-F]{6}$/);
+  return browserDevice().then(({ publicKey }) => {
+    trust.add({ key: publicKey, name: label });
+    assert.equal(trust.list()[0].name, label);
+  });
+});
 
 test('chữ ký WebCrypto của trình duyệt được máy xác minh; sai phiên / sai chuỗi / khoá khác thì không', async () => {
   const device = await browserDevice();
@@ -197,7 +221,7 @@ test('chế độ tắt hẳn thắng quyền tin', async () => {
   assert.equal(await consent.decide(req({ prove: async () => true })), D.DISABLED);
 });
 
-test('hộp hỏi: chỉ hiện "Luôn tin" khi có khoá hợp lệ; chọn "Luôn tin" mới lưu, "Chỉ lần này" thì không', async () => {
+test('hộp hỏi: chỉ hiện "Luôn cho phép" khi có khoá hợp lệ; chọn nút đó mới lưu, "Cho phép lần này" thì không', async () => {
   const always = setupConsent({ trusted: false, answer: D.ALLOW_ALWAYS });
   assert.equal(await always.consent.decide(req()), D.ALLOW);
   assert.equal(always.asks[0].canTrust, true);
@@ -211,6 +235,50 @@ test('hộp hỏi: chỉ hiện "Luôn tin" khi có khoá hợp lệ; chọn "Lu
   assert.equal(await oldBrowser.consent.decide(req({ deviceKey: '' })), D.ALLOW);
   assert.equal(oldBrowser.asks[0].canTrust, false);
   assert.deepEqual(oldBrowser.added, []);
+});
+
+test('đổi mạng giữa phiên (viewerKey đổi vì IP): cùng khoá thiết bị chứng minh đúng thì không hỏi lại', async () => {
+  const { consent, asks } = setupConsent({ trusted: false, answer: D.ALLOW });
+  assert.equal(await consent.decide(req({ viewerKey: 'wifi' })), D.ALLOW);
+  let proved = 0;
+  assert.equal(await consent.decide(req({ viewerId: 'v2', viewerKey: '4g', prove: async () => { proved++; return true; } })), D.ALLOW);
+  assert.equal(proved, 1);
+  assert.equal(asks.length, 1);
+});
+
+test('đổi mạng giữa phiên nhưng không chứng minh được, hoặc khoá khác: vẫn hỏi', async () => {
+  const failed = setupConsent({ trusted: false, answer: D.ALLOW });
+  await failed.consent.decide(req({ viewerKey: 'wifi' }));
+  await failed.consent.decide(req({ viewerId: 'v2', viewerKey: '4g', prove: async () => false }));
+  assert.equal(failed.asks.length, 2);
+
+  const other = setupConsent({ trusted: false, answer: D.ALLOW });
+  await other.consent.decide(req({ viewerKey: 'wifi' }));
+  await other.consent.decide(req({ viewerId: 'v2', viewerKey: '4g', deviceKey: 'k2', prove: async () => true }));
+  assert.equal(other.asks.length, 2);
+});
+
+test('đồng ý theo khoá thiết bị hết tác dụng khi phiên kết thúc, khi bấm ngắt hoặc gián đoạn quá lâu', async () => {
+  const ended = setupConsent({ trusted: false, answer: D.ALLOW });
+  await ended.consent.decide(req({ viewerKey: 'wifi' }));
+  ended.consent.forget('s1');
+  await ended.consent.decide(req({ viewerKey: '4g', prove: async () => true }));
+  assert.equal(ended.asks.length, 2);
+
+  const blocked = setupConsent({ trusted: false, answer: D.ALLOW });
+  await blocked.consent.decide(req({ viewerKey: 'wifi' }));
+  blocked.state.locked = true;
+  await blocked.consent.decide(req({ viewerKey: '4g', prove: async () => true }));
+  assert.equal(blocked.asks.length, 2);
+
+  let t = 0;
+  const asks = [];
+  const consent = createCastConsent({ ask: (o) => { asks.push(o); return D.ALLOW; }, getMode: () => M.ASK, now: () => t });
+  await consent.decide(req({ viewerKey: 'wifi' }));
+  consent.suspend('s1', 1000);
+  t = 2000;
+  await consent.decide(req({ viewerKey: '4g', prove: async () => true }));
+  assert.equal(asks.length, 2);
 });
 
 test('bấm ngắt: thiết bị đã vào phiên mất quyền tin, thiết bị khác giữ nguyên', async () => {

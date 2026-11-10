@@ -146,7 +146,7 @@ export const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2
     <TextBlock Text="Aivin" FontSize="15" FontWeight="SemiBold" Foreground="#111827" Margin="9,0,0,0" VerticalAlignment="Center"/>
     <TextBlock Text="•  Yêu cầu chia sẻ màn hình" FontSize="13" Foreground="#6B7280" Margin="8,1,0,0" VerticalAlignment="Center"/>
     <Button x:Name="Close" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Content="✕" Width="32" Height="32"
-            Background="Transparent" Foreground="#6B7280" ToolTip="Từ chối" IsTabStop="False"/>
+            Background="Transparent" Foreground="#6B7280" ToolTip="Từ chối" IsTabStop="False" IsCancel="True" IsDefault="True"/>
    </DockPanel>
    <TextBlock Text="Cho phép xem và điều khiển màn hình máy tính?" Margin="0,20,0,0" FontSize="18" FontWeight="SemiBold" Foreground="#111827" TextWrapping="Wrap"/>
    <Border x:Name="Warn" Margin="0,12,0,0" HorizontalAlignment="Left" CornerRadius="10" Background="#FEF3C7" Padding="12,6">
@@ -158,13 +158,12 @@ export const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2
       <TextBlock Text="Thiết bị này đang gửi yêu cầu xem màn hình và thao tác chuột, bàn phím trên máy tính của bạn." Margin="0,6,0,0" FontSize="12.5" Foreground="#4B5563" TextWrapping="Wrap"/>
     </StackPanel>
    </Border>
-   <DockPanel Margin="0,22,0,0" LastChildFill="False">
-    <Button x:Name="Allow" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0" Margin="10,0,0,0"
-            Background="#4E46E5" Foreground="White" BorderThickness="0" Content="_Cho phép"/>
+   <DockPanel Margin="0,22,0,0" LastChildFill="True">
     <Button x:Name="AllowAlways" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0" Margin="10,0,0,0"
-            Background="White" Foreground="#4E46E5" BorderBrush="#4E46E5" BorderThickness="1" Content="_Luôn tin thiết bị này"/>
-    <Button x:Name="Reject" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0"
-            Background="White" Foreground="#111827" BorderBrush="#C9CDD4" BorderThickness="1" Content="_Từ chối" IsCancel="True" IsDefault="True"/>
+            Background="#4E46E5" Foreground="White" BorderThickness="0" Content="_Luôn cho phép"/>
+    <Button x:Name="Allow" DockPanel.Dock="Right" Style="{StaticResource Btn}" Height="40" MinWidth="116" Padding="20,0" Margin="10,0,0,0"
+            Background="White" Foreground="#4E46E5" BorderBrush="#4E46E5" BorderThickness="1" Content="_Cho phép lần này"/>
+    <TextBlock x:Name="Countdown" VerticalAlignment="Center" FontSize="12" Foreground="#6B7280" TextWrapping="Wrap"/>
    </DockPanel>
    <TextBlock x:Name="Hint" Visibility="Collapsed" HorizontalAlignment="Right" Margin="0,10,0,0" FontSize="12" Foreground="#6B7280" TextWrapping="Wrap"/>
   </StackPanel>
@@ -187,21 +186,22 @@ const CONSENT_SCRIPT = [
   "function Show-Hint { $script:hintLeft = 3; $hintText.Text = $script:hint; $hintText.Visibility = 'Visible' }",
   "function Finish($r) { if ($script:closing) { return }; $script:closing = $true; $script:result = $r; $tm.Stop(); $w.Close() }",
   "$w.FindName('Allow').Add_Click({ if (Test-Human) { Finish 'Yes' } else { Show-Hint } })",
-  // "Luôn tin" đi qua đúng chốt người thật như "Cho phép": AI hay phiên điều khiển từ xa không tự cấp quyền lâu dài được.
+  // "Luôn cho phép" đi qua đúng chốt người thật như "Cho phép lần này": AI hay phiên điều khiển từ xa không tự cấp quyền lâu dài được.
   "$w.FindName('AllowAlways').Add_Click({ if (Test-Human) { Finish 'Always' } else { Show-Hint } })",
-  "if ($env:AIVIN_CAST_CAN_TRUST -eq '1') { $w.FindName('Allow').Content = D 'AIVIN_CAST_ALLOW_ONCE' } else { $w.FindName('AllowAlways').Visibility = 'Collapsed' }",
-  "$w.FindName('Reject').Add_Click({ Finish 'No' }); $w.FindName('Close').Add_Click({ Finish 'No' })",
+  // Không có khoá thiết bị thì không lưu được quyền lâu dài: chỉ còn "Cho phép lần này", thành nút chính.
+  "$allow = $w.FindName('Allow'); if ($env:AIVIN_CAST_CAN_TRUST -ne '1') { $w.FindName('AllowAlways').Visibility = 'Collapsed'; $allow.Background = (New-Object Windows.Media.BrushConverter).ConvertFromString('#4E46E5'); $allow.Foreground = [Windows.Media.Brushes]::White; $allow.BorderThickness = New-Object Windows.Thickness(0) }",
+  // Từ chối chỉ còn ở nút X: Enter / Esc vào nút này, không bao giờ thành đồng ý.
+  "$w.FindName('Close').Add_Click({ Finish 'No' })",
   "$w.FindName('Head').Add_MouseLeftButtonDown({ $w.DragMove() })",
-  // Hết giờ là từ chối, nên số đếm nằm ngay trên nút Từ chối.
-  "$script:left = [int]$env:AIVIN_CAST_SECONDS; $fmt = D 'AIVIN_CAST_COUNTDOWN'; $reject = $w.FindName('Reject'); $hintText = $w.FindName('Hint'); $reject.Content = $fmt -f $script:left",
-  "$tm.Add_Tick({ $script:left--; $reject.Content = $fmt -f $script:left; if ($script:hintLeft -gt 0) { $script:hintLeft-- } else { $hintText.Visibility = 'Collapsed' }; if ($script:left -le 0) { Finish 'Timeout' } })",
-  "$w.Add_ContentRendered({ Install-Guard $w; $w.Activate(); [void]$w.FindName('Reject').Focus(); $tm.Start() })",
+  "$script:left = [int]$env:AIVIN_CAST_SECONDS; $fmt = D 'AIVIN_CAST_COUNTDOWN'; $countdown = $w.FindName('Countdown'); $hintText = $w.FindName('Hint'); $countdown.Text = $fmt -f $script:left",
+  "$tm.Add_Tick({ $script:left--; $countdown.Text = $fmt -f $script:left; if ($script:hintLeft -gt 0) { $script:hintLeft-- } else { $hintText.Visibility = 'Collapsed' }; if ($script:left -le 0) { Finish 'Timeout' } })",
+  "$w.Add_ContentRendered({ Install-Guard $w; $w.Activate(); [void]$w.FindName('Close').Focus(); $tm.Start() })",
   '[void]$w.ShowDialog(); $tm.Stop(); $script:result',
 ].join('\n');
 
 /**
- * Hỏi người ở máy trên chính màn hình Windows. Mặc định là từ chối: Enter, Esc, đóng hộp, hết giờ đều không cho xem.
- * `repeatedAfterBlock`: hiện thêm dòng cảnh báo thiết bị từng bị ngắt. `canTrust`: hiện thêm nút "Luôn tin thiết bị này".
+ * Hỏi người ở máy trên chính màn hình Windows. Mặc định là từ chối: Enter, Esc, nút X, hết giờ đều không cho xem.
+ * `repeatedAfterBlock`: hiện thêm dòng cảnh báo thiết bị từng bị ngắt. `canTrust`: hiện thêm nút "Luôn cho phép".
  * Trả về một giá trị của `CastConsentDecision`.
  */
 export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutSec = 45, repeatedAfterBlock = false, canTrust = false, signal } = {}) {
@@ -224,11 +224,10 @@ export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutS
       AIVIN_CAST_LOGO: AIVIN_LOGO_PNG_BASE64,
       AIVIN_CAST_TITLE: b64(CAST_CONSENT_WINDOW_TITLE),
       AIVIN_CAST_DEVICE: b64(`Thiết bị yêu cầu: ${viewerDevice}`),
-      AIVIN_CAST_COUNTDOWN: b64('_Từ chối ({0}s)'),
+      AIVIN_CAST_COUNTDOWN: b64('Tự từ chối sau {0}s'),
       AIVIN_CAST_SECONDS: String(timeoutSec),
       AIVIN_CAST_WARN: repeatedAfterBlock ? '1' : '0',
       AIVIN_CAST_CAN_TRUST: canTrust ? '1' : '0',
-      AIVIN_CAST_ALLOW_ONCE: b64('_Chỉ lần này'),
       ...humanGuardEnv(null),
     };
 

@@ -19,7 +19,8 @@ const key = (sessionId, viewerKey, viewerDevice) => `${sessionId}\n${viewerKey |
  * (người xem rớt mạng nối lại không hỏi lại). Phiên kết thúc hẳn (`forget`) là quên; phiên chỉ gián đoạn (`suspend`: máy rớt mạng) thì giữ thêm
  * `CONSENT_RESUME_MS`. Chủ máy vừa bấm ngắt thì `isLocked` đúng: luôn hỏi, kể cả chế độ không cần người ở máy.
  *
- * `trust` (castTrust.mjs): thiết bị người ở máy đã bấm "Luôn tin" vào thẳng nếu `prove()` chứng minh đúng khoá của nó; sai thì hỏi như thường.
+ * `trust` (castTrust.mjs): thiết bị người ở máy đã bấm "Luôn cho phép" vào thẳng nếu `prove()` chứng minh đúng khoá của nó; sai thì hỏi như thường.
+ * Thiết bị đã được cho vào phiên đang chạy cũng vào lại như vậy: `viewerKey` có cả IP, điện thoại đổi Wi-Fi / 4G giữa phiên không phải hỏi lại.
  * Chế độ `off` và trạng thái vừa bấm ngắt vẫn thắng quyền tin.
  */
 export function createCastConsent({ ask, getMode, isLocked = () => false, unlock = () => {}, onWaiting = () => {}, now = Date.now, trust = null }) {
@@ -47,6 +48,8 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
     return false;
   };
   const keysOf = (sessionId) => [...approved.keys()].filter((k) => k.startsWith(`${sessionId}\n`));
+  /** Khoá thiết bị này đã được cho vào phiên và đồng ý của phiên còn hiệu lực (phiên gián đoạn quá `CONSENT_RESUME_MS` thì thôi). */
+  const allowedInSession = (sessionId, deviceKey) => Boolean(sessionDevices.get(sessionId)?.has(deviceKey)) && keysOf(sessionId).some(valid);
 
   function request({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked }) {
     const k = key(sessionId, viewerKey, viewerDevice);
@@ -98,14 +101,14 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
         approved.set(k, Infinity);
         return CastConsentDecision.ALLOW;
       }
-      if (!locked && deviceKey && trust?.has(deviceKey)) {
+      if (!locked && deviceKey && (trust?.has(deviceKey) || allowedInSession(sessionId, deviceKey))) {
         const proven = await Promise.resolve(prove?.()).catch(() => false);
         if (proven === null) return CastConsentDecision.CANCELLED;
         // Trong lúc chờ chữ ký chủ máy có thể vừa tắt hẳn hoặc bấm ngắt.
         if (getMode() === CastConsentMode.OFF) return CastConsentDecision.DISABLED;
         if (proven === true && !isLocked()) {
           approve(k, sessionId, deviceKey);
-          try { trust.touch(deviceKey); } catch { /* chỉ là gia hạn */ }
+          try { trust?.touch(deviceKey); } catch { /* chỉ là gia hạn */ }
           return CastConsentDecision.ALLOW;
         }
         return requestForViewer({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked: isLocked() });

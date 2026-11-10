@@ -53,7 +53,7 @@ import {
   CAST_ACTION_FILE, askCastConsent, checkCastAction, clearCastSession, isCastLocked, lockCast, recordCastSession, unlockCast,
 } from './desktop/castAuth.mjs';
 import { CastConsentDecision, createCastConsent } from './desktop/castConsent.mjs';
-import { createCastTrust, createDeviceProver } from './desktop/castTrust.mjs';
+import { castViewerLabel, createCastTrust, createDeviceProver } from './desktop/castTrust.mjs';
 import { createCastTouchViewers, shouldDrawCursorInFrame } from './desktop/castTouchViewers.mjs';
 import { createConfirmBarrier } from './confirmBarrier.mjs';
 import { newInputTag } from './humanInput.mjs';
@@ -1293,7 +1293,9 @@ export async function startRemoteClient(options = {}) {
     socket.on(DeviceEvent.DESKTOP_CAST_START, guarded(DeviceEvent.DESKTOP_CAST_START, async (payload) => {
     const sessionId = payload?.session_id;
     const viewerId = payload?.viewer_id;
-    const viewerDevice = payload?.viewer_device || payload?.viewerDevice || payload?.viewer_platform || payload?.viewerPlatform;
+    const viewerType = payload?.viewer_device || payload?.viewerDevice || payload?.viewer_platform || payload?.viewerPlatform;
+    const deviceKey = typeof payload?.device_key === 'string' ? payload.device_key : '';
+    const viewerDevice = castViewerLabel(viewerType, deviceKey, payload?.viewer_key);
     if (!sessionId || !viewerId) return;
     // Chủ máy đã tạm dừng điều khiển từ xa → từ chối cả xem màn hình.
     if (isRemotePaused()) {
@@ -1301,7 +1303,6 @@ export async function startRemoteClient(options = {}) {
       return;
     }
     // Quyết định trước khi chụp bất cứ thứ gì; chỉ máy này trả lời được, máy chủ không trả lời thay.
-    const deviceKey = typeof payload?.device_key === 'string' ? payload.device_key : '';
     const decision = await castConsent.decide({
       sessionId, viewerId, viewerDevice, viewerKey: payload?.viewer_key, deviceKey,
       prove: async () => {
@@ -1330,7 +1331,7 @@ export async function startRemoteClient(options = {}) {
       monitor: payload?.monitor ?? -1,
     };
     if (desktopCast.isActive() && desktopCast.sessionId() !== sessionId) stopDesktopCast('replaced', false);
-    castTouchViewers.add(viewerId, viewerDevice);
+    castTouchViewers.add(viewerId, viewerType);
     if (desktopCast.sessionId() === sessionId) {
       clearTimeout(castReconfirmTimer);
       castReconfirmTimer = null;

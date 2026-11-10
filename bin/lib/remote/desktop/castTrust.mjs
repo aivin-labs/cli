@@ -1,4 +1,4 @@
-import { createHmac, createPublicKey, randomBytes, timingSafeEqual, verify } from 'crypto';
+import { createHash, createHmac, createPublicKey, randomBytes, timingSafeEqual, verify } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { writeFileAtomic } from '../atomicFile.mjs';
@@ -6,7 +6,7 @@ import { CastState, REMOTE_CONFIG_DIR } from '../constants.mjs';
 import { openToken, sealToken } from '../tokenStore.mjs';
 
 /**
- * Thiết bị người ở máy đã bấm "Luôn tin thiết bị này" (09/11/2026): lần sau vào xem không phải hỏi lại.
+ * Thiết bị người ở máy đã bấm "Luôn cho phép" (09/11/2026): lần sau vào xem không phải hỏi lại.
  *
  * Trình duyệt giữ khoá riêng không xuất ra được, máy chỉ lưu khoá công khai và mỗi lần vào bắt ký một chuỗi ngẫu nhiên do chính máy sinh —
  * máy chủ chuyển tin nhưng không tự chứng minh thay được, nghe lén một lần cũng không dùng lại được. Danh sách có chữ ký bằng khoá cất trong
@@ -38,6 +38,22 @@ function parseDeviceKey(deviceKey) {
 
 /** Tên do trình duyệt tự khai, chỉ để hiện: bỏ ký tự lạ để khay đọc tệp không vỡ. */
 const safeName = (name) => String(name ?? '').replace(/[^\p{L}\p{N} ._-]/gu, '').trim().slice(0, MAX_NAME_CHARS) || 'Thiết bị';
+
+const VIEWER_CODE_CHARS = 6;
+/** Chừa chỗ cho " - <mã>" để cắt theo `MAX_NAME_CHARS` khi lưu không làm mất mã. */
+const VIEWER_NAME_CHARS = MAX_NAME_CHARS - VIEWER_CODE_CHARS - 3;
+
+/**
+ * Tên hiện cho chủ máy: FE chỉ khai loại máy ("Android"), hai điện thoại trông y hệt nhau nên ghép thêm mã suy ra từ khoá của thiết bị.
+ * Trình duyệt không có khoá (ẩn danh, chặn IndexedDB) thì lấy `viewerKey`: vẫn phân biệt được nhưng đổi mạng là đổi mã.
+ * Chỉ để hiện: danh tính thật vẫn là khoá, và loại máy gốc vẫn dùng riêng cho `isTouchViewerDevice` (so khớp đúng chuỗi).
+ */
+export function castViewerLabel(viewerDevice, deviceKey, viewerKey) {
+  const identity = deviceKey || viewerKey;
+  if (!identity) return viewerDevice;
+  const code = createHash('sha256').update(String(identity)).digest('hex').slice(0, VIEWER_CODE_CHARS).toUpperCase();
+  return `${safeName(viewerDevice).slice(0, VIEWER_NAME_CHARS).trim()} - ${code}`;
+}
 
 /** `signature`: base64 của chữ ký ECDSA dạng WebCrypto (r || s) trên `aivin-cast-device-proof\n<mã phiên>\n<chuỗi ngẫu nhiên>`. */
 export function verifyDeviceProof({ deviceKey, sessionId, nonce, signature }) {
@@ -96,7 +112,7 @@ export function createCastTrust({ file = CAST_TRUST_FILE, keyFile = CAST_TRUST_K
 
   return {
     list,
-    /** Khoá này đủ điều kiện để lưu (trình duyệt cũ / khoá hỏng thì hộp hỏi không hiện nút "Luôn tin"). */
+    /** Khoá này đủ điều kiện để lưu (trình duyệt cũ / khoá hỏng thì hộp hỏi không hiện nút "Luôn cho phép"). */
     accepts: (deviceKey) => parseDeviceKey(deviceKey) !== null,
     has: (deviceKey) => list().some((d) => d.key === deviceKey),
     add({ key, name }) {

@@ -212,10 +212,17 @@ test('hộp xác nhận / đồng ý: chữ dài cạnh nút không đẩy nút 
   assert.ok(confirmRow.indexOf('x:Name="Allow"') < confirmRow.indexOf('x:Name="Reject"'));
   assert.ok(confirmRow.indexOf('x:Name="Reject"') < confirmRow.indexOf('x:Name="Countdown"'));
   assert.match(confirmRow, /x:Name="Countdown"[^>]*TextWrapping="Wrap"/);
-  // Hộp đồng ý: số đếm nằm trong nút Từ chối, lời nhắc ở hàng riêng dưới các nút nên không chen được vào hàng nút.
+  // Hộp đồng ý: chỉ hai nút cho phép, số đếm chiếm phần còn lại, lời nhắc ở hàng riêng dưới các nút nên không chen được vào hàng nút.
   const consentRow = rowOf(CONSENT_XAML);
-  assert.ok(consentRow.indexOf('x:Name="Allow"') < consentRow.indexOf('x:Name="Reject"'));
+  assert.match(consentRow, /LastChildFill="True"/);
+  assert.ok(consentRow.indexOf('x:Name="AllowAlways"') < consentRow.indexOf('x:Name="Countdown"'));
+  assert.ok(consentRow.indexOf('x:Name="Allow"') < consentRow.indexOf('x:Name="Countdown"'));
+  assert.match(consentRow, /x:Name="Countdown"[^>]*TextWrapping="Wrap"/);
   assert.equal(consentRow.includes('x:Name="Hint"'), false);
+  // Từ chối chỉ còn ở nút X, và Enter / Esc rơi vào đó chứ không rơi vào nút cho phép.
+  assert.equal(CONSENT_XAML.includes('x:Name="Reject"'), false);
+  assert.match(CONSENT_XAML, /x:Name="Close"[^>]*IsCancel="True" IsDefault="True"/);
+  assert.doesNotMatch(consentRow, /IsDefault|IsCancel/);
   assert.match(CONSENT_XAML, /x:Name="Hint"[^>]*TextWrapping="Wrap"/);
 });
 
