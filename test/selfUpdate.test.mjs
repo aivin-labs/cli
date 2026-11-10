@@ -14,11 +14,31 @@ const {
   releaseAsset, releaseKeyId, replaceBinary, rolloutBucket, saveUpdateSettings, signedMessage, updateProfile, verifyEnv, verifyReleaseSignature,
 } = await import('../bin/lib/selfUpdate.mjs');
 const { createAutoUpdater } = await import('../bin/lib/remote/autoUpdate.mjs');
-const { detectSupervisor, posixRunScript, windowsWatchdogScript } = await import('../bin/lib/remote/autoStart.mjs');
+const { cliLaunchCommand, daemonLaunchCommand, detectSupervisor, posixRunScript, windowsWatchdogScript } = await import('../bin/lib/remote/autoStart.mjs');
 const { assertCommandAllowed, isProtectedPath } = await import('../bin/lib/remote/sandbox.mjs');
 const { encryptKeyFile, isEncryptedPem, loadReleasePrivateKey } = await import('../scripts/release-key-file.mjs');
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-update-test-'));
+
+test('chạy từ mã nguồn không đổi trình giữ chạy khỏi tệp chạy đã cài; --use-node thì được', () => {
+  const dir = tmpDir();
+  const exe = path.join(dir, 'aivin.exe');
+  const configFile = path.join(dir, 'remote-daemon.json');
+  const saveExec = (nodeExec) => fs.writeFileSync(configFile, JSON.stringify({ nodeExec }));
+  const node = { launch: cliLaunchCommand(), keptExe: null };
+
+  fs.writeFileSync(exe, 'x');
+  saveExec(exe);
+  assert.deepEqual(daemonLaunchCommand({ packaged: false, configFile }), { launch: [exe], keptExe: exe });
+  assert.deepEqual(daemonLaunchCommand({ packaged: false, configFile, useNode: true }), node);
+  assert.deepEqual(daemonLaunchCommand({ packaged: true, configFile }), node, 'tệp chạy đóng gói luôn dùng chính nó');
+
+  saveExec(process.execPath);
+  assert.deepEqual(daemonLaunchCommand({ packaged: false, configFile }), node, 'đang dùng Node thì giữ Node');
+  saveExec(path.join(dir, 'missing', 'aivin.exe'));
+  assert.deepEqual(daemonLaunchCommand({ packaged: false, configFile }), node, 'tệp đã bị xoá thì không trỏ tới nó');
+  assert.deepEqual(daemonLaunchCommand({ packaged: false, configFile: path.join(dir, 'none.json') }), node, 'chưa bật tự khởi động');
+});
 
 function makeKey() {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');

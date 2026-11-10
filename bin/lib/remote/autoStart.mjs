@@ -43,7 +43,7 @@ export const SUPERVISOR_ROLLBACK = Object.freeze({ fastExitSec: 30, failures: 3 
  * sập ngay lúc nạp mã (trước khi checkBootAfterUpdate trong tệp chạy kịp chạy).
  */
 function supervisorRollbackPaths(launch) {
-  return process.env.AIVIN_CLI_BINARY ? { exe: launch[0], pendingFile: UPDATE_PENDING_FILE, rollbackFile: UPDATE_ROLLBACK_FILE, fastFailFile: FAST_FAIL_FILE } : null;
+  return launch.length === 1 ? { exe: launch[0], pendingFile: UPDATE_PENDING_FILE, rollbackFile: UPDATE_ROLLBACK_FILE, fastFailFile: FAST_FAIL_FILE } : null;
 }
 
 /** Lệnh chạy CLI: tệp chạy đóng gói (bộ cài install.ps1 / install.sh) là chính nó; bản npm là `node cli.mjs`. */
@@ -52,6 +52,21 @@ export function cliLaunchCommand() {
 }
 
 export const REMOTE_DAEMON_FILE = path.join(REMOTE_CONFIG_DIR, 'remote-daemon.json');
+
+/**
+ * Lệnh trình giữ chạy dùng để mở daemon. Chạy từ mã nguồn (Node) trên máy đã cài tệp chạy đóng gói thì giữ tệp chạy đó: daemon chạy bằng Node
+ * không tự cập nhật được và `--quiet` giấu lời nhắc, máy sẽ kẹt ở bản cũ mà không ai biết. `useNode` = chủ ý chạy thử khay với mã nguồn.
+ */
+export function daemonLaunchCommand({ useNode = false, packaged = !!process.env.AIVIN_CLI_BINARY, configFile = REMOTE_DAEMON_FILE } = {}) {
+  const launch = cliLaunchCommand();
+  if (packaged || useNode) return { launch, keptExe: null };
+  let saved = null;
+  try { saved = JSON.parse(fs.readFileSync(configFile, 'utf8'))?.nodeExec; } catch { /* chưa bật tự khởi động */ }
+  const keep = typeof saved === 'string' && /^aivin(\.exe)?$/i.test(path.basename(saved)) && fs.existsSync(saved);
+  return keep ? { launch: [saved], keptExe: saved } : { launch, keptExe: null };
+}
+
+const keptExeWarning = (exe) => `Lệnh này chạy từ mã nguồn (Node) nên Aivin vẫn dùng tệp đã cài ${exe} để máy còn tự cập nhật. Muốn chạy khay bằng mã nguồn: thêm --use-node (máy sẽ không tự cập nhật nữa).`;
 
 /** Tệp tự khởi động chính: Windows = thư mục Startup (dự phòng khi không tạo được tác vụ), macOS = LaunchAgent, Linux = systemd user. */
 export function getAutoStartFilePath() {
@@ -408,8 +423,9 @@ function tryPosixDesktop(argv, launch) {
  * dụng + khay; (mặc định) khởi động cùng máy. Giữ đối số daemon của lần `aivin remote enable` trước; chưa có thì `remote start --quiet`
  * trần — daemon dùng thư mục / chế độ đã lưu lúc ghép máy.
  */
-export function installDesktopApp({ autostart = true, launch = true, openPlatform = false } = {}) {
-  const cli = cliLaunchCommand();
+export function installDesktopApp({ autostart = true, launch = true, openPlatform = false, useNode = false } = {}) {
+  const { launch: cli, keptExe } = daemonLaunchCommand({ useNode });
+  const withWarning = (res) => (keptExe ? { ...res, warning: keptExeWarning(keptExe) } : res);
   if (process.platform === 'win32') {
     const argv = [...cli, 'remote', 'start', ...(readSavedDaemonArgs() || ['--quiet'])];
     const res = installDesktop({ argv, rollback: supervisorRollbackPaths(cli), lang: mascotLang(), autostart, launch, launchMode: openPlatform ? TrayLaunch.OPEN : TrayLaunch.INSTALLED });
@@ -417,14 +433,14 @@ export function installDesktopApp({ autostart = true, launch = true, openPlatfor
       removeLegacyWindowsAutoStart();
       writeDaemonConfig({ rootDir: os.homedir(), filePath: RUN_ENTRY, method: 'run', nodeExec: cli[0] });
     }
-    return res;
+    return withWarning(res);
   }
   const desktop = POSIX_DESKTOP[process.platform];
   if (!desktop) throw new Error(`Chưa hỗ trợ ứng dụng Aivin trên màn hình cho ${process.platform}.`);
   const argv = [...cli, 'remote', 'start', ...(readPosixDaemonArgs() || ['--quiet'])];
   const res = installPosixDesktop(argv, cli, { autostart, launch, launchMode: TrayLaunch.INSTALLED });
   if (autostart) writeDaemonConfig({ rootDir: os.homedir(), filePath: desktop.entry(), method: 'desktop', nodeExec: cli[0] });
-  return res;
+  return withWarning(res);
 }
 
 /** `aivin desktop uninstall`: gỡ ứng dụng + mục khởi động (tiến trình daemon nó giữ cũng dừng). */
@@ -464,7 +480,7 @@ export function enableAutoStart(options = {}) {
   // Máy đang TOÀN QUYỀN và không nêu --dir: khởi động không kèm --dir để giữ chế độ đã lưu (kèm --dir là về chế độ một thư mục).
   const keepFullAccess = !options.dir && loadDeviceCredentials()?.access === DeviceAccess.FULL;
   const scopeArgs = [...(keepFullAccess ? [] : ['--dir', rootDir]), ...(options.proxy ? ['--proxy', String(options.proxy)] : [])];
-  const launch = cliLaunchCommand();
+  const { launch, keptExe } = daemonLaunchCommand({ useNode: options.useNode });
   const argv = [...launch, 'remote', 'start', '--quiet', ...scopeArgs];
   const nodeExec = launch[0];
   const logOut = path.join(REMOTE_CONFIG_DIR, 'remote-service.log');
@@ -558,7 +574,8 @@ X-GNOME-Autostart-enabled=true
 
   writeDaemonConfig({ rootDir, filePath, method: extra.method, nodeExec });
 
-  return { success: true, filePath, rootDir, platform: process.platform, ...(extra.warning ? { warning: extra.warning } : {}) };
+  const warning = [extra.warning, keptExe && keptExeWarning(keptExe)].filter(Boolean).join('; ');
+  return { success: true, filePath, rootDir, platform: process.platform, ...(warning ? { warning } : {}) };
 }
 
 /** Huỷ tự khởi động (tiến trình đang chạy vẫn chạy tới khi tắt). */

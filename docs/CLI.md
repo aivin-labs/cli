@@ -1274,6 +1274,10 @@ aivin desktop uninstall               # closes the app (and the listener it runs
 aivin desktop                         # status
 ```
 
+Developing the CLI: `aivin desktop install` and `aivin remote enable` run from a source checkout (Node) keep an installed `aivin` executable
+as the program the background app starts, because a listener running on Node cannot update itself. Add `--use-node` to run the background
+app from the checkout on purpose; run the installer or `aivin desktop install` from the executable to go back.
+
 On Windows, `install.ps1` asks how Aivin should start. The recommended choice (default: press Enter) creates Desktop and Start
 shortcuts, starts Aivin in the background with Windows, and opens the platform app window after setup. The other choices keep
 Aivin in the background without opening the platform, or open the platform once without enabling startup. Set

@@ -1117,6 +1117,7 @@ program
   .option('--no-autostart', "install: don't start Aivin with the computer (turn it on later from Aivin's menu or the system's startup settings)")
   .option('--no-launch', "install: don't open Aivin now")
   .option('--open-platform', 'Windows install: also open the Aivin platform in an app window after installation')
+  .option('--use-node', 'install (development): run the background app from this source checkout even if an installed aivin executable exists; this computer stops updating itself')
   .option('--export-xml <file>', 'defaults (Windows): write a default-associations file for IT (Group Policy / Intune) instead of opening Settings')
   .option('--all', 'defaults --export-xml: include Office formats, not only md/txt/csv')
   .action((action = 'status', options) => {
@@ -1125,8 +1126,9 @@ program
     const where = { win32: 'khay hệ thống, tìm "Aivin" trong Start', darwin: 'thanh menu, tìm "Aivin" bằng Spotlight', linux: 'khay hệ thống, tìm "Aivin" trong menu ứng dụng' }[process.platform] || '';
     try {
       if (action === 'install') {
-        const res = installDesktopApp({ autostart: options.autostart !== false, launch: options.launch !== false, openPlatform: options.openPlatform });
+        const res = installDesktopApp({ autostart: options.autostart !== false, launch: options.launch !== false, openPlatform: options.openPlatform, useNode: options.useNode });
         console.log(chalk.green(`✅ Đã cài Aivin vào máy: ${where}.`));
+        if (res.warning) console.log(chalk.yellow(`   ⚠️  ${res.warning}`));
         console.log(chalk.gray(`   Ứng dụng: ${res.exe}`));
         console.log(chalk.gray(`   Khởi động cùng máy: ${res.autostart ? 'bật' : 'tắt'} (đổi ở menu Aivin hoặc ${startupWhere})`));
         if (res.openWith?.registered) {
@@ -1570,6 +1572,7 @@ remoteCommand
   .description('Start the listener automatically when this computer starts (Windows: the Aivin tray app, listed in Task Manager → Startup apps)')
   .option('--dir <path>', 'Folder the agent may work in (default: current folder)')
   .option('--proxy <url>', 'HTTP proxy the auto-started listener should use (default: detect at every start)')
+  .option('--use-node', 'Development: auto-start this source checkout even if an installed aivin executable exists; this computer stops updating itself')
   .action((options) => {
     try {
       const res = enableAutoStart(options);
