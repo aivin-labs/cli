@@ -115,7 +115,13 @@ test('xác minh: quá giờ → false; người xem rời → null; sai phiên b
   const device = await browserDevice();
   const sent = [];
   const prover = createDeviceProver({ send: (m) => sent.push(m), timeoutMs: 20 });
-  assert.equal(await prover.prove({ sessionId: 's1', viewerId: 'v1', deviceKey: device.publicKey }), false);
+  // Bộ đếm hết giờ không giữ tiến trình (`unref`): test phải tự giữ vòng lặp sự kiện thì mới chờ tới được.
+  const keepAlive = setInterval(() => {}, 5);
+  try {
+    assert.equal(await prover.prove({ sessionId: 's1', viewerId: 'v1', deviceKey: device.publicKey }), false);
+  } finally {
+    clearInterval(keepAlive);
+  }
 
   const slow = createDeviceProver({ send: (m) => sent.push(m), timeoutMs: 60_000 });
   const left = slow.prove({ sessionId: 's1', viewerId: 'v2', deviceKey: device.publicKey });
