@@ -396,3 +396,16 @@ test('WebRTC: kênh chuột không gửi lại, chỉ nhận di chuột, bỏ g�
   assert.equal(got[0].session_id, 's');
   device.closeAll();
 });
+
+test('outgoingBitrateKbps: lấy ước lượng của cặp đường đang dùng; không có thì null', async () => {
+  const { outgoingBitrateKbps } = await import('../bin/lib/remote/desktop/desktopWebRtc.mjs');
+  const report = (...stats) => new Map(stats.map((s, i) => [s.id || `s${i}`, s]));
+  assert.equal(outgoingBitrateKbps(report(
+    { type: 'transport', id: 't', selectedCandidatePairId: 'p2' },
+    { type: 'candidate-pair', id: 'p1', nominated: true, availableOutgoingBitrate: 300_000 },
+    { type: 'candidate-pair', id: 'p2', availableOutgoingBitrate: 2_480_400 },
+  )), 2480);
+  assert.equal(outgoingBitrateKbps(report({ type: 'candidate-pair', id: 'p1', nominated: true, availableOutgoingBitrate: 650_000 })), 650);
+  assert.equal(outgoingBitrateKbps(report({ type: 'candidate-pair', id: 'p1', nominated: true })), null);
+  assert.equal(outgoingBitrateKbps(null), null);
+});

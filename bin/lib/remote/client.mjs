@@ -32,7 +32,7 @@ import { showOSNotification } from './notify.mjs';
 import { createMeetingManager, watchMeetingRequests } from './meeting/index.mjs';
 import { createMediaHost, mediaSupported } from './meeting/recorder.mjs';
 import { createClipboard } from './clipboard.mjs';
-import { buildTools, toolMap } from './toolHandlers.mjs';
+import { activeAgentRunner, buildTools, toolMap } from './toolHandlers.mjs';
 import { createBrowserTunnels, detectLocalBrowser } from './browserTunnel.mjs';
 import { createGuiController, detectGui } from './gui/index.mjs';
 import { createWindowsHost } from './gui/windowsHost.mjs';
@@ -782,6 +782,7 @@ export async function startRemoteClient(options = {}) {
       guiHost?.close();
       officeHost?.close();
       processes.stopAll();
+      activeAgentRunner()?.stopAll('Remote control was paused on this device');
       // Công tắc ngắt chặn cả xem / điều khiển màn hình từ web, không chỉ việc của AI.
       stopDesktopCast('paused');
     }
@@ -854,6 +855,8 @@ export async function startRemoteClient(options = {}) {
     guiHost?.close();
     officeHost?.close();
     processes.stopAll();
+    // Job của agent lập trình: dừng + ghi hồ sơ (`stopped`) — lần chạy sau `agent.status` vẫn đọc được, nói tiếp bằng session_id.
+    activeAgentRunner()?.stopAll();
     keepAwake.close();
     castAwake.close();
     watches?.closeAll();
@@ -879,7 +882,8 @@ export async function startRemoteClient(options = {}) {
     deviceId: creds.device_id,
     // Đang ghi họp / làm biên bản: không tự khởi động lại để cập nhật (mất đoạn ghi).
     // Đang có người xem màn hình: khởi động lại là cắt phiên (và mất đồng ý của chủ máy — nằm trong bộ nhớ).
-    isIdle: () => activeCalls === 0 && !processes.hasRunning?.() && !(browserTunnels?.liveCount() > 0) && !meetings?.busy() && !desktopCast.isActive(),
+    // Job của agent lập trình chạy nền sau khi `agent.run` đã trả lời (activeCalls về 0) — vẫn là bận: khởi động lại là giết job.
+    isIdle: () => activeCalls === 0 && !processes.hasRunning?.() && !activeAgentRunner()?.hasRunning() && !(browserTunnels?.liveCount() > 0) && !meetings?.busy() && !desktopCast.isActive(),
     lastActivityAt: () => lastActivityAt,
     say: (m) => say(chalk.cyan(m)),
     onRestart: async (version) => {

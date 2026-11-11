@@ -19,6 +19,22 @@ const MAX_POINTER_MESSAGE_BYTES = 512;
 const MAX_CURSOR_SHAPES = 64;
 /** Thử nối lại khi peer hỏng hẳn (`failed`): dựng peer mới, cùng người xem; hết lượt thì ở lại JPEG. Peer nối được thì đặt lại. */
 const RECONNECT_DELAYS_MS = [1000, 3000, 8000];
+/**
+ * Báo người xem ước lượng băng thông của bộ gửi (`availableOutgoingBitrate`, kbps) theo nhịp này. FE dựa vào đó để lúc mở phiên nhảy thẳng
+ * lên bậc nét mạng chịu được thay vì chờ QP: vài giây đầu QP còn ~105 cả trên mạng tốt, còn ước lượng lên trần sau ~2 s (đo trong máy
+ * 11/11/2026); đường yếu thì ước lượng ở thấp, FE không nhảy.
+ */
+const BWE_REPORT_MS = 1000;
+
+/** Ước lượng băng thông bộ gửi của cặp đường đang dùng (kbps), không có thì `null`. */
+export function outgoingBitrateKbps(report) {
+  const stats = [];
+  report?.forEach?.((s) => stats.push(s));
+  const selected = stats.find(s => s.type === 'transport' && s.selectedCandidatePairId)?.selectedCandidatePairId;
+  const pair = stats.find(s => s.type === 'candidate-pair' && s.id === selected && Number.isFinite(s.availableOutgoingBitrate))
+    || stats.find(s => s.type === 'candidate-pair' && s.nominated && Number.isFinite(s.availableOutgoingBitrate));
+  return pair && pair.availableOutgoingBitrate > 0 ? Math.round(pair.availableOutgoingBitrate / 1000) : null;
+}
 
 /**
  * Ghi băng thông video vào SDP answer (bên gửi đọc từ đây): mặc định libwebrtc trần ~2,5 Mbps, cuộn trang chữ 1440x810 chỉ còn ~7,5 khung/giây
@@ -125,7 +141,7 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
       pc, channel, inputChannel, fileChannel, pointerChannel, pointerSeq: 0,
       track, video: !!track,
       audioTrack, audio: !!audioTrack, audioEnabled: audio !== false,
-      sessionId, viewerId, iceServers, videoBitrate, attempt, retryTimer: null, open: false, dropped: 0,
+      sessionId, viewerId, iceServers, videoBitrate, attempt, retryTimer: null, bweTimer: null, open: false, dropped: 0,
     };
     fileChannel.binaryType = 'arraybuffer';
     fileChannel.onmessage = ({ data }) => {
@@ -179,9 +195,19 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     };
     peers.set(viewerId, peer);
     channel.binaryType = 'arraybuffer';
+    const reportBwe = async () => {
+      if (!peer.open || inputChannel.readyState !== 'open') return;
+      const kbps = outgoingBitrateKbps(await pc.getStats().catch(() => null));
+      if (kbps === null || peers.get(viewerId) !== peer || inputChannel.readyState !== 'open') return;
+      try { inputChannel.send(JSON.stringify({ t: 'bwe', kbps })); } catch { /* kênh vừa đóng */ }
+    };
     const markConnected = () => {
       peer.open = true;
       peer.attempt = 0;
+      if (peer.video && !peer.bweTimer) {
+        peer.bweTimer = setInterval(() => { void reportBwe(); }, BWE_REPORT_MS);
+        peer.bweTimer.unref?.();
+      }
       emitStatus({ session_id: sessionId, viewer_id: viewerId, state: 'connected', transport: 'webrtc', video: peer.video, audio: peer.audio });
       onPeerReady(viewerId);
     };
@@ -364,6 +390,7 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     if (!peer) return;
     peers.delete(String(viewerId));
     clearTimeout(peer.retryTimer);
+    clearInterval(peer.bweTimer);
     try { peer.channel.close(); } catch { /* already closed */ }
     try { peer.inputChannel?.close(); } catch { /* already closed */ }
     try { peer.fileChannel?.close(); } catch { /* already closed */ }

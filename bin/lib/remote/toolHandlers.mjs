@@ -23,6 +23,8 @@ import { buildAgentTools, createAgentRunner } from './codingAgents.mjs';
 
 /** Một bộ chạy agent lập trình cho cả tiến trình (việc đang chạy sống qua các lần dựng lại danh mục công cụ). */
 let sharedAgents = null;
+/** Bộ chạy agent đã dựng (null khi máy chưa có danh mục agent) — daemon hỏi để biết còn job chạy không, và dừng chúng khi tắt. */
+export const activeAgentRunner = () => sharedAgents;
 import { buildScheduleTools } from './schedule.mjs';
 import { buildWatchTools } from './deviceWatches.mjs';
 import { buildTransferTools } from './httpTransfer.mjs';

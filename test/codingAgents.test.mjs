@@ -45,7 +45,7 @@ function fakeSpawn() {
 const tick = () => new Promise((r) => setImmediate(r));
 const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'agent-root-')));
 const env = { roots: [root] };
-const claudeOnly = (spawnImpl) => createAgentRunner({ find: () => ({ bin: 'claude', version: '2.1.312' }), spawnImpl });
+const claudeOnly = (spawnImpl) => createAgentRunner({ find: () => ({ bin: 'claude', version: '2.1.312' }), spawnImpl, probeFlags: () => null });
 
 test('tham số Claude: đề bài KHÔNG trên dòng lệnh; chỉ plan / manual / accept_edits; mã phiên / model phải hợp lệ', () => {
   assert.deepEqual(agentArgs(CLAUDE_ADAPTER), ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'manual']);
@@ -158,4 +158,145 @@ test('đầu vào sai + danh mục: không đề bài, thư mục ngoài vùng, 
   const base = { roots: [root], binaries: [], projects: [], processes: { start() {} } };
   assert.equal(buildTools({ ...base, schedules: {}, runAs: { uid: 1 }, codingAgents: runner }).some((t) => t.name.startsWith('agent.')), false, 'máy tính tổ chức: không');
   assert.ok(buildTools({ ...base, schedules: {}, codingAgents: runner }).some((t) => t.name === 'agent.run'), 'máy cá nhân có agent: có');
+});
+
+// --- Job có hợp đồng (11/11/2026) ---------------------------------------------------------------------------------------------------
+const { execFileSync } = await import('child_process');
+const { sha256 } = await import('../bin/lib/remote/agentContract.mjs');
+const { CONTRACT, TEST_CHECK, report } = await import('./agentFixtures.mjs');
+
+/** Cờ của Claude Code 2.1.322 mà job có hợp đồng dùng (đọc thật từ `claude --help` ngày 11/11/2026). */
+const FLAGS_2_1_322 = ['--output-format', '--verbose', '--permission-mode', '--resume', '--model', '--allowedTools', '--add-dir', '--permission-prompts',
+  '--setting-sources', '--strict-mcp-config', '--settings', '--worktree', '--max-budget-usd', '--effort'];
+const git = (cwd, ...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'core.autocrlf=false', ...args], { cwd, encoding: 'utf8' });
+const put = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
+const waitFor = async (cond) => { for (let i = 0; i < 500 && !cond(); i++) await new Promise((r) => setTimeout(r, 10)); assert.ok(cond(), 'timed out waiting'); };
+
+function shopRepo() {
+  const repo = fs.mkdtempSync(path.join(root, 'shop-'));
+  git(repo, 'init', '-q', '-b', 'main');
+  put(path.join(repo, 'src', 'order.js'), 'export const day = (d) => d;\n');
+  put(path.join(repo, 'scripts', 'junit.js'), "require('fs').writeFileSync('junit.xml', '<testsuite><testcase name=\"CK-031 order at 23:30 keeps its day\"/></testsuite>');\n");
+  put(path.join(repo, '.gitignore'), 'junit.xml\n');
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-qm', 'base');
+  return repo;
+}
+const contractText = CONTRACT.replace('argv: [npm, test]', `argv: ['${process.execPath.replace(/'/g, "''")}', scripts/junit.js]`);
+const contractArgs = (extra = {}) => ({ contract: contractText, contract_sha256: sha256(contractText), test_check: TEST_CHECK, wait_ms: 20_000, ...extra });
+const argAfter = (argv, flag) => argv[argv.indexOf(flag) + 1];
+const findClaude = (flags = FLAGS_2_1_322) => () => ({ bin: 'claude', version: '2.1.322', flags });
+
+test('job có hợp đồng: cờ từ hợp đồng, không nạp cấu hình repo, worktree riêng; agent xong thì daemon đo và trả evidence + REPORT.md', async () => {
+  const repo = shopRepo();
+  const jobsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-jobs-'));
+  const { calls, spawnImpl } = fakeSpawn();
+  const runner = createAgentRunner({ find: findClaude(), spawnImpl, jobsDir });
+  const pending = runner.run(contractArgs({ cwd: repo }), {}, env);
+  await waitFor(() => calls.length === 1);
+  const argv = calls[0].argv;
+  const jobDir = argAfter(argv, '--add-dir');
+  const name = argAfter(argv, '--worktree');
+  assert.equal(path.dirname(jobDir), jobsDir);
+  assert.equal(path.basename(jobDir), name, 'worktree mang tên job');
+  assert.equal(argAfter(argv, '--permission-mode'), 'acceptEdits');
+  assert.equal(argAfter(argv, '--allowedTools'), 'Bash(npm test *)');
+  assert.equal(argAfter(argv, '--max-budget-usd'), '3');
+  assert.equal(argAfter(argv, '--effort'), 'high');
+  assert.equal(argAfter(argv, '--permission-prompts'), 'none');
+  assert.equal(argAfter(argv, '--setting-sources'), 'user');
+  assert.ok(argv.includes('--strict-mcp-config'), 'không nạp MCP của repo');
+  const deny = JSON.parse(argAfter(argv, '--settings')).permissions.deny;
+  assert.ok(deny.some((d) => d.startsWith('Edit(') && d.endsWith('/CONTRACT.md)')));
+  assert.ok(!deny.some((d) => d.includes('REPORT.md')), 'agent được ghi REPORT.md');
+  assert.equal(fs.readFileSync(path.join(jobDir, 'CONTRACT.md'), 'utf8'), contractText);
+  assert.match(calls[0].stdin(), /CONTRACT\.md — read it first/);
+  assert.match(calls[0].stdin(), /TEST_CHECK\.md/);
+  assert.match(calls[0].stdin(), /# Phần chưa làm/);
+  assert.ok(runner.hasRunning());
+
+  // "Claude Code": tạo worktree, sửa mã, viết REPORT.md, xong.
+  const wt = path.join(repo, '.claude', 'worktrees', name);
+  git(repo, 'worktree', 'add', '-q', wt, 'HEAD');
+  put(path.join(wt, 'src', 'order.js'), 'export const day = (d) => d + 1;\n');
+  put(path.join(jobDir, 'REPORT.md'), report({ status: 'done', left: '' }));
+  await calls[0].emitAll([
+    { type: 'system', subtype: 'init', session_id: SID, model: 'claude-opus-5-5', cwd: wt },
+    { type: 'result', subtype: 'success', is_error: false, result: 'Xong.', total_cost_usd: 0.5, num_turns: 3, duration_ms: 9000, session_id: SID,
+      permission_denials: [{ tool_name: 'Bash', tool_use_id: 'x', tool_input: { command: 'curl https://example.com' } }] },
+  ]);
+  const res = await pending;
+  assert.equal(res.status, 'done', res.error);
+  assert.equal(res.worktree, wt);
+  assert.equal(res.contract_id, 'ctr_01');
+  assert.deepEqual(res.result.permission_denials, [{ tool: 'Bash', target: 'curl https://example.com' }]);
+  const by = Object.fromEntries(res.evidence.checks.map((c) => [c.check, c.status]));
+  assert.deepEqual(by, {
+    command_passed: 'pass', diff_in_scope: 'pass', protected_untouched: 'pass', tests_not_reduced: 'pass', no_new_skips: 'pass', check_file_covered: 'pass', outputs_complete: 'pass',
+  });
+  assert.equal(res.evidence.diff.changed, 1);
+  assert.match(res.report_md, /# Đã đổi gì/);
+  assert.ok(!runner.hasRunning());
+
+  // Vòng sửa: nói tiếp phiên, trong đúng worktree cũ, không tạo worktree mới; diff vẫn tính từ commit gốc.
+  const next = runner.run(contractArgs({ continue_job: res.job, prompt: 'tests_pass trượt ở lần trước' }), {}, env);
+  await waitFor(() => calls.length === 2);
+  assert.equal(argAfter(calls[1].argv, '--resume'), SID);
+  assert.ok(!calls[1].argv.includes('--worktree'));
+  assert.equal(calls[1].opts.cwd, wt);
+  assert.match(calls[1].stdin(), /Note from Aivin: tests_pass trượt/);
+  put(path.join(argAfter(calls[1].argv, '--add-dir'), 'REPORT.md'), report({ status: 'done', left: '' }));
+  await calls[1].emitAll([{ type: 'result', subtype: 'success', is_error: false, result: 'Đã sửa.', session_id: SID }]);
+  const fixed = await next;
+  assert.equal(fixed.status, 'done');
+  assert.equal(fixed.evidence.worktree, wt);
+  assert.equal(fixed.evidence.base_commit, res.evidence.base_commit);
+
+  // Hồ sơ trên đĩa: daemon khởi động lại vẫn đọc được job; job đang chạy lúc tắt → interrupted.
+  put(path.join(jobsDir, 'claude-deadbeef', 'job.json'), JSON.stringify({ id: 'claude-deadbeef', agent: 'claude', status: 'running', session_id: SID, contractId: 'ctr_01', startedAt: Date.now() }));
+  const again = createAgentRunner({ find: findClaude(), spawnImpl, jobsDir });
+  const old = await again.status({ job: res.job });
+  assert.equal(old.status, 'done');
+  assert.equal(old.evidence.checks.length, 7);
+  const cut = await again.status({ job: 'claude-deadbeef' });
+  assert.equal(cut.status, 'interrupted');
+  assert.match(cut.error, /restarted while this job was running/);
+  assert.ok(!again.hasRunning());
+});
+
+test('job có hợp đồng: sai khuôn / sai mã băm / thiếu TEST_CHECK / không phải kho git / bản Claude thiếu cờ → từ chối trước khi chạy', async () => {
+  const repo = shopRepo();
+  const jobsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-jobs-'));
+  const { calls, spawnImpl } = fakeSpawn();
+  const make = (flags) => createAgentRunner({ find: findClaude(flags), spawnImpl, jobsDir, probeFlags: () => null });
+  const runner = make(FLAGS_2_1_322);
+  const rejects = (args, re) => assert.rejects(runner.run({ cwd: repo, ...args }, {}, env), (e) => e.code === 'INVALID_ARGS' && re.test(e.message));
+  await rejects(contractArgs({ contract_sha256: sha256('khác') }), /sha256 does not match/);
+  await rejects(contractArgs({ contract_sha256: undefined }), /contract_sha256 is required/);
+  const noBudget = contractText.replace('max_budget_usd: 3, ', '');
+  await rejects(contractArgs({ contract: noBudget, contract_sha256: sha256(noBudget) }), /max_budget_usd: is required/);
+  await rejects(contractArgs({ test_check: undefined }), /send TEST_CHECK\.md/);
+  await rejects(contractArgs({ test_check: TEST_CHECK.replace('Luồng checkout', 'Luồng refund') }), /no flow checkout/);
+  await rejects(contractArgs({ cwd: fs.mkdtempSync(path.join(root, 'plain-')) }), /needs a git repository/);
+  await assert.rejects(runner.run(contractArgs({ cwd: repo, continue_job: 'claude-00000000' }), {}, env), (e) => e.code === 'NOT_FOUND');
+  await assert.rejects(make(FLAGS_2_1_322.filter((f) => f !== '--worktree')).run(contractArgs({ cwd: repo }), {}, env), /too old for --worktree/);
+  await assert.rejects(make(null).run(contractArgs({ cwd: repo }), {}, env), /Cannot read the options/);
+  assert.equal(calls.length, 0, 'agent chưa từng chạy');
+  assert.deepEqual(fs.readdirSync(jobsDir), [], 'không để lại thư mục job');
+});
+
+test('dừng: stopAll dừng job đang chạy và ghi hồ sơ; việc thường nhận ngân sách / effort / thư mục lạ khi bản đã cài có cờ', async () => {
+  const jobsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-jobs-'));
+  const { calls, spawnImpl } = fakeSpawn();
+  const runner = createAgentRunner({ find: findClaude(), spawnImpl, jobsDir });
+  const first = await runner.run({ prompt: 'refactor', wait_ms: 10, max_budget_usd: 1.5, effort: 'low', project_config: false }, {}, env);
+  const argv = calls[0].argv;
+  assert.deepEqual([argAfter(argv, '--max-budget-usd'), argAfter(argv, '--effort'), argAfter(argv, '--setting-sources'), argAfter(argv, '--permission-prompts')], ['1.5', 'low', 'user', 'none']);
+  assert.ok(!createAgentRunner({ find: findClaude(), spawnImpl: fakeSpawn().spawnImpl, jobsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'agent-jobs-')) }).hasRunning());
+  assert.ok(runner.hasRunning());
+  runner.stopAll();
+  assert.ok(!runner.hasRunning());
+  assert.equal(JSON.parse(fs.readFileSync(path.join(jobsDir, first.job, 'job.json'), 'utf8')).status, 'stopped');
+  await assert.rejects(runner.run({ prompt: 'x', effort: 'turbo' }, {}, env), /effort must be one of/);
+  await assert.rejects(runner.run({ prompt: 'x', max_budget_usd: 0 }, {}, env), /max_budget_usd must be above 0/);
 });
