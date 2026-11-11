@@ -71,6 +71,18 @@ namespace AivinGui {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern IntPtr RealChildWindowFromPoint(IntPtr parent, POINT clientPoint);
+    [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hWnd, ref POINT p);
+    [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+    [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO { public uint cbSize, flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public RECT rcCaret; }
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW")] public static extern IntPtr SendMessageTimeoutPtr(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr menu, int pos);
+    [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr menu);
+    [DllImport("user32.dll")] public static extern uint GetMenuItemID(IntPtr menu, int pos);
+    [DllImport("user32.dll")] public static extern uint GetMenuState(IntPtr menu, uint id, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetMenuString(IntPtr menu, uint id, StringBuilder text, int max, uint flags);
+    [DllImport("oleacc.dll")] public static extern int AccessibleObjectFromWindow(IntPtr hWnd, uint objectId, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object acc);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attr, out int value, int size);
@@ -115,11 +127,19 @@ namespace AivinGui {
     /** Điểm màn hình thật của lần bấm / cuộn / kéo chuột vừa rồi (tính SAU khi đưa cửa sổ lên) — cho screen_point. */
     static Dictionary<string, object> lastMousePoint = null;
 
+    /** Thao tác này chỉ được chạy nền (method "background"): tới bước cần chuột / phím thật thì dừng. */
+    static bool backgroundOnly = false;
+
+    /**
+     * Cửa duy nhất trước khi đụng chuột / phím thật (10/11/2026, user: "sao lại chiếm quyền điều khiển của user"). Có người vừa dùng máy thì
+     * báo GUI_PERSON_PRESENT, chưa làm gì; phía Node chờ họ ngừng tay rồi thử lại.
+     */
     static void GuardInput() {
+      if (backgroundOnly) throw new GuiError("GUI_NEEDS_REAL_INPUT", "This action needs the real mouse/keyboard");
       if (!pendingInputCheck) return;
       pendingInputCheck = false;
       long idle = UserIdleMs();
-      if (idle < inputGraceMs) throw new GuiError("GUI_USER_ACTIVE", "The user is using the mouse/keyboard right now (" + idle + " ms ago) — this action needs the real mouse/keyboard");
+      if (idle < inputGraceMs) throw new GuiError("GUI_PERSON_PRESENT", "The person at this computer used the mouse/keyboard " + idle + " ms ago — this action needs the real mouse/keyboard");
     }
 
     /**
@@ -236,6 +256,7 @@ namespace AivinGui {
           return new Dictionary<string, object> { { "sent_to_back", true }, { "focus_returned_to_user", restored }, { "content_wait_ms", contentWait } };
         }
         case "act": return Act(a);
+        case "read_table": return ReadTable(a);
         case "wait_for": return WaitFor(a);
         case "office": return Office.Run(a);
         case "idle": return new Dictionary<string, object> { { "idle_ms", IdleMs() }, { "user_idle_ms", UserIdleMs() } };
@@ -484,9 +505,10 @@ namespace AivinGui {
      */
     static bool ForceForeground(IntPtr h) {
       if (h == IntPtr.Zero) return false;
+      if (Native.GetForegroundWindow() == h && !Native.IsIconic(h)) return true;
+      GuardInput();
       if (Native.IsIconic(h)) { Native.ShowWindow(h, 9); Thread.Sleep(120); }
       if (Native.GetForegroundWindow() == h) return true;
-      GuardInput();
       // Windows chỉ cho đổi cửa sổ trước khi tiến trình vừa có input → nhấn nhả Alt (không tạo ký tự) rồi đặt.
       KeyTap(0x12);
       Native.SetForegroundWindow(h);
@@ -520,7 +542,10 @@ namespace AivinGui {
 
     static object FocusWindowOp(Dictionary<string, object> a) {
       IntPtr h = ResolveWindow(a);
-      ForceForeground(h);
+      backgroundOnly = false;
+      inputGraceMs = Int(a, "user_input_grace_ms", 1500);
+      pendingInputCheck = Bool(a, "check_user_input", false);
+      try { ForceForeground(h); } finally { pendingInputCheck = false; }
       return new Dictionary<string, object> { { "focused", Native.GetForegroundWindow() == h }, { "window", WindowInfo(h, Native.GetForegroundWindow()) } };
     }
 
@@ -613,12 +638,21 @@ namespace AivinGui {
       return role == "button" || role == "edit" || role == "menuitem" || role == "hyperlink" || role == "listitem" || role == "tabitem" || role == "treeitem" || role == "checkbox" || role == "radiobutton" || role == "combobox";
     }
 
-    const int FIND_ELEMENT_BUDGET_MS = 3000, OBSERVE_BUDGET_MS = 5000, LIST_BUDGET_MS = 1500, MAX_CHILDREN_PER_NODE = 80;
+    const int FIND_ELEMENT_BUDGET_MS = 3000, OBSERVE_BUDGET_MS = 5000, LIST_BUDGET_MS = 1500, MAX_CHILDREN_PER_NODE = 80, MAX_OFFSCREEN_CHILDREN = 15;
+    static readonly CacheRequest Lean = BuildLeanCache();
+    static CacheRequest BuildLeanCache() {
+      var c = new CacheRequest();
+      c.TreeScope = TreeScope.Element;
+      c.TreeFilter = Automation.ControlViewCondition;
+      c.Add(AutomationElement.IsOffscreenProperty);
+      return c;
+    }
 
     /**
      * Con của một phần tử. Khung thường dùng FindAll (nhanh hơn đi từng bước nhiều lần). Bảng / danh sách đi từng bước để dừng được giữa chừng:
      * FindAll không huỷ được, và trên bảng dài (DataGridView qua cầu MSAA) mất hàng chục giây. Mỗi danh sách chỉ được dùng một phần ngân sách,
-     * để các nút nằm sau bảng vẫn đọc được.
+     * để các nút nằm sau bảng vẫn đọc được. Dòng đã cuộn khuất chỉ giữ một phần và không tính vào trần: cuộn xuống sâu thì các dòng đầu đều khuất,
+     * dừng ở chúng sẽ không bao giờ thấy dòng đang hiện.
      */
     static List<AutomationElement> ChildrenOf(AutomationElement e, string role, CacheRequest cache, TreeWalker walker, Stopwatch sw, int budgetMs, ref bool cut) {
       var kids = new List<AutomationElement>();
@@ -629,16 +663,38 @@ namespace AivinGui {
         return kids;
       }
       long stopAt = Math.Min(sw.ElapsedMilliseconds + LIST_BUDGET_MS, budgetMs);
+      var visible = new List<AutomationElement>();
+      var hidden = new List<AutomationElement>();
       try {
-        using (cache.Activate()) {
-          AutomationElement k = walker.GetFirstChild(e, cache);
+        using (Lean.Activate()) {
+          // Đi bằng bộ đệm chỉ có IsOffscreen: qua cầu MSAA mỗi thuộc tính là một lượt hỏi sang ứng dụng, đọc đủ cho từng dòng thì không đi tới được dòng đang hiện.
+          AutomationElement k = walker.GetFirstChild(e, Lean);
+          int visibleRun = 0;
+          bool passedView = false;
           while (k != null) {
-            if (kids.Count >= MAX_CHILDREN_PER_NODE || sw.ElapsedMilliseconds >= stopAt) { cut = true; break; }
-            kids.Add(k);
-            k = walker.GetNextSibling(k, cache);
+            if (visible.Count >= MAX_CHILDREN_PER_NODE || sw.ElapsedMilliseconds >= stopAt) { cut = true; break; }
+            if (!true.Equals(Cached(k, AutomationElement.IsOffscreenProperty))) { visible.Add(k); if (++visibleRun >= 3) passedView = true; }
+            else {
+              visibleRun = 0;
+              if (hidden.Count < MAX_OFFSCREEN_CHILDREN) hidden.Add(k);
+              else {
+                cut = true;
+                // Đã qua vùng đang hiện (ít nhất 3 dòng liền nhau, không phải dòng tiêu đề lẻ) và đủ phần khuất: phía sau chỉ còn dòng khuất.
+                if (passedView) break;
+              }
+            }
+            k = walker.GetNextSibling(k, Lean);
           }
         }
       } catch { /* phần tử vừa mất giữa chừng: giữ phần đã đọc được */ }
+      // Đọc đủ thuộc tính sau cùng, dòng đang hiện trước: hết giờ thì mất phần khuất chứ không mất phần người dùng đang thấy.
+      using (cache.Activate()) {
+        visible.AddRange(hidden);
+        foreach (AutomationElement x in visible) {
+          if (sw.ElapsedMilliseconds >= budgetMs) { cut = true; break; }
+          try { kids.Add(x.GetUpdatedCache(cache)); } catch { /* dòng vừa mất */ }
+        }
+      }
       return kids;
     }
 
@@ -675,6 +731,7 @@ namespace AivinGui {
       queue.Enqueue(new KeyValuePair<AutomationElement, int>(root, 0));
       var walker = new TreeWalker(Automation.ControlViewCondition);
       bool timedOut = false, listCut = false;
+      var unreached = new List<AutomationElement>();
       while (queue.Count > 0) {
         if (nodes.Count >= maxNodes) { truncated = true; break; }
         if (sw.ElapsedMilliseconds >= budgetMs) { truncated = true; timedOut = true; break; }
@@ -691,7 +748,17 @@ namespace AivinGui {
           if (IsInteractive(n)) interactive++;
         }
         if (item.Value >= maxDepth) continue;
-        foreach (AutomationElement k in ChildrenOf(e, Convert.ToString(n["role"]), cache, walker, sw, budgetMs, ref listCut)) queue.Enqueue(new KeyValuePair<AutomationElement, int>(k, item.Value + 1));
+        bool thisCut = false;
+        int visibleKids = 0;
+        foreach (AutomationElement k in ChildrenOf(e, Convert.ToString(n["role"]), cache, walker, sw, budgetMs, ref thisCut)) {
+          if (!true.Equals(Cached(k, AutomationElement.IsOffscreenProperty))) visibleKids++;
+          queue.Enqueue(new KeyValuePair<AutomationElement, int>(k, item.Value + 1));
+        }
+        if (thisCut) {
+          listCut = true;
+          // Không đi tới được dòng nào đang hiện (chỉ thấy dòng tiêu đề, thanh cuộn): bảng đã cuộn xa.
+          if (visibleKids <= 2) unreached.Add(e);
+        }
       }
       if (listCut) truncated = true;
       lock (StateLock) {
@@ -703,6 +770,7 @@ namespace AivinGui {
           Snapshots.Remove(oldest); SnapshotWindow.Remove(oldest); OcrSnapshots.Remove(oldest);
         }
       }
+      foreach (AutomationElement list in unreached) AddVisibleRows(list, snap, nodes, wr, sw, budgetMs);
       // Cây nghèo: ít phần tử có tên / thao tác được (ứng dụng vẽ tay, canvas, Electron tắt trợ năng) → cần ảnh để định vị.
       // Ứng dụng Store mới chỉ có khung: thanh tiêu đề đủ phần tử để chấm "good" nhưng chưa có nội dung thật.
       bool frameOnly = IsUwpFrameOnly(h);
@@ -736,6 +804,191 @@ namespace AivinGui {
         }
       }
       return res;
+    }
+
+    /**
+     * Bảng dài đã cuộn xa: đi từng dòng qua cầu MSAA mất ~100 ms mỗi bước nên không tới được vùng đang hiện. Hỏi thẳng control dòng nào đang nằm ở
+     * từng độ cao (accHitTest không xét cửa sổ đang che, nên dùng được cả khi AI làm dưới nền). Mỗi dòng thành một node cùng kiểu với chữ OCR
+     * ("<snap>.t<k>"): có toạ độ, gui.act bấm được.
+     */
+    static void AddVisibleRows(AutomationElement list, int snap, List<object> nodes, Native.RECT wr, Stopwatch sw, int budgetMs) {
+      Accessibility.IAccessible client = AccessibleClient(OwnHandle(list));
+      object boxObj = Cached(list, AutomationElement.BoundingRectangleProperty);
+      if (client == null || !(boxObj is System.Windows.Rect)) return;
+      var box = (System.Windows.Rect)boxObj;
+      if (box.IsEmpty || box.Height < 4) return;
+      var known = new HashSet<string>();
+      foreach (object o in nodes) {
+        var d = (Dictionary<string, object>)o;
+        if (d.ContainsKey("name") && !d.ContainsKey("offscreen")) known.Add(Convert.ToString(d["name"]));
+      }
+      var rects = new List<System.Windows.Rect>();
+      lock (StateLock) { List<System.Windows.Rect> had; if (OcrSnapshots.TryGetValue(snap, out had)) rects = had; else OcrSnapshots[snap] = rects; }
+      int added = 0;
+      foreach (AccRow row in SampleRows(client, box, sw, budgetMs + 1000)) {
+        if (added >= 60 || !known.Add(row.Name)) continue;
+        var n = new Dictionary<string, object> {
+          { "id", snap + ".t" + rects.Count }, { "role", "row" }, { "name", Clip(row.Name, 200) }, { "source", "accessible" },
+          { "rect", new Dictionary<string, object> { { "x", row.Left - wr.Left }, { "y", row.Top - wr.Top }, { "w", row.Width }, { "h", row.Height } } },
+        };
+        if (!string.IsNullOrEmpty(row.Value)) n["value"] = Clip(row.Value, 400);
+        lock (StateLock) { rects.Add(new System.Windows.Rect(row.Left - wr.Left, row.Top - wr.Top, row.Width, row.Height)); }
+        nodes.Add(n);
+        added++;
+      }
+    }
+
+    class AccRow { public string Name, Value; public int Left, Top, Width, Height; }
+
+    /** Các dòng đang hiện của một bảng, từ trên xuống, hỏi thẳng control. Control không trả lời được thì trả phần đã đọc. */
+    static List<AccRow> SampleRows(Accessibility.IAccessible client, System.Windows.Rect box, Stopwatch sw, long stopAtMs) {
+      var rows = new List<AccRow>();
+      int x = (int)(box.Left + Math.Min(60, box.Width / 3));
+      double y = box.Top + 2;
+      try {
+        while (y < box.Bottom && sw.ElapsedMilliseconds < stopAtMs) {
+          object hit = client.accHitTest(x, (int)y);
+          Accessibility.IAccessible row = hit as Accessibility.IAccessible ?? client;
+          object child = hit is int ? hit : 0;
+          if (ReferenceEquals(row, client) && child is int && (int)child == 0) { y += 8; continue; }
+          // Trúng một ô: lấy cả dòng để có đủ các cột.
+          if (Convert.ToInt32(row.get_accRole(child)) == ROLE_SYSTEM_CELL) {
+            var parent = row.accParent as Accessibility.IAccessible;
+            if (parent != null) { row = parent; child = 0; }
+          }
+          int left, top, w, h;
+          row.accLocation(out left, out top, out w, out h, child);
+          if (h <= 0) { y += 8; continue; }
+          string name = row.get_accName(child);
+          if (!string.IsNullOrEmpty(name) && (rows.Count == 0 || rows[rows.Count - 1].Name != name)) {
+            string value = null;
+            try { value = row.get_accValue(child); } catch (COMException) { }
+            rows.Add(new AccRow { Name = name, Value = value, Left = left, Top = top, Width = w, Height = h });
+          }
+          y = Math.Max(y + 1, top + h + 1);
+        }
+      } catch (COMException) { } catch (ArgumentException) { } catch (InvalidCastException) { } catch (NotImplementedException) { }
+      return rows;
+    }
+
+    const int READ_TABLE_BUDGET_MS = 20000;
+    /**
+     * Số nấc lăn liên tiếp không đổi gì mới coi là tới đầu / cuối bảng. Một nấc có thể bị bỏ qua vì người dùng đang giữ Shift hay nút chuột
+     * (DataGridView tự kiểm phím thật): chạy thật 10/11/2026 dừng ở dòng 62/200 mà vẫn báo đã đọc hết.
+     */
+    const int READ_TABLE_STALL_NOTCHES = 8, READ_TABLE_STALL_WAIT_MS = 80;
+
+    /** Lăn một nấc và chờ control xử lý xong, để lần đọc sau thấy đúng vị trí mới. */
+    static bool Wheel(IntPtr control, int delta, IntPtr screenPoint) {
+      IntPtr r;
+      return Native.SendMessageTimeoutPtr(control, WM_MOUSEWHEEL, new IntPtr(delta << 16), screenPoint, SMTO_ABORTIFHUNG, 1000, out r) != IntPtr.Zero;
+    }
+
+    static string FirstDataRow(List<AccRow> page) {
+      foreach (AccRow row in page) if (row.Value != row.Name) return row.Name;
+      return null;
+    }
+
+    const int ROLE_SYSTEM_COLUMNHEADER = 0x19, ROLE_SYSTEM_ROWHEADER = 0x1A;
+
+    /** Ô sâu nhất tại một điểm của bảng (bảng → dòng → ô). null = không trúng mục nào. */
+    static Accessibility.IAccessible CellAt(Accessibility.IAccessible client, int x, int y) {
+      var cell = client.accHitTest(x, y) as Accessibility.IAccessible;
+      if (cell == null) return null;
+      var deeper = cell.accHitTest(x, y) as Accessibility.IAccessible;
+      return deeper ?? cell;
+    }
+
+    /**
+     * Tên cột: dò ngang dòng tiêu đề, chỉ lấy ô tiêu đề cột. Ô ngay trên cột đầu dòng (dưới nó là tiêu đề hàng) không phải một cột, nên bỏ;
+     * toạ độ dò theo bước nhỏ vì độ rộng các ô tiêu đề không phải control nào cũng báo đúng.
+     */
+    static List<object> ReadColumns(Accessibility.IAccessible client, System.Windows.Rect box, AccRow header) {
+      var cols = new List<object>();
+      try {
+        int y = header.Top + header.Height / 2, below = header.Top + header.Height + 4;
+        string last = null;
+        for (double x = box.Left + 2; x < box.Right && cols.Count < 100; x += 12) {
+          var cell = CellAt(client, (int)x, y);
+          if (cell == null || Convert.ToInt32(cell.get_accRole(0)) != ROLE_SYSTEM_COLUMNHEADER) continue;
+          var under = CellAt(client, (int)x, below);
+          if (under != null && Convert.ToInt32(under.get_accRole(0)) == ROLE_SYSTEM_ROWHEADER) continue;
+          string name = cell.get_accName(0);
+          if (string.IsNullOrEmpty(name) || name == last) continue;
+          cols.Add(Clip(name, 120));
+          last = name;
+        }
+      } catch (COMException) { } catch (ArgumentException) { } catch (InvalidCastException) { } catch (NotImplementedException) { }
+      return cols;
+    }
+
+    /**
+     * Đọc cả bảng dưới nền: cuộn lên đầu, đọc dòng đang hiện, lăn một nấc, lặp tới khi hết dòng mới, rồi cuộn về chỗ cũ. Mỗi lần một nấc để các trang gối nhau;
+     * hai trang liền nhau không có dòng chung (ứng dụng cuộn quá nhanh) thì báo gaps, không âm thầm bỏ sót.
+     */
+    static object ReadTable(Dictionary<string, object> a) {
+      IntPtr window;
+      AutomationElement el = NodeOf(Str(a, "node_id"), out window);
+      AssertWindowResponsive(window);
+      int maxRows = Math.Max(1, Math.Min(Int(a, "max_rows", 300), 2000));
+      IntPtr control = OwnHandle(el);
+      Accessibility.IAccessible client = AccessibleClient(control);
+      System.Windows.Rect box = el.Current.BoundingRectangle;
+      if (client == null || box.IsEmpty) throw new GuiError("GUI_NO_PATTERN", "This table cannot be read directly — use gui.observe / gui.find and scroll");
+      bool canScroll = AcceptsPostedInput(control);
+      var sw = Stopwatch.StartNew();
+      var seen = new HashSet<string>();
+      var rows = new List<object>();
+      List<object> columns = null;
+      bool gaps = false, endReached = false;
+      int notches = 0, stale = 0, movedUp = 0;
+      var lp = new IntPtr((((int)box.Top + 20 & 0xFFFF) << 16) | ((int)box.Left + 20 & 0xFFFF));
+      HashSet<string> previous = null;
+      // Bảng có thể đang cuộn dở: lên đầu trước, nhớ đã lên bao nhiêu nấc để trả về đúng chỗ.
+      if (canScroll) {
+        string top = FirstDataRow(SampleRows(client, box, sw, READ_TABLE_BUDGET_MS));
+        int stalled = 0;
+        while (top != null && movedUp < 2000 && stalled < READ_TABLE_STALL_NOTCHES && sw.ElapsedMilliseconds < READ_TABLE_BUDGET_MS / 2) {
+          if (!Wheel(control, 120, lp)) break;
+          string now = FirstDataRow(SampleRows(client, box, sw, READ_TABLE_BUDGET_MS));
+          if (now == top) { stalled++; Thread.Sleep(READ_TABLE_STALL_WAIT_MS); continue; }
+          stalled = 0;
+          top = now;
+          movedUp++;
+        }
+      }
+      while (rows.Count < maxRows && sw.ElapsedMilliseconds < READ_TABLE_BUDGET_MS) {
+        var page = SampleRows(client, box, sw, READ_TABLE_BUDGET_MS);
+        var names = new HashSet<string>();
+        int fresh = 0;
+        bool overlap = false;
+        foreach (AccRow row in page) {
+          bool header = row.Value == row.Name;
+          if (header) { if (columns == null) columns = ReadColumns(client, box, row); continue; }
+          names.Add(row.Name);
+          if (previous != null && previous.Contains(row.Name)) overlap = true;
+          if (!seen.Add(row.Name)) continue;
+          fresh++;
+          if (rows.Count < maxRows) rows.Add(Clip(string.IsNullOrEmpty(row.Value) ? row.Name : row.Value, 800));
+        }
+        if (previous != null && previous.Count > 0 && names.Count > 0 && !overlap) gaps = true;
+        previous = names;
+        if (!canScroll) break;
+        if (fresh == 0) {
+          if (++stale >= READ_TABLE_STALL_NOTCHES) { endReached = true; break; }
+          Thread.Sleep(READ_TABLE_STALL_WAIT_MS);
+        } else stale = 0;
+        if (!Wheel(control, -120, lp)) break;
+        notches++;
+      }
+      if (canScroll) {
+        for (int i = 0; i < notches; i++) if (!Wheel(control, 120, lp)) break;
+        for (int i = 0; i < movedUp; i++) if (!Wheel(control, -120, lp)) break;
+      }
+      string reason = endReached ? null : !canScroll ? "this app cannot be scrolled in the background: only the rows on screen were read" : rows.Count >= maxRows ? "max_rows reached" : "time limit reached";
+      return new Dictionary<string, object> {
+        { "columns", columns ?? new List<object>() }, { "rows", rows }, { "row_count", rows.Count }, { "complete", endReached }, { "reason", reason }, { "gaps", gaps }, { "ms", sw.ElapsedMilliseconds },
+      };
     }
 
     static uint SafeDpi(IntPtr h) { try { return Native.GetDpiForWindow(h); } catch { return 96; } }
@@ -803,6 +1056,7 @@ namespace AivinGui {
         string used;
         var segments = Ocr.Read(bmp, lang, out used);
         var rects = new List<System.Windows.Rect>();
+        lock (StateLock) { List<System.Windows.Rect> had; if (OcrSnapshots.TryGetValue(snap, out had)) rects = had; }
         foreach (var s in segments) {
           if (rects.Count >= Math.Max(0, max)) break;
           var r = s.Rect;
@@ -906,6 +1160,7 @@ namespace AivinGui {
       string action = Str(a, "action") ?? "click";
       string nodeId = Str(a, "node_id");
       string method = Str(a, "method") ?? "auto";
+      backgroundOnly = method == "background";
       inputGraceMs = Int(a, "user_input_grace_ms", 1500);
       pendingInputCheck = Bool(a, "check_user_input", true);
       userInputCheck = pendingInputCheck;
@@ -951,6 +1206,8 @@ namespace AivinGui {
         screenPoint = new Dictionary<string, object> { { "x", (int)Math.Round(sp.X) }, { "y", (int)Math.Round(sp.Y) } };
       } catch { }
       IntPtr fgBefore = Native.GetForegroundWindow();
+      Native.POINT cursorBefore;
+      bool haveCursor = Native.GetCursorPos(out cursorBefore);
       string used = DoAction(action, method, el, window, a);
       // Thao tác theo pattern không cần cửa sổ đích ở trên cùng, nhưng nhiều ứng dụng (WinForms qua MSAA) tự lấy focus khi bị SetValue /
       // Expand → phím người dùng đang gõ ở cửa sổ khác rơi vào ô của AI (chạy thật 28/10/2026: ô Họ tên bị chèn "ã", "x", "ch"). Trả focus
@@ -963,12 +1220,14 @@ namespace AivinGui {
         try { restored = ForceForeground(fgBefore); } catch (GuiError) { }
       }
       // Chạy nền: người dùng đang ở cửa sổ khác → cửa sổ của AI về lại dưới đáy (không chồng lên việc của người dùng).
+      if (used == "mouse" || used == "keyboard") restored = GiveBackRealInput(action, window, fgBefore, haveCursor, cursorBefore);
       if (restored || (used != "mouse" && used != "keyboard" && fgBefore != window && window != IntPtr.Zero)) SendToBack(window);
       // Pattern actions expose their new state synchronously in most UIA providers. Keep a short grace for
       // providers that publish property changes just after returning; real mouse/keyboard still needs longer.
-      int defaultSettle = used == "mouse" || used == "keyboard" ? 250 : 30;
+      int defaultSettle = used == "mouse" || used == "keyboard" ? 250 : used == "posted" ? 200 : 30;
       Thread.Sleep(Math.Max(0, Math.Min(Int(a, "settle_ms", defaultSettle), 3000)));
       var res = new Dictionary<string, object> { { "action", action }, { "method", used } };
+      if (window != IntPtr.Zero && Native.IsWindow(window)) res["window_class"] = ClassOf(window);
       if (lastMousePoint != null) screenPoint = lastMousePoint;
       if (screenPoint != null) res["screen_point"] = screenPoint;
       if (restored) res["focus_returned_to_user"] = true;
@@ -1015,10 +1274,21 @@ namespace AivinGui {
               throw new GuiError("GUI_NO_PATTERN", "Element has no click pattern — retry with method mouse");
             }
           }
+          if (method == "auto" || method == "background") {
+            string quiet = TryBackgroundClick(el, window, a, 1);
+            if (quiet != null) return quiet;
+          }
           MouseAt(el, window, a, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1);
           return "mouse";
         }
-        case "double_click": MouseAt(el, window, a, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 2); return "mouse";
+        case "double_click": {
+          if (method == "auto" || method == "background") {
+            string quiet = TryBackgroundClick(el, window, a, 2);
+            if (quiet != null) return quiet;
+          }
+          MouseAt(el, window, a, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 2);
+          return "mouse";
+        }
         case "right_click": MouseAt(el, window, a, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 1); return "mouse";
         case "set_value": {
           string text = Str(a, "text") ?? "";
@@ -1037,7 +1307,9 @@ namespace AivinGui {
           if (allowPattern && TryBackgroundType(el, text)) return "background";
           FocusTarget(el, window); TypeText(text, window); return "keyboard";
         }
-        case "key": FocusTarget(el, window); KeyCombo(Str(a, "keys") ?? "", window); return "keyboard";
+        case "key":
+          if ((method == "auto" || method == "background") && TryBackgroundKeys(el, window, Str(a, "keys") ?? "")) return "posted";
+          FocusTarget(el, window); KeyCombo(Str(a, "keys") ?? "", window); return "keyboard";
         case "scroll": {
           string dir = (Str(a, "direction") ?? "down").ToLowerInvariant();
           int amount = Math.Max(1, Math.Min(Int(a, "amount", 3), 30));
@@ -1053,6 +1325,7 @@ namespace AivinGui {
               return "scroll";
             }
           }
+          if ((method == "auto" || method == "background") && TryBackgroundScroll(el, window, a, dir, amount)) return "posted";
           RequireForeground(window);
           var p = PointFor(el, window, a);
           AssertPointOnWindow((int)p.X, (int)p.Y, window);
@@ -1179,6 +1452,236 @@ namespace AivinGui {
         Native.PostMessage(h, WM_CHAR, new IntPtr(ch == '\n' ? 13 : ch), IntPtr.Zero);
       }
       Thread.Sleep(30);
+      return true;
+    }
+
+    const uint WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_LBUTTONDBLCLK = 0x0203, WM_MOUSEWHEEL = 0x020A, WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101;
+    const uint OBJID_CLIENT = 0xFFFFFFFC;
+    const int ROLE_SYSTEM_CELL = 0x1D;
+    const int SELFLAG_TAKEFOCUS = 1, SELFLAG_TAKESELECTION = 2;
+    static readonly HashSet<string> ClassicClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+      "Button", "Edit", "Static", "ComboBox", "ComboLBox", "ListBox", "#32770", "SysListView32", "SysTreeView32", "SysTabControl32", "SysHeader32",
+      "SysDateTimePick32", "SysMonthCal32", "SysLink", "ToolbarWindow32", "ReBarWindow32", "msctls_statusbar32", "msctls_updown32", "msctls_trackbar32",
+    };
+
+    /**
+     * Chỉ các ứng dụng Windows truyền thống xử lý đủ thông điệp chuột / phím gửi thẳng vào cửa sổ. Chromium, UWP, WPF, DirectUI bỏ qua hoặc xử lý
+     * nửa vời mà không báo gì, nên danh sách này cố tình là danh sách cho phép: không chắc thì để đường chuột thật (có hỏi người dùng).
+     */
+    static bool AcceptsPostedInput(IntPtr h) {
+      string c = ClassOf(h);
+      if (c.StartsWith("WindowsForms10.") || c.StartsWith("Afx") || c.StartsWith("Thunder") || c.StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase)) return true;
+      if (c.Length > 1 && c[0] == 'T' && char.IsUpper(c[1])) return true; // Delphi / C++Builder: TForm1, TDBGrid, TPanel…
+      return ClassicClasses.Contains(c);
+    }
+
+    /** Cửa sổ con sâu nhất tại điểm màn hình, tính theo cây cửa sổ của đích nên không phụ thuộc cửa sổ nào đang che nó. */
+    static IntPtr DeepestChildAt(IntPtr window, int x, int y) {
+      Native.RECT r;
+      if (window == IntPtr.Zero || Native.IsIconic(window) || !Native.GetWindowRect(window, out r)) return IntPtr.Zero;
+      if (x < r.Left || x >= r.Right || y < r.Top || y >= r.Bottom) return IntPtr.Zero;
+      IntPtr cur = window;
+      for (int depth = 0; depth < 30; depth++) {
+        var p = new Native.POINT { X = x, Y = y };
+        Native.ScreenToClient(cur, ref p);
+        IntPtr child = Native.RealChildWindowFromPoint(cur, p);
+        if (child == IntPtr.Zero || child == cur) break;
+        cur = child;
+      }
+      return cur;
+    }
+
+    /** Điểm cần thao tác nền: phần tử đã cuộn khuất hay không có toạ độ thì không đoán. */
+    static bool QuietPoint(AutomationElement el, IntPtr window, Dictionary<string, object> a, out int x, out int y) {
+      x = 0; y = 0;
+      if (window == IntPtr.Zero) return false;
+      try {
+        if (el != null && el.Current.IsOffscreen) return false;
+        var p = PointFor(el, window, a);
+        x = (int)p.X; y = (int)p.Y;
+        return true;
+      } catch (GuiError) { return false; } catch (ElementNotAvailableException) { return false; }
+    }
+
+    /**
+     * Mượn xong thì trả: con trỏ về chỗ cũ, tiêu điểm về cửa sổ người dùng đang dùng. Họ đã cầm lại chuột thì không kéo con trỏ của họ đi; menu AI vừa
+     * mở thì giữ (mất tiêu điểm là menu đóng, bước sau không chọn được).
+     */
+    static bool GiveBackRealInput(string action, IntPtr window, IntPtr fgBefore, bool haveCursor, Native.POINT cursorBefore) {
+      Native.POINT aiCursor;
+      bool haveAi = Native.GetCursorPos(out aiCursor);
+      Thread.Sleep(150); // để ứng dụng nhận xong cú bấm / phím trước khi đổi tiêu điểm
+      Native.POINT now;
+      if (haveCursor && haveAi && Native.GetCursorPos(out now) && now.X == aiCursor.X && now.Y == aiCursor.Y && (now.X != cursorBefore.X || now.Y != cursorBefore.Y)) {
+        Native.SetCursorPos(cursorBefore.X, cursorBefore.Y);
+      }
+      if (action == "right_click" || InMenuMode(window)) return false;
+      IntPtr fg = Native.GetForegroundWindow();
+      if (fgBefore == IntPtr.Zero || fgBefore == window || !Native.IsWindow(fgBefore) || !TookForeground(fg, window)) return false;
+      if (RestoreForeground(fgBefore, window)) return true;
+      if (UserIdleMs() < 300) return false; // cách còn lại nhấn phím Alt, không chen vào lúc họ đang gõ
+      try { return ForceForeground(fgBefore); } catch (GuiError) { return false; }
+    }
+
+    static bool InMenuMode(IntPtr window) {
+      uint pid;
+      var info = new Native.GUITHREADINFO();
+      info.cbSize = (uint)Marshal.SizeOf(info);
+      uint thread = window == IntPtr.Zero ? 0 : Native.GetWindowThreadProcessId(window, out pid);
+      if (thread == 0 || !Native.GetGUIThreadInfo(thread, ref info)) return false;
+      return (info.flags & 0x14) != 0; // GUI_INMENUMODE | GUI_POPUPMENUMODE
+    }
+
+    /**
+     * Bấm không đụng chuột thật: gửi thẳng thông điệp bấm vào cửa sổ con; không được thì dùng lệnh mặc định của MSAA (chọn dòng, ô). WinForms chỉ
+     * coi là cú bấm khi đúng điểm đó không bị cửa sổ khác che (nó tự kiểm WindowFromPoint), nên bị che thì bỏ qua cách gửi thông điệp.
+     * Trả null = không làm được dưới nền, chưa có gì xảy ra.
+     */
+    static string TryBackgroundClick(AutomationElement el, IntPtr window, Dictionary<string, object> a, int times) {
+      int x, y;
+      if (!QuietPoint(el, window, a, out x, out y)) return null;
+      IntPtr target = DeepestChildAt(window, x, y);
+      if (target == IntPtr.Zero) return null;
+      bool exposed = Native.WindowFromPoint(new Native.POINT { X = x, Y = y }) == target;
+      if (AcceptsPostedInput(target) && (exposed || !ClassOf(target).StartsWith("WindowsForms10."))) {
+        PostClick(target, x, y, times);
+        return "posted";
+      }
+      if (times == 1 && TryAccessibleClick(target, x, y)) return "accessible";
+      return null;
+    }
+
+    static void PostClick(IntPtr h, int screenX, int screenY, int times) {
+      var c = new Native.POINT { X = screenX, Y = screenY };
+      Native.ScreenToClient(h, ref c);
+      var lp = new IntPtr(((c.Y & 0xFFFF) << 16) | (c.X & 0xFFFF));
+      var pressed = new IntPtr(1); // MK_LBUTTON
+      Native.PostMessage(h, WM_MOUSEMOVE, IntPtr.Zero, lp);
+      for (int i = 0; i < times; i++) {
+        Native.PostMessage(h, i == 0 ? WM_LBUTTONDOWN : WM_LBUTTONDBLCLK, pressed, lp);
+        Native.PostMessage(h, WM_LBUTTONUP, IntPtr.Zero, lp);
+      }
+    }
+
+    static Accessibility.IAccessible AccessibleClient(IntPtr control) {
+      if (control == IntPtr.Zero) return null;
+      object raw;
+      var iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71");
+      if (Native.AccessibleObjectFromWindow(control, OBJID_CLIENT, ref iid, out raw) != 0) return null;
+      return raw as Accessibility.IAccessible;
+    }
+
+    /** Hỏi chính control (accHitTest không xét cửa sổ đang che) rồi chạy lệnh mặc định, không có thì chọn. Trả false nếu control không tự trả lời được. */
+    static bool TryAccessibleClick(IntPtr target, int x, int y) {
+      try {
+        Accessibility.IAccessible client = AccessibleClient(target);
+        if (client == null) return false;
+        Accessibility.IAccessible node = client;
+        object child = 0;
+        // Đi xuống tới mục sâu nhất tại điểm đó (bảng → dòng → ô): chọn ô mới đổi ô hiện hành như một cú bấm, chọn dòng thì không.
+        for (int depth = 0; depth < 5; depth++) {
+          object hit = node.accHitTest(x, y);
+          if (hit is Accessibility.IAccessible && !ReferenceEquals(hit, node)) { node = (Accessibility.IAccessible)hit; child = 0; continue; }
+          if (hit is int && (int)hit != 0) child = hit;
+          break;
+        }
+        if (ReferenceEquals(node, client) && child is int && (int)child == 0) return false; // chỉ trúng nền của control, không phải một mục cụ thể
+        if (!string.IsNullOrEmpty(node.get_accDefaultAction(child))) node.accDoDefaultAction(child);
+        else node.accSelect(SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION, child);
+        return true;
+      } catch (COMException) { return false; } catch (ArgumentException) { return false; } catch (InvalidCastException) { return false; } catch (NotImplementedException) { return false; }
+    }
+
+    static bool TryBackgroundScroll(AutomationElement el, IntPtr window, Dictionary<string, object> a, string dir, int amount) {
+      if (dir != "up" && dir != "down") return false;
+      int x, y;
+      if (!QuietPoint(el, window, a, out x, out y)) return false;
+      IntPtr target = DeepestChildAt(window, x, y);
+      if (target == IntPtr.Zero || !AcceptsPostedInput(target)) return false;
+      int notch = dir == "up" ? 120 : -120;
+      var lp = new IntPtr(((y & 0xFFFF) << 16) | (x & 0xFFFF));
+      for (int i = 0; i < amount; i++) Native.PostMessage(target, WM_MOUSEWHEEL, new IntPtr(notch << 16), lp);
+      return true;
+    }
+
+    const uint WM_CUT = 0x0300, WM_COPY = 0x0301, WM_PASTE = 0x0302, WM_UNDO = 0x0304, EM_SETSEL = 0x00B1, WM_COMMAND = 0x0111, WM_CLOSE = 0x0010, MF_BYPOSITION = 0x400, MF_GRAYED = 1, MF_DISABLED = 2;
+
+    static bool IsTextControl(IntPtr h) {
+      string c = ClassOf(h);
+      return c.IndexOf("EDIT", StringComparison.OrdinalIgnoreCase) >= 0 || c.IndexOf("Memo", StringComparison.Ordinal) >= 0 || c.IndexOf("TextBox", StringComparison.Ordinal) >= 0;
+    }
+
+    /** "Ctrl + Shift+S" → "ctrl+s+shift": thứ tự phím bổ trợ khác nhau vẫn so được. */
+    static string NormalizeChord(string s) {
+      var parts = new List<string>(s.ToLowerInvariant().Replace(" ", "").Split(new[] { '+' }, StringSplitOptions.RemoveEmptyEntries));
+      parts.Sort(StringComparer.Ordinal);
+      return string.Join("+", parts);
+    }
+
+    /** Lệnh trong menu của cửa sổ có ghi đúng phím tắt này (Ctrl+S…); mục đang mờ thì coi như không có. */
+    static bool FindMenuCommand(IntPtr menu, string chord, int depth, out uint id) {
+      id = 0;
+      if (menu == IntPtr.Zero || depth > 4) return false;
+      int count = Native.GetMenuItemCount(menu);
+      for (int i = 0; i < count; i++) {
+        IntPtr sub = Native.GetSubMenu(menu, i);
+        if (sub != IntPtr.Zero) { if (FindMenuCommand(sub, chord, depth + 1, out id)) return true; continue; }
+        var sb = new StringBuilder(256);
+        if (Native.GetMenuString(menu, (uint)i, sb, sb.Capacity, MF_BYPOSITION) <= 0) continue;
+        string text = sb.ToString();
+        int tab = text.LastIndexOf('\t');
+        if (tab < 0 || NormalizeChord(text.Substring(tab + 1)) != chord) continue;
+        if ((Native.GetMenuState(menu, (uint)i, MF_BYPOSITION) & (MF_GRAYED | MF_DISABLED)) != 0) return false;
+        id = Native.GetMenuItemID(menu, i);
+        return id != 0xFFFFFFFF;
+      }
+      return false;
+    }
+
+    /** Một phím tắt thành thông điệp tương đương; chưa gửi gì. null = phải dùng phím thật. */
+    static Action ChordAsCommand(string combo, IntPtr target, IntPtr window) {
+      string chord = NormalizeChord(combo);
+      if (target != IntPtr.Zero && IsTextControl(target)) {
+        uint msg = chord == "c+ctrl" ? WM_COPY : chord == "ctrl+x" ? WM_CUT : chord == "ctrl+v" ? WM_PASTE : chord == "ctrl+z" ? WM_UNDO : 0;
+        if (msg != 0) return () => Native.PostMessage(target, msg, IntPtr.Zero, IntPtr.Zero);
+        if (chord == "a+ctrl") return () => Native.PostMessage(target, EM_SETSEL, IntPtr.Zero, new IntPtr(-1));
+      }
+      if (chord == "alt+f4") return () => Native.PostMessage(window, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+      uint id;
+      if (FindMenuCommand(Native.GetMenu(window), chord, 0, out id)) return () => Native.PostMessage(window, WM_COMMAND, new IntPtr(id), IntPtr.Zero);
+      return null;
+    }
+
+    /** Phím đơn gửi thẳng vào ô đích; tổ hợp có Ctrl / Shift / Alt đổi thành lệnh tương đương (ứng dụng đọc trạng thái phím thật nên không gửi phím được). Được cả chuỗi mới gửi. */
+    static bool TryBackgroundKeys(AutomationElement el, IntPtr window, string spec) {
+      if (window == IntPtr.Zero || spec.Length == 0) return false;
+      IntPtr target = OwnHandle(el);
+      if (el == null) {
+        uint pid;
+        var info = new Native.GUITHREADINFO();
+        info.cbSize = (uint)Marshal.SizeOf(info);
+        uint thread = Native.GetWindowThreadProcessId(window, out pid);
+        if (thread == 0 || !Native.GetGUIThreadInfo(thread, ref info)) return false;
+        target = info.hwndFocus;
+      }
+      // Không có ô đích (cửa sổ đang ở nền, chưa có ô nào được focus): phím đơn không biết gửi vào đâu, nhưng lệnh trong menu thì vẫn được.
+      if (target != IntPtr.Zero && (!BelongsTo(target, window) || !AcceptsPostedInput(target))) target = IntPtr.Zero;
+      var steps = new List<Action>();
+      foreach (string raw in spec.ToLowerInvariant().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)) {
+        if (raw.Contains("+")) {
+          Action cmd = ChordAsCommand(raw, target, window);
+          if (cmd == null) return false;
+          steps.Add(cmd);
+          continue;
+        }
+        ushort vk;
+        if (target == IntPtr.Zero || !Keys.TryGetValue(raw, out vk) || vk == 0x11 || vk == 0x10 || vk == 0x12 || vk == 0x5B) return false;
+        steps.Add(() => {
+          Native.PostMessage(target, WM_KEYDOWN, new IntPtr(vk), new IntPtr(1));
+          Native.PostMessage(target, WM_KEYUP, new IntPtr(vk), new IntPtr(unchecked((int)0xC0000001)));
+        });
+      }
+      foreach (Action step in steps) step();
       return true;
     }
 
@@ -1607,7 +2110,7 @@ export const WINDOWS_HOST_PS1 = String.raw`
 $ErrorActionPreference = 'Stop'
 $dll = $env:AIVIN_GUI_DLL
 $src = $env:AIVIN_GUI_SRC
-$refs = @('UIAutomationClient', 'UIAutomationTypes', 'WindowsBase', 'System.Drawing', 'System.Windows.Forms', 'System.Web.Extensions')
+$refs = @('UIAutomationClient', 'UIAutomationTypes', 'WindowsBase', 'System.Drawing', 'System.Windows.Forms', 'System.Web.Extensions', 'Accessibility')
 if ($dll -and (Test-Path -LiteralPath $dll)) {
   Add-Type -Path $dll
 } else {

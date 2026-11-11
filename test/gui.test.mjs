@@ -162,7 +162,7 @@ test('không nói cửa sổ: host được báo tiến trình linh vật + cử
   assert.equal(args('observe')[0].fallback, '0x10');
   assert.equal(args('act')[0].fallback, '0x10');
   assert.deepEqual(args('window_info').at(-1), { window: 'notepad' });
-  assert.deepEqual(args('focus')[0], { window: 'notepad' });
+  assert.deepEqual(args('focus')[0], { window: 'notepad', check_user_input: true, user_input_grace_ms: 2_500 });
 });
 
 test('wait_for: chờ phần tử cần cửa sổ được phép + chuyển đủ tham số; chờ tiêu đề không nói cửa sổ thì không hỏi window_info', async () => {
@@ -517,4 +517,55 @@ test('host C#: observe và wait_for có trần thời gian; tìm được hộp 
   assert.match(cs, /res\["app_busy"\] = true/);
   assert.match(cs, /Shell_SystemDim/);
   assert.match(cs, /content_unavailable/);
+});
+
+const personPresent = () => Object.assign(new Error('person'), { code: 'GUI_PERSON_PRESENT' });
+
+test('chuột thật khi có người: Planner không rút ngắn được thời gian chờ (10/11/2026)', async () => {
+  const host = fakeHost({ window_info: NOTEPAD, act: () => ({ method: 'invoke' }) });
+  const gui = createGuiController({ host, notify: () => {}, realInputIdleMs: 180_000 });
+  await gui.act({ action: 'click', window: 'Notepad', user_input_grace_ms: 1 }, {});
+  await gui.act({ action: 'click', window: 'Notepad', user_input_grace_ms: 600_000 }, {});
+  const graces = host.calls.filter((c) => c.op === 'act').map((c) => c.args.user_input_grace_ms);
+  assert.deepEqual(graces, [180_000, 600_000]);
+});
+
+test('chuột thật khi có người: không hỏi gì, chờ họ ngừng tay rồi làm (10/11/2026)', async () => {
+  let tries = 0;
+  const host = fakeHost({ window_info: NOTEPAD, act: () => { if (++tries < 3) throw personPresent(); return { method: 'mouse' }; } });
+  const gui = createGuiController({ host, notify: () => {}, realInputWaitMs: 5_000 });
+  assert.equal((await gui.act({ action: 'right_click', window: 'Notepad' }, {})).method, 'mouse');
+  assert.equal(tries, 3);
+});
+
+test('chuột thật khi có người: họ bận suốt thì không làm, báo GUI_USER_ACTIVE (10/11/2026)', async () => {
+  const host = fakeHost({ window_info: NOTEPAD, focus: () => { throw personPresent(); }, act: () => { throw personPresent(); } });
+  const gui = createGuiController({ host, notify: () => {}, realInputWaitMs: 300 });
+  await assert.rejects(gui.act({ action: 'right_click', window: 'Notepad' }, {}), (e) => e.code === 'GUI_USER_ACTIVE');
+  await assert.rejects(gui.focus({ window: 'Notepad' }, {}), (e) => e.code === 'GUI_USER_ACTIVE');
+});
+
+test('gui.read_table: cần node của bảng, node cũ bị từ chối, ứng dụng bị chặn không đọc được (10/11/2026)', async () => {
+  const host = fakeHost({ observe: { snapshot: 4, window: NOTEPAD, nodes: [], tree_quality: 'good' }, read_table: { rows: ['a'], complete: true } });
+  const gui = createGuiController({ host, notify: () => {} });
+  await assert.rejects(gui.readTable({}, {}), (e) => e.code === 'INVALID_ARGS');
+  await assert.rejects(gui.readTable({ node_id: '9.1' }, {}), (e) => e.code === 'GUI_STALE_NODE');
+  await gui.observe({}, {});
+  assert.deepEqual((await gui.readTable({ node_id: '4.1', max_rows: 9999 }, {})).rows, ['a']);
+  assert.equal(host.calls.at(-1).args.max_rows, 2000);
+});
+
+test('host C#: thử chạy nền trước chuột thật; chỉ gửi thông điệp cho ứng dụng truyền thống; bảng đã cuộn vẫn thấy dòng đang hiện (10/11/2026)', async () => {
+  const { WINDOWS_HOST_CSHARP: cs } = await import('../bin/lib/remote/gui/windowsHostSource.mjs');
+  assert.ok(cs.indexOf('TryBackgroundClick(el, window, a, 1)') < cs.indexOf('MouseAt(el, window, a, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 1)'));
+  assert.ok(cs.indexOf('TryBackgroundScroll(el, window, a, dir, amount)') < cs.indexOf('Send(new[] { inp })'));
+  assert.match(cs, /throw new GuiError\("GUI_PERSON_PRESENT"/);
+  assert.match(cs, /if \(backgroundOnly\) throw new GuiError\("GUI_NEEDS_REAL_INPUT"/);
+  assert.match(cs, /c\.StartsWith\("WindowsForms10\."\)/);
+  assert.doesNotMatch(cs, /ClassicClasses = [^;]*Chrome_/);
+  assert.match(cs, /if \(passedView\) break;/);
+  assert.match(cs, /AddVisibleRows\(list, snap, nodes, wr, sw, budgetMs\)/);
+  assert.match(cs, /GiveBackRealInput\(action, window, fgBefore, haveCursor, cursorBefore\)/);
+  assert.match(cs, /stale >= READ_TABLE_STALL_NOTCHES/);
+  assert.match(cs, /FindMenuCommand\(Native\.GetMenu\(window\), chord, 0, out id\)/);
 });

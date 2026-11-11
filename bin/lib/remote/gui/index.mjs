@@ -51,6 +51,12 @@ const FIND_MAX = 60;
 const SEMANTIC_CHOICES = 5;
 /** Báo người dùng "AI đang điều khiển" một lần mỗi quãng này (lần thao tác ghi đầu tiên). */
 const NOTIFY_EVERY_MS = 5 * 60_000;
+/** Không hỏi người dùng (10/11/2026, user: "xin quyền gì lắt nhắt thế"): cần chuột / phím thật thì chờ họ ngừng tay chừng này rồi mượn thật nhanh. */
+export const REAL_INPUT_IDLE_MS = 2500;
+/** Họ bận liên tục quá chừng này thì thôi, báo Planner để nói trong khung chat. */
+export const REAL_INPUT_WAIT_MS = 30_000;
+const REAL_INPUT_POLL_MS = 400;
+const GUI_PERSON_PRESENT = 'GUI_PERSON_PRESENT';
 
 const str = (description) => ({ type: 'string', description });
 const num = (description) => ({ type: 'number', description });
@@ -205,13 +211,31 @@ function runPowerShellJson(script, signal) {
  * Bộ điều khiển GUI của máy. `env.fullAccess` quyết định có cho điều khiển terminal không. `host` truyền vào được (test dùng host giả).
  */
 export function createGuiController({
-  fullAccess = false, host = createWindowsHost(), notify = showOSNotification, say = () => {}, background = true, defaultWindow = () => null, fetchApps = (signal) => runPowerShellJson('Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress', signal),
+  fullAccess = false, host = createWindowsHost(), notify = showOSNotification, say = () => {}, background = true, defaultWindow = () => null, realInputIdleMs = REAL_INPUT_IDLE_MS, realInputWaitMs = REAL_INPUT_WAIT_MS, fetchApps = (signal) => runPowerShellJson('Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress', signal),
 } = {}) {
   let appsCache = null;
   let appsInflight = null;
   let lastNotifyAt = 0;
   /** Cửa sổ của từng lần observe — để kiểm ứng dụng bị chặn ở thao tác theo node_id. */
   const snapshotWindows = new Map();
+
+  /**
+   * Thao tác chạy dưới nền thì đi thẳng. Host chỉ báo GUI_PERSON_PRESENT ngay trước lần đầu đụng chuột / phím thật, lúc chưa làm gì, nên thử lại
+   * là an toàn: chờ người dùng ngừng tay. Họ bận suốt → GUI_USER_ACTIVE, không có hộp hỏi nào.
+   */
+  async function whenPersonPauses(ctx, run) {
+    const deadline = Date.now() + Math.min(realInputWaitMs, (ctx?.timeoutMs || Infinity) / 2);
+    for (;;) {
+      try {
+        return await run(realInputIdleMs);
+      } catch (e) {
+        if (e?.code !== GUI_PERSON_PRESENT) throw e;
+        if (ctx?.signal?.aborted) throw ctx.signal.reason;
+        if (Date.now() + REAL_INPUT_POLL_MS >= deadline) throw new DeviceToolError(DeviceErrorCode.GUI_USER_ACTIVE, 'The person at this computer kept using it and this step needs the real mouse/keyboard — nothing was done. Tell them in the chat so they can do this step themselves or pause for a few seconds');
+        await new Promise((r) => setTimeout(r, REAL_INPUT_POLL_MS));
+      }
+    }
+  }
 
   const announce = (windowInfo) => {
     const now = Date.now();
@@ -351,6 +375,8 @@ export function createGuiController({
       ...(verified === undefined ? {} : { verified }),
       ...(result.screen_point ? { screen_point: result.screen_point } : {}),
       ...(result.app_busy ? { app_busy: true } : {}),
+      method: result.method,
+      window_class: result.window_class,
       effect: result.window_title_changed || result.target || result.focused_element || command,
     };
   }
@@ -367,8 +393,9 @@ export function createGuiController({
   }
 
   async function focus(args, ctx) {
-    assertWindowAllowed(await windowInfoOf(args, ctx), { fullAccess });
-    return host.call('focus', target(args), ctx);
+    const windowInfo = await windowInfoOf(args, ctx);
+    assertWindowAllowed(windowInfo, { fullAccess });
+    return whenPersonPauses(ctx, (grace) => host.call('focus', { ...target(args), check_user_input: true, user_input_grace_ms: grace }, ctx));
   }
 
   async function act(args, ctx) {
@@ -381,12 +408,23 @@ export function createGuiController({
     if (snap && !windowInfo) throw new DeviceToolError(DeviceErrorCode.GUI_STALE_NODE, `Node ${args.node_id} is from an old observation — observe again`);
     assertWindowAllowed(windowInfo, { fullAccess });
     announce(windowInfo);
-    return host.call('act', {
+    return whenPersonPauses(ctx, (grace) => host.call('act', {
       action, node_id: args.node_id, ...(args.node_id ? {} : target(args)), method: args.method, text: args.text, keys: args.keys,
       option: args.option, state: args.state, direction: args.direction, amount: args.amount, point: args.point, to: args.to,
       image_scale: args.image_scale, settle_ms: args.settle_ms,
-      check_user_input: true, user_input_grace_ms: Number(args.user_input_grace_ms) || 1500,
-    }, ctx);
+      // Planner chỉ được xin chờ lâu hơn, không được rút ngắn: rút ngắn là tự cho phép lấy chuột của người đang dùng máy.
+      check_user_input: true, user_input_grace_ms: Math.max(grace, Number(args.user_input_grace_ms) || 0),
+    }, ctx));
+  }
+
+  /** Đọc cả bảng dưới nền: host tự cuộn, gộp các dòng rồi cuộn về chỗ cũ. */
+  async function readTable(args, ctx) {
+    const snap = args.node_id ? String(args.node_id).split('.')[0] : null;
+    if (!snap || String(args.node_id).includes('.t')) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give node_id of the table (from gui.observe or gui.find)');
+    const windowInfo = snapshotWindows.get(snap);
+    if (!windowInfo) throw new DeviceToolError(DeviceErrorCode.GUI_STALE_NODE, `Node ${args.node_id} is from an old observation — observe again`);
+    assertWindowAllowed(windowInfo, { fullAccess });
+    return host.call('read_table', { node_id: args.node_id, max_rows: Math.max(1, Math.min(Number(args.max_rows) || 300, 2000)) }, ctx);
   }
 
   async function listApps(signal) {
@@ -467,7 +505,7 @@ export function createGuiController({
     return { opened: app.name, window: win, hint: win ? undefined : 'App started but no new window yet — call gui.windows in a moment' };
   }
 
-  return { windows, observe, find, waitFor, focus, act, semanticDo, openApp, prewarm: () => listApps(), close: () => host.close() };
+  return { windows, observe, find, waitFor, focus, act, readTable, semanticDo, openApp, prewarm: () => listApps(), close: () => host.close() };
 }
 
 /** Công cụ GUI cho danh mục của Planner. */
@@ -488,7 +526,7 @@ export function buildGuiTools(gui) {
       description: 'List open desktop windows: title, app process, handle, position, which is focused/minimized. blocked = the AI may not control it.',
       input_schema: schema({ include_dialogs: bool('also list owned dialogs') }) },
     { name: 'gui.observe', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.observe(a, c),
-      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window. truncated_by = why the list is partial: time / long_list (a very long table or list; scroll it, or use gui.find) / node_limit. content_unavailable = a Store app shows only its frame because it is still starting or suspended — gui.focus it, then observe again. image_error = no screenshot this time (the app can only be captured from the screen and the window is behind/covered — gui.focus it first if a screenshot is needed).',
+      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window. truncated_by = why the list is partial: time / long_list (a very long table or list; scroll it, or use gui.find) / node_limit. In a long table scrolled far down, the rows on screen come back with role "row", source "accessible" and an id like "4.t2" that gui.act can click. content_unavailable = a Store app shows only its frame because it is still starting or suspended — gui.focus it, then observe again. image_error = no screenshot this time (the app can only be captured from the screen and the window is behind/covered — gui.focus it first if a screenshot is needed).',
       input_schema: schema({
         window: target.window, include_image: bool('attach a screenshot even when the tree is good'), max_nodes: num('default 300'),
         ocr: bool('read the text on the window even when the tree is good (default: only when poor)'),
@@ -506,17 +544,21 @@ export function buildGuiTools(gui) {
         automation_id: str('element AutomationId (exact)'), role: str('element role, e.g. button, menuitem, edit, window'),
         title_contains: str('wait on a window title instead of an element'), timeout_ms: num('default 10000, max 60000'),
       }) },
+    { name: 'gui.read_table', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.readTable(a, c),
+      description: 'Read a whole long table as data, in the background: scrolls it, joins the rows, scrolls back. Prefer this to observing and scrolling screen by screen. node_id = the table, from gui.observe or gui.find. Returns columns, rows (each one line of cells), complete, reason when incomplete, gaps = rows may be missing between pages.',
+      input_schema: schema({ node_id: target.node_id, max_rows: num('default 300, at most 2000') }, ['node_id']) },
     { name: 'gui.focus', group: ToolGroup.GUI, handler: (a, c) => gui.focus(a, c),
-      description: 'Bring a window to the front (restores it if minimized).',
+      description: 'Bring a window to the front (restores it if minimized). This takes the screen from the person using the computer: most actions work on windows behind others, so only use it when an action really needs the window in front.',
       input_schema: schema({ window: target.window }, ['window']) },
     { name: 'gui.act', group: ToolGroup.GUI, handler: (a, c) => gui.act(a, c),
-      description: 'Do one action on an element (node_id) or at a point of the last screenshot: click, double_click, right_click, set_value (replace a field\'s text), type (keystrokes into the focused element), key (shortcut like "ctrl+s", "alt+f4", "enter"), scroll, select (option of a list/combo), toggle, expand, collapse, drag. Uses accessibility actions first (works even when the window is behind), real mouse/keyboard otherwise. Returns evidence: the element\'s new value/state, window title change, focused element; app_busy = the action ran but the app is still working, so no evidence yet — gui.wait_for or observe later. OCR text nodes ("4.t2") take click / double_click / right_click, or set_value / type (clicks there, then types). Without node_id give window. Stops with GUI_USER_ACTIVE if the person is using the mouse/keyboard, and with GUI_FOCUS_LOST (nothing clicked / the rest not typed) if real mouse/keyboard input could not reach the window — it could not come to the front, or another window covers the point.',
+      description: 'Runs behind the person\'s windows whenever the app allows it. Result method: invoke/value/select/toggle/scroll/background/posted = done without the real mouse; accessible = the control selected the item but no click event fired, so check the app reacted (observe) before relying on it. The real mouse/keyboard is only borrowed when the person pauses for a moment, then given back; GUI_USER_ACTIVE = they kept using the computer, nothing was done, so tell them in the chat. Do one action on an element (node_id) or at a point of the last screenshot: click, double_click, right_click, set_value (replace a field\'s text), type (keystrokes into the focused element), key (shortcut like "ctrl+s", "alt+f4", "enter"), scroll, select (option of a list/combo), toggle, expand, collapse, drag. Uses accessibility actions first (works even when the window is behind), real mouse/keyboard otherwise. Returns evidence: the element\'s new value/state, window title change, focused element; app_busy = the action ran but the app is still working, so no evidence yet — gui.wait_for or observe later. OCR text nodes ("4.t2") take click / double_click / right_click, or set_value / type (clicks there, then types). Without node_id give window. Stops with GUI_USER_ACTIVE if the person is using the mouse/keyboard, and with GUI_FOCUS_LOST (nothing clicked / the rest not typed) if real mouse/keyboard input could not reach the window — it could not come to the front, or another window covers the point.',
+      // method trong kết quả: posted = gửi thẳng vào cửa sổ; accessible = control tự chọn mục, không phát sự kiện bấm.
       input_schema: schema({
         action: str(Object.values(GuiAction).join(' | ')), ...target, text: str('text for set_value / type'), keys: str('for key: e.g. "ctrl+s", several separated by spaces'),
         option: str('for select: the option name'), state: str('for toggle: on | off'), direction: str('for scroll: up | down | left | right'), amount: num('scroll steps, default 3'),
         point: { type: 'object', description: '{x,y} on the last screenshot when no node_id', properties: { x: num('x'), y: num('y') } },
         to: { type: 'object', description: 'drag destination {x,y} on the last screenshot', properties: { x: num('x'), y: num('y') } },
-        image_scale: num('scale of the screenshot the point was taken from'), method: str('auto | pattern | mouse (default auto)'),
+        image_scale: num('scale of the screenshot the point was taken from'), method: str('auto | pattern | mouse | background (default auto; background = never touch the real mouse/keyboard, fail with GUI_NEEDS_REAL_INPUT instead)'),
       }, ['action']) },
     { name: 'gui.open_app', group: ToolGroup.GUI, handler: (a, c, e) => gui.openApp(a, c, e),
       description: 'Open an installed app by name (from the Start menu list), or open a document file with its default app. Returns the new window. Does not run programs or scripts by path.',

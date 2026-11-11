@@ -1129,6 +1129,11 @@ export async function startRemoteClient(options = {}) {
     hold(0, HoldPhase.STARTED);
   };
 
+  const guiActivity = (call, outcome) => {
+    const { method, action, window_class: windowClass } = outcome.result || {};
+    return call.tool.startsWith('gui.') && method ? { method, action, window_class: windowClass } : {};
+  };
+
   /** Không bao giờ ném / để lọt promise bị từ chối: lỗi bất ngờ vẫn trả kết quả lỗi cho BE. */
   const handleCall = async (call) => {
     const streamer = createStreamer(socket, call.call_id);
@@ -1154,7 +1159,8 @@ export async function startRemoteClient(options = {}) {
       const payload = { call_id: call.call_id, ...sent };
       ledger.finish(call.call_id, payload, { persistNow: !socket.connected });
       sendResult(payload);
-      logActivity({ type: 'tool_call', tool: call.tool, id: call.call_id, success: outcome.ok, error: outcome.error, ms: outcome.duration_ms });
+      // GUI: thao tác đi đường nào (chạy nền hay chuột / phím thật) và trên loại cửa sổ nào — để biết còn bao nhiêu việc phải mượn chuột.
+      logActivity({ type: 'tool_call', tool: call.tool, id: call.call_id, success: outcome.ok, error: outcome.error, ms: outcome.duration_ms, ...guiActivity(call, outcome) });
       if (!tool?.internal) {
         const failed = host ? outcome.error_code : outcome.error;
         say(outcome.ok ? chalk.green(`  ✓ ${callLabel(call)} (${outcome.duration_ms} ms)`) : chalk.red(`  ✗ ${callLabel(call)}: ${failed}`));
