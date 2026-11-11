@@ -22,7 +22,7 @@ const MAX_DEVICES = 20;
 const KEY_ACCOUNT = 'cast-trusted-devices';
 const PROOF_PREFIX = 'aivin-cast-device-proof';
 const MAX_KEY_CHARS = 300;
-const MAX_NAME_CHARS = 40;
+const MAX_NAME_CHARS = 60;
 const PROOF_TIMEOUT_MS = 8000;
 
 /** Khoá công khai P-256 (SPKI, base64) hợp lệ → đối tượng khoá; khác đi → `null`. */
@@ -37,14 +37,15 @@ function parseDeviceKey(deviceKey) {
 }
 
 /** Tên do trình duyệt tự khai, chỉ để hiện: bỏ ký tự lạ để khay đọc tệp không vỡ. */
-const safeName = (name) => String(name ?? '').replace(/[^\p{L}\p{N} ._-]/gu, '').trim().slice(0, MAX_NAME_CHARS) || 'Thiết bị';
+const safeName = (name) => String(name ?? '').replace(/[^\p{L}\p{N} ._·-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, MAX_NAME_CHARS) || 'Thiết bị';
 
 const VIEWER_CODE_CHARS = 6;
 /** Chừa chỗ cho " - <mã>" để cắt theo `MAX_NAME_CHARS` khi lưu không làm mất mã. */
 const VIEWER_NAME_CHARS = MAX_NAME_CHARS - VIEWER_CODE_CHARS - 3;
 
 /**
- * Tên hiện cho chủ máy: FE chỉ khai loại máy ("Android"), hai điện thoại trông y hệt nhau nên ghép thêm mã suy ra từ khoá của thiết bị.
+ * Tên hiện cho chủ máy: FE khai loại máy + model (chỉ Android có) + trình duyệt, vẫn có thể trùng giữa hai máy nên ghép thêm mã suy ra từ khoá
+ * của thiết bị, ví dụ "Android SM-S918B · Chrome - 7F3A9C".
  * Trình duyệt không có khoá (ẩn danh, chặn IndexedDB) thì lấy `viewerKey`: vẫn phân biệt được nhưng đổi mạng là đổi mã.
  * Chỉ để hiện: danh tính thật vẫn là khoá, và loại máy gốc vẫn dùng riêng cho `isTouchViewerDevice` (so khớp đúng chuỗi).
  */

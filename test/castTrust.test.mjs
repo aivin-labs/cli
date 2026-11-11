@@ -39,10 +39,15 @@ test('tên hiện cho chủ máy: không có khoá thì dựa vào mã người 
   assert.equal(castViewerLabel(undefined, '', undefined), undefined);
 });
 
+test('tên đầy đủ từ web (model + trình duyệt) giữ nguyên dấu phân cách, vẫn kèm mã', () => {
+  assert.match(castViewerLabel('Android SM-S918B · Samsung Internet', 'key-a'), /^Android SM-S918B · Samsung Internet - [0-9A-F]{6}$/);
+  assert.match(castViewerLabel('iPhone · Safari', 'key-a'), /^iPhone · Safari - [0-9A-F]{6}$/);
+});
+
 test('tên lưu danh sách tin cậy vẫn còn đủ mã dù tên khai rất dài hoặc có ký tự lạ', () => {
   const { trust } = store();
   const label = castViewerLabel(`${'x'.repeat(200)}"<b>`, 'key-a');
-  assert.ok(label.length <= 40);
+  assert.ok(label.length <= 60);
   assert.match(label, / - [0-9A-F]{6}$/);
   return browserDevice().then(({ publicKey }) => {
     trust.add({ key: publicKey, name: label });

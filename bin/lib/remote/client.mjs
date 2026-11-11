@@ -1295,7 +1295,8 @@ export async function startRemoteClient(options = {}) {
     const viewerId = payload?.viewer_id;
     const viewerType = payload?.viewer_device || payload?.viewerDevice || payload?.viewer_platform || payload?.viewerPlatform;
     const deviceKey = typeof payload?.device_key === 'string' ? payload.device_key : '';
-    const viewerDevice = castViewerLabel(viewerType, deviceKey, payload?.viewer_key);
+    // `viewer_name` (loại máy + model + trình duyệt) chỉ để hiện; máy chủ đời cũ không gửi thì dùng loại máy.
+    const viewerDevice = castViewerLabel(payload?.viewer_name || viewerType, deviceKey, payload?.viewer_key);
     if (!sessionId || !viewerId) return;
     // Chủ máy đã tạm dừng điều khiển từ xa → từ chối cả xem màn hình.
     if (isRemotePaused()) {
