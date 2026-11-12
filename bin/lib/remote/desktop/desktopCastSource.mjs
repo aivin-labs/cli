@@ -913,6 +913,11 @@ namespace AivinDesktopCast {
     // nhịp khung (66 ms ở 15 khung/giây, 125 ms ở 8). Hai lần gửi vẫn cách nhau ít nhất INPUT_WAKE_MIN_GAP_MS (12/11/2026).
     static readonly AutoResetEvent inputWake = new AutoResetEvent(false);
     const int INPUT_WAKE_MIN_GAP_MS = 16;
+    // Đo bấm -> thấy hình đổi (12/11/2026): số thao tác (iseq) người xem gửi kèm, vừa thực thi xong thì ghi lại; khung đầu tiên có thay đổi
+    // sau đó mang iseq + iseq_ms (từ lúc thực thi tới lúc gửi khung: ứng dụng phản hồi + chụp) để người xem tính độ trễ.
+    static int inputEchoSeq = 0;
+    static long inputEchoAtMs = 0;
+    static readonly System.Diagnostics.Stopwatch echoClock = System.Diagnostics.Stopwatch.StartNew();
     static bool lastSecureDesktop = false;
     static long lastScreensMs = -SCREENS_REFRESH_MS;
 
@@ -1016,6 +1021,7 @@ namespace AivinDesktopCast {
               lastJpegThumb = CastScreen.Thumb(source.Frame);
             }
             long sendStartMs = clock.ElapsedMilliseconds;
+            frameEchoSeq = sendChange ? Interlocked.Exchange(ref inputEchoSeq, 0) : 0;
             SendFrame(source.Frame, cursorInFrame, withJpeg, nowMs, hostStats);
             hostStats.AddLoad(clock.ElapsedMilliseconds - sendStartMs);
           }
@@ -1040,6 +1046,8 @@ namespace AivinDesktopCast {
       var stoppedMsg = Out.Msg("stopped");
       Out.Send(stoppedMsg);
     }
+
+    static int frameEchoSeq = 0;
 
     static void SendFrame(Bitmap frame, bool cursorInFrame, bool jpegMode, long nowMs, HostStats hostStats) {
       Bitmap encodeBmp = frame;
@@ -1073,6 +1081,11 @@ namespace AivinDesktopCast {
       }
       frameMsg["ts"] = nowMs;
       frameMsg["stats"] = hostStats.Snapshot(nowMs);
+      if (frameEchoSeq > 0) {
+        frameMsg["iseq"] = frameEchoSeq;
+        frameMsg["iseq_ms"] = echoClock.ElapsedMilliseconds - Interlocked.Read(ref inputEchoAtMs);
+        frameEchoSeq = 0;
+      }
       if (lastSecureDesktop) frameMsg["secureDesktop"] = true;
       Out.Send(frameMsg);
     }
@@ -1140,6 +1153,15 @@ namespace AivinDesktopCast {
           if (op == "input") {
             HandleInput(cmd);
             string act = cmd.ContainsKey("action") ? Convert.ToString(cmd["action"]) : "";
+            if (cmd.ContainsKey("iseq")) {
+              try {
+                int seq = Convert.ToInt32(cmd["iseq"]);
+                if (seq > 0) {
+                  Interlocked.Exchange(ref inputEchoAtMs, echoClock.ElapsedMilliseconds);
+                  Interlocked.Exchange(ref inputEchoSeq, seq);
+                }
+              } catch { }
+            }
             // Di chuột: con trỏ người xem tự vẽ, không cần khung ngay; đồng bộ clipboard không đổi màn hình.
             if (act != "move" && act != "clipboard") inputWake.Set();
           }

@@ -40,6 +40,33 @@ export function outgoingBitrateKbps(report) {
  * Ghi băng thông video vào SDP answer (bên gửi đọc từ đây): mặc định libwebrtc trần ~2,5 Mbps, cuộn trang chữ 1440x810 chỉ còn ~7,5 khung/giây
  * (đo 03/11/2026). `{ start_kbps, min_kbps, max_kbps }` do BE gửi (`config/device_agent.json`); thiếu thì giữ nguyên SDP.
  */
+/**
+ * Xếp codec hình trong offer theo `codecs` máy chủ gửi (vd `['AV1', 'VP8']`): người xem chọn codec đầu tiên trong danh sách mà nó giải mã được,
+ * không được thì rơi về codec sau (Safari đời cũ không có AV1 → VP8). Đo 12/11/2026 (Chromium, đường giới hạn): AV1 cần khoảng nửa băng
+ * thông VP8 ở cùng số khung/giây, đường 1 Mbps nét ở giây 3 thay vì 14; VP9 ở chế độ màn hình bị libwebrtc giới hạn 5 khung/giây nên không dùng.
+ * Codec không có trong offer thì bỏ qua; danh sách rỗng thì giữ nguyên.
+ */
+export function preferVideoCodecs(sdp, codecs) {
+  if (!sdp || !Array.isArray(codecs) || !codecs.length) return sdp;
+  const eol = sdp.includes('\r\n') ? '\r\n' : '\n';
+  const lines = sdp.split(/\r?\n/);
+  const wanted = [];
+  for (const name of codecs) {
+    if (typeof name !== 'string' || !/^[A-Za-z0-9]+$/.test(name)) continue;
+    for (const line of lines) {
+      const m = /^a=rtpmap:(\d+) ([^/]+)\//.exec(line);
+      if (m && m[2].toUpperCase() === name.toUpperCase() && !wanted.includes(m[1])) wanted.push(m[1]);
+    }
+  }
+  if (!wanted.length) return sdp;
+  return lines.map((line) => {
+    if (!line.startsWith('m=video ')) return line;
+    const parts = line.split(' ');
+    const rest = parts.slice(3);
+    return [...parts.slice(0, 3), ...wanted.filter((pt) => rest.includes(pt)), ...rest.filter((pt) => !wanted.includes(pt))].join(' ');
+  }).join(eol);
+}
+
 export function withVideoBitrate(sdp, bitrate) {
   const params = [['x-google-start-bitrate', bitrate?.start_kbps], ['x-google-min-bitrate', bitrate?.min_kbps], ['x-google-max-bitrate', bitrate?.max_kbps]]
     .filter(([, v]) => Number.isFinite(v) && v > 0)
@@ -112,12 +139,12 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     if (peer.retryTimer || peer.attempt >= RECONNECT_DELAYS_MS.length) return;
     peer.retryTimer = setTimeout(() => {
       if (peers.get(peer.viewerId) !== peer) return;
-      start({ sessionId: peer.sessionId, viewerId: peer.viewerId, iceServers: peer.iceServers, videoBitrate: peer.videoBitrate, audio: peer.audioEnabled, attempt: peer.attempt + 1 }).catch(() => false);
+      start({ sessionId: peer.sessionId, viewerId: peer.viewerId, iceServers: peer.iceServers, videoBitrate: peer.videoBitrate, videoCodecs: peer.videoCodecs, audio: peer.audioEnabled, attempt: peer.attempt + 1 }).catch(() => false);
     }, RECONNECT_DELAYS_MS[peer.attempt]);
     peer.retryTimer.unref?.();
   }
 
-  async function start({ sessionId, viewerId, iceServers = [], videoBitrate = null, audio = true, attempt = 0 }) {
+  async function start({ sessionId, viewerId, iceServers = [], videoBitrate = null, videoCodecs = null, audio = true, attempt = 0 }) {
     close(viewerId);
     const wrtc = await load();
     const RTCPeerConnection = wrtc?.RTCPeerConnection || wrtc?.default?.RTCPeerConnection;
@@ -141,7 +168,7 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
       pc, channel, inputChannel, fileChannel, pointerChannel, pointerSeq: 0,
       track, video: !!track,
       audioTrack, audio: !!audioTrack, audioEnabled: audio !== false,
-      sessionId, viewerId, iceServers, videoBitrate, attempt, retryTimer: null, bweTimer: null, open: false, dropped: 0,
+      sessionId, viewerId, iceServers, videoBitrate, videoCodecs, attempt, retryTimer: null, bweTimer: null, open: false, dropped: 0,
     };
     fileChannel.binaryType = 'arraybuffer';
     fileChannel.onmessage = ({ data }) => {
@@ -234,7 +261,8 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
         markConnected();
       }
     };
-    await pc.setLocalDescription(await pc.createOffer());
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription({ type: 'offer', sdp: preferVideoCodecs(offer.sdp, videoCodecs) });
     emitSignal({ session_id: sessionId, viewer_id: viewerId, type: 'offer', sdp: pc.localDescription?.sdp, ice_servers: iceServers });
     return true;
   }

@@ -259,6 +259,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
           stats: msg.stats,
           ...(msg.secureDesktop ? { secureDesktop: true } : {}),
           ...(msg.lead_in ? { lead_in: true } : {}),
+          ...(msg.iseq ? { iseq: msg.iseq, iseq_ms: msg.iseq_ms } : {}),
         });
       } else if (msg.t === 'meta') {
         onMeta?.({
@@ -275,6 +276,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
           ts: msg.ts,
           stats: msg.stats,
           ...(msg.secureDesktop ? { secureDesktop: true } : {}),
+          ...(msg.iseq ? { iseq: msg.iseq, iseq_ms: msg.iseq_ms } : {}),
         });
       } else if (msg.t === 'cursor') {
         onCursor?.({ x: msg.x, y: msg.y, visible: msg.visible, shape: msg.shape });

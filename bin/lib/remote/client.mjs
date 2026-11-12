@@ -1360,7 +1360,7 @@ export async function startRemoteClient(options = {}) {
     const leadIn = castLeadInConfig(payload?.lead_in);
     if (leadIn) desktopCast.config(leadIn);
     const webRtcStarted = payload?.transport === 'webrtc'
-      ? await desktopWebRtc.start({ sessionId, viewerId, iceServers: payload?.ice_servers || [], videoBitrate: payload?.video_bitrate || null, audio: payload?.audio !== false }).catch(() => false)
+      ? await desktopWebRtc.start({ sessionId, viewerId, iceServers: payload?.ice_servers || [], videoBitrate: payload?.video_bitrate || null, videoCodecs: Array.isArray(payload?.video_codecs) ? payload.video_codecs : null, audio: payload?.audio !== false }).catch(() => false)
       : false;
     // Phiên đã dừng / bị thay trong lúc dựng WebRTC (tới 30 s): không báo trạng thái cho phiên đã chết.
     if (desktopCast.sessionId() !== sessionId) return;

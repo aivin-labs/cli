@@ -426,3 +426,23 @@ test('bộ quay: thao tác (trừ di chuột / clipboard) đánh thức vòng qu
   assert.match(DESKTOP_CAST_CSHARP, /if \(leadInWidth > 0\) SendLeadIn\(encodeBmp, nowMs\);/);
   assert.match(DESKTOP_CAST_CSHARP, /leadInWidth = 0;\s+Bitmap leadBmp/);
 });
+
+test('preferVideoCodecs: xếp codec theo thứ tự máy chủ gửi, giữ codec khác phía sau, sai / thiếu thì giữ nguyên (12/11/2026)', async () => {
+  const { preferVideoCodecs } = await import('../bin/lib/remote/desktop/desktopWebRtc.mjs');
+  const sdp = ['v=0', 'm=video 9 UDP/TLS/RTP/SAVPF 96 97 98 45', 'a=rtpmap:96 VP8/90000', 'a=rtpmap:97 rtx/90000', 'a=rtpmap:98 VP9/90000', 'a=rtpmap:45 AV1/90000', ''].join('\r\n');
+  assert.equal(preferVideoCodecs(sdp, ['AV1', 'VP8']).split('\r\n')[1], 'm=video 9 UDP/TLS/RTP/SAVPF 45 96 97 98');
+  assert.equal(preferVideoCodecs(sdp, ['av1']).split('\r\n')[1], 'm=video 9 UDP/TLS/RTP/SAVPF 45 96 97 98');
+  assert.equal(preferVideoCodecs(sdp, []), sdp);
+  assert.equal(preferVideoCodecs(sdp, ['H264']), sdp);
+  assert.equal(preferVideoCodecs(sdp, ['A V1; x']), sdp);
+  assert.equal(preferVideoCodecs(sdp, null), sdp);
+});
+
+test('sanitizeCastInput: giữ iseq hợp lệ để đo bấm → thấy hình đổi, bỏ giá trị lạ (12/11/2026)', async () => {
+  const { sanitizeCastInput } = await import('../bin/lib/remote/desktop/castInput.mjs');
+  assert.equal(sanitizeCastInput({ action: 'click', x: 1, y: 2, iseq: 7 }).iseq, 7);
+  assert.equal(sanitizeCastInput({ action: 'click', x: 1, y: 2, iseq: -1 }).iseq, undefined);
+  assert.equal(sanitizeCastInput({ action: 'click', x: 1, y: 2, iseq: '7; rm' }).iseq, undefined);
+  const { DESKTOP_CAST_CSHARP } = await import('../bin/lib/remote/desktop/desktopCastSource.mjs');
+  assert.match(DESKTOP_CAST_CSHARP, /frameEchoSeq = sendChange \? Interlocked\.Exchange\(ref inputEchoSeq, 0\) : 0;/);
+});

@@ -62,6 +62,9 @@ export function sanitizeCastInput(raw, maxTypeChars = 2000) {
   if (typeof raw.key === 'string' && raw.key && raw.key.length <= MAX_KEY_CHARS) cmd.key = raw.key;
   const keys = shortStrings(raw.keys, 6);
   if (keys) cmd.keys = keys;
+  // Số thao tác để đo bấm -> thấy hình đổi (12/11/2026); máy chỉ chép lại vào khung sau, không dùng làm gì khác.
+  const iseq = Number(raw.iseq);
+  if (Number.isInteger(iseq) && iseq > 0 && iseq < 2 ** 31) cmd.iseq = iseq;
   const modifiers = shortStrings(raw.modifiers, 4);
   if (modifiers) cmd.modifiers = modifiers;
   if (action === 'paste_image') {
