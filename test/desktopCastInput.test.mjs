@@ -409,3 +409,20 @@ test('outgoingBitrateKbps: lấy ước lượng của cặp đường đang dù
   assert.equal(outgoingBitrateKbps(report({ type: 'candidate-pair', id: 'p1', nominated: true })), null);
   assert.equal(outgoingBitrateKbps(null), null);
 });
+
+test('castLeadInConfig: ảnh mở màn từ lead_in máy chủ gửi, sai / thiếu thì không có (12/11/2026)', async () => {
+  const { castLeadInConfig } = await import('../bin/lib/remote/desktop/desktopCast.mjs');
+  assert.deepEqual(castLeadInConfig({ max_width: 1920, quality: 80 }), { lead_in_width: 1920, lead_in_quality: 80 });
+  assert.deepEqual(castLeadInConfig({ max_width: 1600 }), { lead_in_width: 1600, lead_in_quality: 80 });
+  assert.equal(castLeadInConfig({ max_width: 320 }), null);
+  assert.equal(castLeadInConfig({ max_width: 1920, quality: 200 }), null);
+  assert.equal(castLeadInConfig(undefined), null);
+});
+
+test('bộ quay: thao tác (trừ di chuột / clipboard) đánh thức vòng quay, ảnh mở màn gửi một lần (12/11/2026)', async () => {
+  const { DESKTOP_CAST_CSHARP } = await import('../bin/lib/remote/desktop/desktopCastSource.mjs');
+  assert.match(DESKTOP_CAST_CSHARP, /if \(act != "move" && act != "clipboard"\) inputWake\.Set\(\);/);
+  assert.match(DESKTOP_CAST_CSHARP, /if \(inputWake\.WaitOne\(\(int\)sleepMs\)\)/);
+  assert.match(DESKTOP_CAST_CSHARP, /if \(leadInWidth > 0\) SendLeadIn\(encodeBmp, nowMs\);/);
+  assert.match(DESKTOP_CAST_CSHARP, /leadInWidth = 0;\s+Bitmap leadBmp/);
+});

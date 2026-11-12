@@ -45,7 +45,7 @@ import { createScheduleManager } from './schedule.mjs';
 import { remoteDebuggingPage } from './dailyBrowser.mjs';
 import { HOME_BASE, SHARED_DIR, createMultiUserHost, isMultiUserMode } from './multiUser.mjs';
 import { createAutoUpdater } from './autoUpdate.mjs';
-import { createDesktopCastManager } from './desktop/desktopCast.mjs';
+import { castLeadInConfig, createDesktopCastManager } from './desktop/desktopCast.mjs';
 import { createDesktopWebRtcWorker } from './desktop/webrtcWorker.mjs';
 import { CastInputRejection, createCastInputGate } from './desktop/castInput.mjs';
 import { createCastFileDrop, createDropBatches, FileDropReason, revealInExplorer } from './desktop/castFileDrop.mjs';
@@ -1356,6 +1356,9 @@ export async function startRemoteClient(options = {}) {
       // Màn hình đứng yên thì ảnh thưa: người mới vào cần một ảnh ngay.
       desktopCast.refresh();
     }
+    // Ảnh mở màn (BE chỉ gửi khi người xem mở lại trên mạng đã biết là tốt): một ảnh JPEG nét trong lúc video còn khởi động.
+    const leadIn = castLeadInConfig(payload?.lead_in);
+    if (leadIn) desktopCast.config(leadIn);
     const webRtcStarted = payload?.transport === 'webrtc'
       ? await desktopWebRtc.start({ sessionId, viewerId, iceServers: payload?.ice_servers || [], videoBitrate: payload?.video_bitrate || null, audio: payload?.audio !== false }).catch(() => false)
       : false;

@@ -285,6 +285,33 @@ test('desktop cast: tag của phiên đi vào tham số tiến trình quay (chu�
   assert.equal('input_tag' in spawned[1], false);
 });
 
+test('desktop cast: tiến trình quay chết lúc con trỏ trên máy đang ẩn thì CLI trả lại bộ con trỏ', { skip: process.platform !== 'win32' }, async () => {
+  const { RESTORE_SYSTEM_CURSORS_PS } = await import('../bin/lib/remote/desktop/desktopCast.mjs');
+  const run = async (hiddenStates) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-cast-cursor-'));
+    const calls = [];
+    let host;
+    const spawnImpl = (cmd, args, opts) => {
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stdin = new PassThrough();
+      child.kill = () => {};
+      calls.push(args.join(' '));
+      if (opts?.env?.AIVIN_CAST_ARGS) host = child;
+      return child;
+    };
+    const cast = createDesktopCastManager({ dir, spawnImpl });
+    cast.start({ sessionId: 's' });
+    for (const hidden of hiddenStates) host.stdout.write(JSON.stringify({ t: 'cursor_hidden', hidden }) + '\n');
+    await new Promise((r) => setTimeout(r, 20));
+    host.emit('close');
+    return calls.filter((c) => c.includes(RESTORE_SYSTEM_CURSORS_PS)).length;
+  };
+  assert.equal(await run([true]), 1, 'đang ẩn mà tiến trình chết: trả con trỏ');
+  assert.equal(await run([true, false]), 0, 'tiến trình đã tự hiện lại: không chạy thêm');
+  assert.equal(await run([]), 0);
+});
+
 // ── luồng kết thúc phiên xem màn hình ────────────────────────────────────────────────────────────
 
 const { CONSENT_RESUME_MS } = await import('../bin/lib/remote/desktop/castConsent.mjs');

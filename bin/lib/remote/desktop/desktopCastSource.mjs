@@ -39,6 +39,12 @@ namespace AivinDesktopCast {
     [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
+    [DllImport("user32.dll")] public static extern IntPtr LoadCursor(IntPtr hInstance, IntPtr lpCursorName);
+    [DllImport("user32.dll")] public static extern IntPtr CopyIcon(IntPtr hIcon);
+    [DllImport("user32.dll")] public static extern IntPtr CreateCursor(IntPtr hInst, int xHotSpot, int yHotSpot, int nWidth, int nHeight, byte[] pvANDPlane, byte[] pvXORPlane);
+    [DllImport("user32.dll")] public static extern bool DestroyCursor(IntPtr hCursor);
+    [DllImport("user32.dll")] public static extern bool SetSystemCursor(IntPtr hcur, uint id);
+    [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
     [DllImport("user32.dll", EntryPoint = "mouse_event")] static extern void mouse_event_native(uint dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
     [DllImport("user32.dll", EntryPoint = "keybd_event")] static extern void keybd_event_native(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
@@ -598,13 +604,14 @@ namespace AivinDesktopCast {
           Native.CURSORINFO pci;
           pci.cbSize = Marshal.SizeOf(typeof(Native.CURSORINFO));
           if (Native.GetCursorInfo(out pci) && (pci.flags & Native.CURSOR_SHOWING) != 0) {
-            var hot = CursorTracker.Hotspot(pci.hCursor);
+            IntPtr shape = SystemCursorHider.ShapeOf(pci.hCursor);
+            var hot = CursorTracker.Hotspot(shape);
             int cursorX = pci.ptScreenPos.x - hot.X - r.Left;
             int cursorY = pci.ptScreenPos.y - hot.Y - r.Top;
             if (cursorX >= -32 && cursorX < r.Width && cursorY >= -32 && cursorY < r.Height) {
               IntPtr hdc = g.GetHdc();
               try {
-                Native.DrawIcon(hdc, cursorX, cursorY, pci.hCursor);
+                Native.DrawIcon(hdc, cursorX, cursorY, shape);
               } finally {
                 g.ReleaseHdc(hdc);
               }
@@ -750,21 +757,132 @@ namespace AivinDesktopCast {
   public static class LocalPointerGuard {
     public const int TOLERANCE_PX = 4;
     public const int HOLD_MS = 1500;
+    static readonly object gate = new object();
+    static readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
     static bool placed;
     static int lastX, lastY;
     static long localUntil = -1;
 
-    public static void Reset() { placed = false; localUntil = -1; }
+    /** Đồng hồ chung của luồng đọc lệnh và luồng canh con trỏ ẩn. */
+    public static long Now() { return clock.ElapsedMilliseconds; }
+
+    public static void Reset() { lock (gate) { placed = false; localUntil = -1; } }
 
     /** Gọi ngay sau khi phiên tự đặt con trỏ, với vị trí đọc lại (Windows có thể kẹp vào mép màn hình). */
-    public static void Placed(int x, int y) { placed = true; lastX = x; lastY = y; }
+    public static void Placed(int x, int y) { lock (gate) { placed = true; lastX = x; lastY = y; } }
 
     /** Đúng khi người ở máy vừa dùng chuột (x, y: vị trí hiện tại; nowMs: đồng hồ tăng dần). */
     public static bool LocalActive(int x, int y, long nowMs) {
-      if (placed && (Math.Abs(x - lastX) > TOLERANCE_PX || Math.Abs(y - lastY) > TOLERANCE_PX)) localUntil = nowMs + HOLD_MS;
-      lastX = x;
-      lastY = y;
-      return localUntil >= 0 && nowMs < localUntil;
+      lock (gate) {
+        if (placed && (Math.Abs(x - lastX) > TOLERANCE_PX || Math.Abs(y - lastY) > TOLERANCE_PX)) localUntil = nowMs + HOLD_MS;
+        lastX = x;
+        lastY = y;
+        return localUntil >= 0 && nowMs < localUntil;
+      }
+    }
+  }
+
+  /**
+   * Ẩn con trỏ trên màn hình máy trong lúc người xem từ xa đang điều khiển chuột (12/11/2026: chủ máy thấy con trỏ nhảy theo người xem,
+   * khó chịu). Windows không có lệnh ẩn con trỏ toàn máy: thay các con trỏ chuẩn bằng con trỏ trong suốt (SetSystemCursor), trả lại bằng
+   * SPI_SETCURSORS (nạp lại bộ con trỏ người dùng đang chọn). Hiện lại khi người ở máy động vào chuột, khi người xem thôi thao tác chuột
+   * IDLE_SHOW_MS, khi phiên dừng hay tiến trình thoát; đầu mỗi phiên cũng trả lại một lần phòng phiên trước chết giữa chừng (CLI cũng tự trả
+   * khi tiến trình này chết). Người xem vẫn thấy hình con trỏ thật nhờ bản sao chụp trước khi ẩn (ShapeOf). Con trỏ riêng của ứng dụng
+   * (không thuộc bộ chuẩn) không ẩn được.
+   */
+  public static class SystemCursorHider {
+    public const int IDLE_SHOW_MS = 3000;
+    const int POLL_MS = 50;
+    const uint SPI_SETCURSORS = 0x0057;
+    static readonly uint[] Ids = { 32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650, 32651, 32671, 32672 };
+    static readonly object gate = new object();
+    static readonly Dictionary<IntPtr, IntPtr> originals = new Dictionary<IntPtr, IntPtr>();
+    static volatile bool hidden;
+    static long lastRemoteMs;
+    static Thread watcher;
+
+    public static bool Hidden { get { return hidden; } }
+
+    public static void Init() {
+      Restore();
+      AppDomain.CurrentDomain.ProcessExit += delegate { Show(); };
+    }
+
+    /** Người xem vừa thao tác chuột (đã qua LocalPointerGuard): ẩn con trỏ trên máy nếu chưa ẩn. */
+    public static void RemoteInput() {
+      lock (gate) {
+        lastRemoteMs = LocalPointerGuard.Now();
+        if (hidden) return;
+        for (int i = 0; i < Ids.Length; i++) {
+          IntPtr sys = Native.LoadCursor(IntPtr.Zero, new IntPtr((int)Ids[i]));
+          if (sys == IntPtr.Zero) continue;
+          if (!originals.ContainsKey(sys)) {
+            IntPtr copy = Native.CopyIcon(sys);
+            if (copy != IntPtr.Zero) originals[sys] = copy;
+          }
+          IntPtr blank = Blank();
+          if (blank != IntPtr.Zero && !Native.SetSystemCursor(blank, Ids[i])) Native.DestroyCursor(blank);
+        }
+        hidden = true;
+        Notify(true);
+        if (watcher == null) {
+          watcher = new Thread(Watch);
+          watcher.IsBackground = true;
+          watcher.Start();
+        }
+      }
+    }
+
+    public static void Show() {
+      lock (gate) {
+        if (!hidden) return;
+        hidden = false;
+        Restore();
+        Notify(false);
+      }
+    }
+
+    /** Hình thật của con trỏ để gửi / vẽ cho người xem trong lúc con trỏ trên máy đang bị ẩn. */
+    public static IntPtr ShapeOf(IntPtr handle) {
+      IntPtr copy;
+      lock (gate) {
+        if (hidden && originals.TryGetValue(handle, out copy)) return copy;
+      }
+      return handle;
+    }
+
+    static void Restore() {
+      try { Native.SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0); } catch { }
+    }
+
+    static IntPtr Blank() {
+      var and = new byte[32 * 32 / 8];
+      for (int i = 0; i < and.Length; i++) and[i] = 0xFF;
+      return Native.CreateCursor(IntPtr.Zero, 0, 0, 32, 32, and, new byte[32 * 32 / 8]);
+    }
+
+    static void Watch() {
+      while (true) {
+        Thread.Sleep(POLL_MS);
+        if (!hidden) continue;
+        try {
+          Native.POINT p;
+          bool local = Native.GetCursorPos(out p) && LocalPointerGuard.LocalActive(p.x, p.y, LocalPointerGuard.Now());
+          long idle;
+          lock (gate) idle = LocalPointerGuard.Now() - lastRemoteMs;
+          if (local || idle > IDLE_SHOW_MS) Show();
+        } catch {
+        }
+      }
+    }
+
+    static void Notify(bool value) {
+      try {
+        var msg = Out.Msg("cursor_hidden");
+        msg["hidden"] = value;
+        Out.Send(msg);
+      } catch {
+      }
     }
   }
 
@@ -787,11 +905,20 @@ namespace AivinDesktopCast {
     static volatile int targetMaxFps = 15;
     static volatile int targetMaxWidth = 1366;
     static volatile int targetQuality = 65;
+    // Ảnh mở màn (12/11/2026): một ảnh JPEG nét lúc mở phiên trên mạng đã biết là tốt, người xem giữ trên khung tới khi video đủ nét.
+    // 0 = không có; gửi xong một lần thì về 0.
+    static volatile int leadInWidth = 0;
+    static volatile int leadInQuality = 80;
+    // Thao tác vừa thực thi (bấm, phím, cuộn...) đánh thức vòng quay đang ngủ giữa hai khung: chụp ngay phản hồi của máy thay vì chờ hết
+    // nhịp khung (66 ms ở 15 khung/giây, 125 ms ở 8). Hai lần gửi vẫn cách nhau ít nhất INPUT_WAKE_MIN_GAP_MS (12/11/2026).
+    static readonly AutoResetEvent inputWake = new AutoResetEvent(false);
+    const int INPUT_WAKE_MIN_GAP_MS = 16;
     static bool lastSecureDesktop = false;
     static long lastScreensMs = -SCREENS_REFRESH_MS;
 
     public static void Run(string argsJson) {
       Native.UsePerMonitorDpi();
+      SystemCursorHider.Init();
       Native.timeBeginPeriod(1);
       var a = Out.Parse(argsJson);
       long inputTag;
@@ -899,8 +1026,12 @@ namespace AivinDesktopCast {
         }
 
         long sleepMs = targetFrameInterval - (clock.ElapsedMilliseconds - frameStartMs);
-        if (sleepMs > 0) Thread.Sleep((int)sleepMs);
-        else if (!source.UsingDxgi) Thread.Sleep(1);
+        if (sleepMs > 0) {
+          if (inputWake.WaitOne((int)sleepMs)) {
+            long gapMs = INPUT_WAKE_MIN_GAP_MS - (clock.ElapsedMilliseconds - lastSendMs);
+            if (gapMs > 0) Thread.Sleep((int)gapMs);
+          }
+        } else if (!source.UsingDxgi) Thread.Sleep(1);
       }
       source.Dispose();
       StopInput();
@@ -915,6 +1046,7 @@ namespace AivinDesktopCast {
       if (cursorInFrame) {
         encodeBmp = CastScreen.WithCursor(frame, currentBounds);
       }
+      if (leadInWidth > 0) SendLeadIn(encodeBmp, nowMs);
       if (encodeBmp.Width > targetMaxWidth) {
         encodeBmp = CastScreen.Scale(encodeBmp, targetMaxWidth);
       }
@@ -943,6 +1075,25 @@ namespace AivinDesktopCast {
       frameMsg["stats"] = hostStats.Snapshot(nowMs);
       if (lastSecureDesktop) frameMsg["secureDesktop"] = true;
       Out.Send(frameMsg);
+    }
+
+    /** Ảnh mở màn: ảnh đầy đủ ở độ rộng xin (không quá màn hình thật), chất lượng cao, gửi một lần, đánh dấu lead_in để người xem giữ lại. */
+    static void SendLeadIn(Bitmap src, long nowMs) {
+      int lw = leadInWidth;
+      leadInWidth = 0;
+      Bitmap leadBmp = src.Width > lw ? CastScreen.Scale(src, lw) : src;
+      var leadMsg = Out.Msg("frame");
+      leadMsg["image"] = Convert.ToBase64String(CastScreen.Jpeg(leadBmp, leadInQuality));
+      leadMsg["width"] = leadBmp.Width;
+      leadMsg["height"] = leadBmp.Height;
+      leadMsg["screenWidth"] = currentBounds.Width;
+      leadMsg["screenHeight"] = currentBounds.Height;
+      leadMsg["screenX"] = currentBounds.X;
+      leadMsg["screenY"] = currentBounds.Y;
+      leadMsg["monitor"] = currentMonitor;
+      leadMsg["ts"] = nowMs;
+      leadMsg["lead_in"] = true;
+      Out.Send(leadMsg);
     }
 
     /**
@@ -986,7 +1137,12 @@ namespace AivinDesktopCast {
             cmd = inputQueue.Dequeue();
           }
           string op = cmd.ContainsKey("op") ? Convert.ToString(cmd["op"]) : "";
-          if (op == "input") HandleInput(cmd);
+          if (op == "input") {
+            HandleInput(cmd);
+            string act = cmd.ContainsKey("action") ? Convert.ToString(cmd["action"]) : "";
+            // Di chuột: con trỏ người xem tự vẽ, không cần khung ngay; đồng bộ clipboard không đổi màn hình.
+            if (act != "move" && act != "clipboard") inputWake.Set();
+          }
           else if (op == "config") HandleConfig(cmd);
           else if (op == "refresh") refreshRequested = true;
         }
@@ -995,6 +1151,7 @@ namespace AivinDesktopCast {
       } finally {
         // Dừng phiên hoặc daemon chết (stdin đóng) lúc người xem đang kéo: không để nút chuột / phím bổ trợ kẹt xuống trên máy.
         ReleaseHeldInput();
+        SystemCursorHider.Show();
       }
     }
 
@@ -1014,6 +1171,15 @@ namespace AivinDesktopCast {
             // Đổi độ rộng lúc màn hình đứng yên: phải có khung mới ngay, không chờ nhịp giữ.
             if (w != targetMaxWidth) refreshRequested = true;
             targetMaxWidth = w;
+          }
+        }
+        if (cmd.ContainsKey("lead_in_width")) {
+          int lw = Convert.ToInt32(cmd["lead_in_width"]);
+          int lq = cmd.ContainsKey("lead_in_quality") ? Convert.ToInt32(cmd["lead_in_quality"]) : 80;
+          if (lw >= 640 && lw <= 2560 && lq >= 10 && lq <= 95) {
+            leadInQuality = lq;
+            leadInWidth = lw;
+            refreshRequested = true;
           }
         }
         if (cmd.ContainsKey("jpeg") && cmd["jpeg"] is bool) {
@@ -1157,7 +1323,6 @@ namespace AivinDesktopCast {
     // Nút + phím bổ trợ đang giữ qua mousedown (chỉ luồng đọc lệnh đụng tới). Gói mouseup không đủ để biết cần nhả gì: người xem có thể thả Ctrl trước khi thả chuột.
     static readonly List<int> heldButtons = new List<int>();
     static readonly List<byte> heldModifiers = new List<byte>();
-    static readonly System.Diagnostics.Stopwatch pointerClock = System.Diagnostics.Stopwatch.StartNew();
     // Thao tác chuột từ xa bị bỏ khi người ở máy đang dùng chuột (LocalPointerGuard). Nhả nút xử lý riêng.
     static readonly HashSet<string> PointerActions = new HashSet<string> { "move", "click", "dblclick", "rightclick", "mousedown", "scroll" };
 
@@ -1169,7 +1334,7 @@ namespace AivinDesktopCast {
 
     static bool LocalPointerActive() {
       Native.POINT p;
-      return Native.GetCursorPos(out p) && LocalPointerGuard.LocalActive(p.x, p.y, pointerClock.ElapsedMilliseconds);
+      return Native.GetCursorPos(out p) && LocalPointerGuard.LocalActive(p.x, p.y, LocalPointerGuard.Now());
     }
 
     static void MouseButton(int button, bool down) {
@@ -1216,6 +1381,7 @@ namespace AivinDesktopCast {
         bool pointer = PointerActions.Contains(action);
         bool localPointer = (pointer || action.Equals("mouseup")) && LocalPointerActive();
         if (pointer && localPointer) return;
+        if (pointer) SystemCursorHider.RemoteInput();
 
         if (action == "move") {
           PlaceCursor(targetX, targetY);

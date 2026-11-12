@@ -489,7 +489,7 @@ namespace AivinDesktopCast {
       var msg = Out.Msg("cursor_shape");
       msg["id"] = id;
       int hotX, hotY;
-      msg["png"] = RenderShape(handle, out hotX, out hotY);
+      msg["png"] = RenderShape(SystemCursorHider.ShapeOf(handle), out hotX, out hotY);
       msg["hotX"] = hotX;
       msg["hotY"] = hotY;
       Out.Send(msg);

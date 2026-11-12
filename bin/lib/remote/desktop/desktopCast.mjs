@@ -6,6 +6,22 @@ import { spawn } from 'child_process';
 import { REMOTE_CONFIG_DIR } from '../constants.mjs';
 import { DESKTOP_CAST_CSHARP, DESKTOP_CAST_PS1 } from './desktopCastSource.mjs';
 
+/**
+ * Trả bộ con trỏ chuẩn của Windows (SPI_SETCURSORS). Tiến trình điều khiển ẩn con trỏ trên máy trong lúc người xem thao tác
+ * (SystemCursorHider) và tự trả khi dừng; lệnh này là lưới cuối khi tiến trình đó chết lúc con trỏ còn ẩn (12/11/2026).
+ */
+export const RESTORE_SYSTEM_CURSORS_PS = "$sig = '[DllImport(\"user32.dll\")] public static extern bool SystemParametersInfo(uint a, uint b, System.IntPtr c, uint d);'; "
+  + "$t = Add-Type -MemberDefinition $sig -Name AivinCursorRestore -Namespace Aivin -PassThru; [void]$t::SystemParametersInfo(0x57, 0, [System.IntPtr]::Zero, 0)";
+
+export function restoreSystemCursors(spawnImpl = spawn) {
+  try {
+    const proc = spawnImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', RESTORE_SYSTEM_CURSORS_PS], { windowsHide: true, stdio: 'ignore' });
+    proc?.on?.('error', () => {});
+  } catch {
+    // không có powershell: tiến trình điều khiển đầu phiên sau cũng tự trả
+  }
+}
+
 const CAST_DIR = path.join(REMOTE_CONFIG_DIR, 'desktop-cast');
 
 function hostFiles(dir = CAST_DIR) {
@@ -16,7 +32,10 @@ function hostFiles(dir = CAST_DIR) {
   if (!fs.existsSync(src)) fs.writeFileSync(src, DESKTOP_CAST_CSHARP);
   if (!fs.existsSync(ps1)) fs.writeFileSync(ps1, DESKTOP_CAST_PS1);
   for (const name of fs.readdirSync(dir)) {
-    if (name.startsWith('cast-') && !name.startsWith(`cast-${hash}`)) fs.rmSync(path.join(dir, name), { force: true });
+    if (!name.startsWith('cast-') || name.startsWith(`cast-${hash}`)) continue;
+    // DLL bản cũ còn bị một tiến trình quay khác giữ (máy đang có phiên của bản CLI trước, tiến trình chưa thoát): Windows từ chối xoá
+    // (EPERM). Trước 12/11/2026 lỗi này làm hỏng cả lần mở phiên mới; nay bỏ qua, lần sau dọn.
+    try { fs.rmSync(path.join(dir, name), { force: true }); } catch { /* đang bị giữ */ }
   }
   return { src, ps1, dll: path.join(dir, `cast-${hash}.dll`) };
 }
@@ -91,6 +110,17 @@ export function createRawFrameReader(onFrame, onCorrupt = () => {}, onAudio = ()
       }
     }
   };
+}
+
+/**
+ * Lệnh ảnh mở màn cho tiến trình quay từ `lead_in` máy chủ gửi kèm lệnh mở phiên (`{ max_width, quality }`). Thiếu / sai thì `null`
+ * (máy chủ cũ, mạng chưa biết là tốt). Tiến trình quay tự kẹp lần nữa và không vượt màn hình thật.
+ */
+export function castLeadInConfig(leadIn) {
+  const width = Number(leadIn?.max_width);
+  const quality = Number(leadIn?.quality ?? 80);
+  if (!Number.isInteger(width) || width < 640 || width > 2560 || !Number.isInteger(quality) || quality < 10 || quality > 95) return null;
+  return { lead_in_width: width, lead_in_quality: quality };
 }
 
 export function isDesktopCastSupported(platform = process.platform) {
@@ -200,6 +230,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     child.stdin?.on?.('error', () => {});
     let rl = readline.createInterface({ input: child.stdout });
     let packetSeq = 0;
+    let cursorHidden = false;
 
     rl.on('line', (line) => {
       let msg;
@@ -227,6 +258,7 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
           ts: msg.ts,
           stats: msg.stats,
           ...(msg.secureDesktop ? { secureDesktop: true } : {}),
+          ...(msg.lead_in ? { lead_in: true } : {}),
         });
       } else if (msg.t === 'meta') {
         onMeta?.({
@@ -254,6 +286,8 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
         onPasteFailed?.();
       } else if (msg.t === 'input_focus') {
         onInputFocus?.({ editable: msg.editable === true });
+      } else if (msg.t === 'cursor_hidden') {
+        cursorHidden = msg.hidden === true;
       } else if (msg.t === 'clipboard') {
         if (typeof msg.text === 'string' && msg.text) onClipboard?.({ text: msg.text });
       } else if (msg.t === 'secure_desktop') {
@@ -271,6 +305,10 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
     });
 
     child.on('close', () => {
+      if (cursorHidden) {
+        cursorHidden = false;
+        restoreSystemCursors(spawnImpl);
+      }
       if (activeSession === session) activeSession = null;
       onStop?.();
     });
