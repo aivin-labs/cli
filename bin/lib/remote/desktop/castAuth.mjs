@@ -184,7 +184,7 @@ const CONSENT_SCRIPT = [
   "$script:result = 'No'; $script:closing = $false",
   '$tm = New-Object Windows.Threading.DispatcherTimer; $tm.Interval = [TimeSpan]::FromSeconds(1)',
   "function Show-Hint { $script:hintLeft = 3; $hintText.Text = $script:hint; $hintText.Visibility = 'Visible' }",
-  "function Finish($r) { if ($script:closing) { return }; $script:closing = $true; $script:result = $r; $tm.Stop(); $w.Close() }",
+  "function Finish($r) { if ($script:closing) { return }; $script:closing = $true; $script:result = $r; $tm.Stop(); Remove-Guard; $w.Close() }",
   "$w.FindName('Allow').Add_Click({ if (Test-Human) { Finish 'Yes' } else { Show-Hint } })",
   // "Luôn cho phép" đi qua đúng chốt người thật như "Cho phép lần này": AI hay phiên điều khiển từ xa không tự cấp quyền lâu dài được.
   "$w.FindName('AllowAlways').Add_Click({ if (Test-Human) { Finish 'Always' } else { Show-Hint } })",
@@ -196,7 +196,7 @@ const CONSENT_SCRIPT = [
   "$script:left = [int]$env:AIVIN_CAST_SECONDS; $fmt = D 'AIVIN_CAST_COUNTDOWN'; $countdown = $w.FindName('Countdown'); $hintText = $w.FindName('Hint'); $countdown.Text = $fmt -f $script:left",
   "$tm.Add_Tick({ $script:left--; $countdown.Text = $fmt -f $script:left; if ($script:hintLeft -gt 0) { $script:hintLeft-- } else { $hintText.Visibility = 'Collapsed' }; if ($script:left -le 0) { Finish 'Timeout' } })",
   "$w.Add_ContentRendered({ Install-Guard $w; $w.Activate(); [void]$w.FindName('Close').Focus(); $tm.Start() })",
-  '[void]$w.ShowDialog(); $tm.Stop(); $script:result',
+  '[void]$w.ShowDialog(); Remove-Guard; $tm.Stop(); $script:result',
 ].join('\n');
 
 /**

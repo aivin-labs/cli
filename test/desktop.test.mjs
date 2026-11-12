@@ -229,3 +229,32 @@ test('DESKTOP_CAST_CSHARP: có DXGI + đường lùi GDI, thu âm WASAPI Loopbac
     fs.rmSync(tmp, { force: true });
   }
 });
+
+test('LocalPointerGuard: người ở máy dời chuột thì thao tác chuột từ xa bị bỏ 1,5 s', { skip: process.platform !== 'win32', timeout: 120_000 }, () => {
+  assert.ok(DESKTOP_CAST_CSHARP.includes('PlaceCursor(targetX, targetY)'));
+  assert.ok(!/Native\.SetCursorPos\(targetX, targetY\)/.test(DESKTOP_CAST_CSHARP), 'mọi lần đặt con trỏ theo lệnh từ xa đều ghi lại vị trí');
+  const tmp = path.join(os.tmpdir(), `aivin-cast-guard-${process.pid}.cs`);
+  fs.writeFileSync(tmp, DESKTOP_CAST_CSHARP);
+  try {
+    const g = '[AivinDesktopCast.LocalPointerGuard]';
+    const script = [
+      `Add-Type -Path '${tmp}' -ReferencedAssemblies 'UIAutomationClient','UIAutomationTypes','WindowsBase','System.Drawing','System.Windows.Forms','System.Web.Extensions','System.Core'`,
+      `$r = @()`,
+      // Chưa từng đặt con trỏ: chưa biết vị trí "của phiên", không chặn.
+      `$r += ${g}::LocalActive(500, 500, 0)`,
+      `${g}::Placed(100, 100)`,
+      // Con trỏ vẫn ở chỗ phiên đặt (lệch 2 px do làm tròn): không chặn.
+      `$r += ${g}::LocalActive(102, 100, 100)`,
+      // Người ở máy dời chuột: chặn, và còn chặn khi vẫn đứng yên trong 1,5 s.
+      `$r += ${g}::LocalActive(400, 300, 200)`,
+      `$r += ${g}::LocalActive(400, 300, 1600)`,
+      // Hết 1,5 s kể từ lần dời cuối: thao tác từ xa chạy lại.
+      `$r += ${g}::LocalActive(400, 300, 1701)`,
+      `$r -join ','`,
+    ].join('; ');
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' }).trim();
+    assert.equal(out, 'False,False,True,True,False');
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+});

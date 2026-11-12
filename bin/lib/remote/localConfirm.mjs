@@ -140,14 +140,14 @@ const WINDOWS_SCRIPT = [
   "$script:result = 'No'; $script:closing = $false; $card = $w.FindName('Card')",
   '$tm = New-Object Windows.Threading.DispatcherTimer; $tm.Interval = [TimeSpan]::FromSeconds(1)',
   // Đóng có hiệu ứng: chạy storyboard "Out" rồi mới đóng cửa sổ; bấm liên tiếp chỉ tính lần đầu.
-  "function Finish($r) { if ($script:closing) { return }; $script:closing = $true; $script:result = $r; $tm.Stop(); $sb = $w.FindResource('Out').Clone(); $sb.Add_Completed({ $w.Close() }); $sb.Begin($card) }",
+  "function Finish($r) { if ($script:closing) { return }; $script:closing = $true; $script:result = $r; $tm.Stop(); Remove-Guard; $sb = $w.FindResource('Out').Clone(); $sb.Add_Completed({ $w.Close() }); $sb.Begin($card) }",
   "$w.FindName('Allow').Add_Click({ if (Test-Human) { Finish 'Yes' } else { $script:hintLeft = 3; $cd.Text = $script:hint } })",
   "$w.FindName('Reject').Add_Click({ Finish 'No' }); $w.FindName('Close').Add_Click({ Finish 'No' })",
   "$w.FindName('Head').Add_MouseLeftButtonDown({ $w.DragMove() })",
   "$script:left = [int]$env:AIVIN_C_SECONDS; $fmt = D 'AIVIN_C_COUNTDOWN'; $cd = $w.FindName('Countdown'); $cd.Text = $fmt -f $script:left",
   "$tm.Add_Tick({ $script:left--; if ($script:hintLeft -gt 0) { $script:hintLeft--; $cd.Text = $script:hint } else { $cd.Text = $fmt -f $script:left }; if ($script:left -le 0) { Finish 'Timeout' } })",
   "$w.Add_ContentRendered({ Install-Guard $w; $w.FindResource('In').Begin($card); $w.Activate(); [void]$w.FindName('Reject').Focus(); $tm.Start() })",
-  '[void]$w.ShowDialog(); $tm.Stop(); $script:result',
+  '[void]$w.ShowDialog(); Remove-Guard; $tm.Stop(); $script:result',
 ].join('\n');
 
 /** Nội dung chữ thường (macOS / Linux / terminal): lý do, mục đích agent ghi, lệnh. */

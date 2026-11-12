@@ -80,6 +80,12 @@ public static class AivinHumanGuard {
     keyHook = SetWindowsHookEx(13, keyProc, mod, 0);
     return mouseHook != IntPtr.Zero && keyHook != IntPtr.Zero;
   }
+  /** Gỡ ngay khi hộp đóng: hook mức thấp làm mọi lần di chuột / gõ phím của cả máy chờ luồng này, tiến trình chưa thoát mà luồng thôi bơm thông điệp là chuột khựng (12/11/2026). */
+  public static void Uninstall() {
+    if (mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero; }
+    if (keyHook != IntPtr.Zero) { UnhookWindowsHookEx(keyHook); keyHook = IntPtr.Zero; }
+    window = IntPtr.Zero;
+  }
   public static bool Recent(int ms) { return lastTrusted >= 0 && clock.ElapsedMilliseconds - lastTrusted <= ms; }
 }
 `;
@@ -113,5 +119,6 @@ export const HUMAN_GUARD_PS = [
   "try { Add-Type -TypeDefinition (D 'AIVIN_GUARD_CS') -ErrorAction Stop; $script:guard = $true } catch { }",
   'function Install-Guard($win) { if (-not $script:guard) { return }; try { $h = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle; $tg = [long]0; [void][long]::TryParse([string]$env:AIVIN_GUARD_TAG, [ref]$tg); if (-not [AivinHumanGuard]::Install($h, $tg)) { $script:guard = $false } } catch { $script:guard = $false } }',
   `function Test-Human { if (-not $script:guard) { return $true }; return [AivinHumanGuard]::Recent(${HUMAN_RECENT_MS}) }`,
+  'function Remove-Guard { try { [AivinHumanGuard]::Uninstall() } catch { } }',
   "$script:hintLeft = 0; $script:hint = D 'AIVIN_GUARD_HINT'",
 ];

@@ -38,6 +38,7 @@ namespace AivinDesktopCast {
     [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
     [DllImport("user32.dll", EntryPoint = "mouse_event")] static extern void mouse_event_native(uint dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
     [DllImport("user32.dll", EntryPoint = "keybd_event")] static extern void keybd_event_native(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
@@ -341,6 +342,9 @@ namespace AivinDesktopCast {
         Thread.Sleep(60);
       } finally {
         Native.mouse_event(Native.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        // Con trỏ do chính phiên kéo tới đích thả: không tính là người ở máy vừa dùng chuột.
+        Native.POINT p;
+        if (Native.GetCursorPos(out p)) LocalPointerGuard.Placed(p.x, p.y);
       }
     }
 
@@ -738,6 +742,32 @@ namespace AivinDesktopCast {
     }
   }
 
+  /**
+   * Người ngồi trước máy được ưu tiên chuột (12/11/2026: chủ máy không di được chuột vì một thiết bị khác đang mở xem màn hình, mỗi lần rê ở
+   * đó là con trỏ bị kéo về). Phiên ghi lại vị trí con trỏ sau mỗi lần tự đặt; con trỏ đã rời chỗ đó thì người ở máy vừa dùng chuột, thao tác
+   * chuột từ xa bị bỏ trong HOLD_MS kể từ lần dời gần nhất. Nhả nút vẫn chạy để không kẹt nút.
+   */
+  public static class LocalPointerGuard {
+    public const int TOLERANCE_PX = 4;
+    public const int HOLD_MS = 1500;
+    static bool placed;
+    static int lastX, lastY;
+    static long localUntil = -1;
+
+    public static void Reset() { placed = false; localUntil = -1; }
+
+    /** Gọi ngay sau khi phiên tự đặt con trỏ, với vị trí đọc lại (Windows có thể kẹp vào mép màn hình). */
+    public static void Placed(int x, int y) { placed = true; lastX = x; lastY = y; }
+
+    /** Đúng khi người ở máy vừa dùng chuột (x, y: vị trí hiện tại; nowMs: đồng hồ tăng dần). */
+    public static bool LocalActive(int x, int y, long nowMs) {
+      if (placed && (Math.Abs(x - lastX) > TOLERANCE_PX || Math.Abs(y - lastY) > TOLERANCE_PX)) localUntil = nowMs + HOLD_MS;
+      lastX = x;
+      lastY = y;
+      return localUntil >= 0 && nowMs < localUntil;
+    }
+  }
+
   public static class CastHost {
     const long JPEG_SMALL_CHANGE_INTERVAL_MS = 200;
     const double JPEG_BIG_CHANGE_DIFF = 4.5;
@@ -1127,6 +1157,20 @@ namespace AivinDesktopCast {
     // Nút + phím bổ trợ đang giữ qua mousedown (chỉ luồng đọc lệnh đụng tới). Gói mouseup không đủ để biết cần nhả gì: người xem có thể thả Ctrl trước khi thả chuột.
     static readonly List<int> heldButtons = new List<int>();
     static readonly List<byte> heldModifiers = new List<byte>();
+    static readonly System.Diagnostics.Stopwatch pointerClock = System.Diagnostics.Stopwatch.StartNew();
+    // Thao tác chuột từ xa bị bỏ khi người ở máy đang dùng chuột (LocalPointerGuard). Nhả nút xử lý riêng.
+    static readonly HashSet<string> PointerActions = new HashSet<string> { "move", "click", "dblclick", "rightclick", "mousedown", "scroll" };
+
+    static void PlaceCursor(int x, int y) {
+      Native.SetCursorPos(x, y);
+      Native.POINT p;
+      if (Native.GetCursorPos(out p)) LocalPointerGuard.Placed(p.x, p.y);
+    }
+
+    static bool LocalPointerActive() {
+      Native.POINT p;
+      return Native.GetCursorPos(out p) && LocalPointerGuard.LocalActive(p.x, p.y, pointerClock.ElapsedMilliseconds);
+    }
 
     static void MouseButton(int button, bool down) {
       uint flag = button == 2 ? (down ? Native.MOUSEEVENTF_RIGHTDOWN : Native.MOUSEEVENTF_RIGHTUP)
@@ -1169,11 +1213,15 @@ namespace AivinDesktopCast {
           targetY += (int)Math.Round((ry / currentImageHeight) * currentBounds.Height);
         }
 
+        bool pointer = PointerActions.Contains(action);
+        bool localPointer = (pointer || action.Equals("mouseup")) && LocalPointerActive();
+        if (pointer && localPointer) return;
+
         if (action == "move") {
-          Native.SetCursorPos(targetX, targetY);
+          PlaceCursor(targetX, targetY);
         } else if (action == "click") {
           int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
-          Native.SetCursorPos(targetX, targetY);
+          PlaceCursor(targetX, targetY);
           Thread.Sleep(10);
           PressModifiers(mods);
           try {
@@ -1195,7 +1243,7 @@ namespace AivinDesktopCast {
           }
           if (button == 0) ProbeInputFocus();
         } else if (action == "dblclick") {
-          Native.SetCursorPos(targetX, targetY);
+          PlaceCursor(targetX, targetY);
           Thread.Sleep(10);
           PressModifiers(mods);
           try {
@@ -1208,7 +1256,7 @@ namespace AivinDesktopCast {
             ReleaseModifiers(mods);
           }
         } else if (action == "rightclick") {
-          Native.SetCursorPos(targetX, targetY);
+          PlaceCursor(targetX, targetY);
           Thread.Sleep(10);
           PressModifiers(mods);
           try {
@@ -1220,7 +1268,7 @@ namespace AivinDesktopCast {
           }
         } else if (action == "mousedown") {
           int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
-          Native.SetCursorPos(targetX, targetY);
+          PlaceCursor(targetX, targetY);
           var newMods = new List<byte>();
           for (int i = 0; i < mods.Count; i++) {
             if (!heldModifiers.Contains(mods[i])) newMods.Add(mods[i]);
@@ -1232,7 +1280,9 @@ namespace AivinDesktopCast {
         } else if (action == "mouseup") {
           int button = cmd.ContainsKey("button") ? Convert.ToInt32(cmd["button"]) : 0;
           // Gói không toạ độ = chỉ nhả tại chỗ (AI đang bấm trên máy): không kéo con trỏ đi.
-          if (cmd.ContainsKey("rx") || cmd.ContainsKey("x")) Native.SetCursorPos(targetX, targetY);
+          // Người ở máy đang dùng chuột mà phiên không giữ nút này (lần bấm từ xa đã bị bỏ): không thả nút người đó có thể đang giữ.
+          if (localPointer && !heldButtons.Contains(button)) return;
+          if (!localPointer && (cmd.ContainsKey("rx") || cmd.ContainsKey("x"))) PlaceCursor(targetX, targetY);
           MouseButton(button, false);
           heldButtons.Remove(button);
           if (heldButtons.Count == 0) ReleaseHeldModifiers();
@@ -1240,7 +1290,7 @@ namespace AivinDesktopCast {
         } else if (action == "scroll") {
           int deltaY = cmd.ContainsKey("deltaY") ? Convert.ToInt32(cmd["deltaY"]) : 0;
           int deltaX = cmd.ContainsKey("deltaX") ? Convert.ToInt32(cmd["deltaX"]) : 0;
-          Native.SetCursorPos(targetX, targetY);
+          PlaceCursor(targetX, targetY);
           PressModifiers(mods);
           try {
             if (deltaY != 0) {
