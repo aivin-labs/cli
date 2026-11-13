@@ -7,7 +7,7 @@ import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
-const { AgentMode, CLAUDE_ADAPTER, agentArgs, buildAgentTools, createAgentRunner, findAgentBinary } = await import('../bin/lib/remote/codingAgents.mjs');
+const { AgentMode, CLAUDE_ADAPTER, agentArgs, agentProfileDir, buildAgentTools, createAgentRunner, findAgentBinary } = await import('../bin/lib/remote/codingAgents.mjs');
 const { buildTools } = await import('../bin/lib/remote/toolHandlers.mjs');
 
 const SID = '60554582-1111-4222-8333-944455556666';
@@ -154,7 +154,7 @@ test('đầu vào sai + danh mục: không đề bài, thư mục ngoài vùng, 
   await assert.rejects(createAgentRunner({ find: () => null }).run({ prompt: 'x' }, {}, env), /No coding agent is installed/);
 
   assert.deepEqual(buildAgentTools(runner).map((t) => [t.name, !!t.read_only]),
-    [['agent.run', false], ['agent.status', true], ['agent.stop', false], ['agent.sessions', true]]);
+    [['agent.run', false], ['agent.status', true], ['agent.stop', false], ['agent.profiles', true], ['agent.sessions', true]]);
   const base = { roots: [root], binaries: [], projects: [], processes: { start() {} } };
   assert.equal(buildTools({ ...base, schedules: {}, runAs: { uid: 1 }, codingAgents: runner }).some((t) => t.name.startsWith('agent.')), false, 'máy tính tổ chức: không');
   assert.ok(buildTools({ ...base, schedules: {}, codingAgents: runner }).some((t) => t.name === 'agent.run'), 'máy cá nhân có agent: có');
@@ -299,4 +299,30 @@ test('dừng: stopAll dừng job đang chạy và ghi hồ sơ; việc thường
   assert.equal(JSON.parse(fs.readFileSync(path.join(jobsDir, first.job, 'job.json'), 'utf8')).status, 'stopped');
   await assert.rejects(runner.run({ prompt: 'x', effort: 'turbo' }, {}, env), /effort must be one of/);
   await assert.rejects(runner.run({ prompt: 'x', max_budget_usd: 0 }, {}, env), /max_budget_usd must be above 0/);
+});
+
+test('hồ sơ tài khoản (14/11/2026): agent chạy với thư mục cấu hình riêng qua CLAUDE_CONFIG_DIR; "continue" chỉ trong đúng hồ sơ; chưa có hồ sơ → chỉ cách tạo', async () => {
+  const profilesRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-profiles-'));
+  fs.mkdirSync(path.join(profilesRoot, 'claude', 'work'), { recursive: true });
+  const { calls, spawnImpl } = fakeSpawn();
+  const runner = createAgentRunner({ find: () => ({ bin: 'claude', version: '2.1.312' }), spawnImpl, probeFlags: () => null, profilesRoot });
+  assert.deepEqual(runner.profiles(), { profiles: { claude: ['work'] } });
+
+  const p = runner.run({ prompt: 'đọc dự án', account: 'work', wait_ms: 5000 }, {}, env);
+  await tick();
+  assert.equal(calls[0].opts.env.CLAUDE_CONFIG_DIR, path.join(profilesRoot, 'claude', 'work'));
+  await calls[0].emitAll();
+  await p;
+
+  // Không nêu hồ sơ → không có CLAUDE_CONFIG_DIR do Aivin đặt; "continue" không lấy phiên của hồ sơ "work".
+  await assert.rejects(runner.run({ prompt: 'tiếp', session: 'continue', wait_ms: 10 }, {}, env), /No earlier Claude Code session/);
+  const q = runner.run({ prompt: 'tiếp', session: 'continue', account: 'work', wait_ms: 5000 }, {}, env);
+  await tick();
+  assert.equal(calls[1].argv[calls[1].argv.indexOf('--resume') + 1], SID);
+  await calls[1].emitAll();
+  await q;
+
+  await assert.rejects(runner.run({ prompt: 'x', account: 'personal' }, {}, env), (e) => e.code === 'NOT_FOUND' && /CLAUDE_CONFIG_DIR=.*sign in/.test(e.message));
+  await assert.rejects(runner.run({ prompt: 'x', account: '../etc' }, {}, env), /account: letters/);
+  assert.throws(() => agentProfileDir({ id: 'x', label: 'X' }, 'a', { root: profilesRoot }), /no account profiles/);
 });

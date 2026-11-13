@@ -81,6 +81,8 @@ class LedgerForm : Form {
     grid.Columns.Add("sl", "Số lượng");
     for (int i = 1; i <= 800; i++) grid.Rows.Add("SP" + i.ToString("D4"), "Sản phẩm " + i, ((i * 37) % 97).ToString());
     grid.SelectionChanged += (s, e) => { lastAction = "select_row"; Dump(); };
+    // SelectionChanged bắn lúc ô vừa được tô (CurrentRow còn là dòng cũ); đổi ô hiện hành sau đó không bắn lại khi dòng đã được chọn.
+    grid.CurrentCellChanged += (s, e) => { lastAction = "current_row"; Dump(); };
     Controls.Add(grid);
 
     // Vùng tự vẽ: chữ nút chỉ có trên ảnh, không có phần tử trợ năng nào.

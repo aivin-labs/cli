@@ -113,77 +113,37 @@ export function assertAppAllowed(name, { fullAccess }) {
 const normalizeName = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/gi, 'd').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 /**
- * Planner nhìn ảnh nói theo ký hiệu trên nút ("×", "7", "☰"), cây trợ năng gọi bằng chữ ("Multiply by", "Seven", "Open Navigation").
- * Mỗi ký hiệu → các tên chữ hay gặp; khớp qua tên chữ bị trừ nhẹ điểm so với khớp thẳng (gui-bench 13/11/2026: "×" / "=" bị bỏ hết ký tự
- * thành truy vấn rỗng, "7" không khớp "Seven").
+ * Planner nhìn ảnh nói theo KÝ HIỆU trên nút ("×", "7", "☰"); cây trợ năng gọi nút bằng chữ của ngôn ngữ giao diện ("Multiply by" / "Nhân",
+ * "Seven" / "Bảy"). Không so ký hiệu với tên hiển thị (phải liệt kê chữ từng ngôn ngữ — bản 13/11 bị bác vì vậy) mà với AutomationId: mã lập
+ * trình viên đặt, GIỐNG NHAU dù giao diện ngôn ngữ nào (`multiplyButton`, `num7Button`, `TogglePaneButton`) — cùng nguyên tắc BE nhận nút sắp
+ * xếp qua tên mã sort / order. Mỗi ký hiệu → các gốc tên mã hay gặp; chữ số đơn khớp nguyên một số trong AutomationId.
  */
-const GLYPH_ALIASES = {
-  '×': ['multiply', 'times', 'close'], '*': ['multiply'], '✕': ['close'], '✖': ['close'], '╳': ['close'], 'x': ['close'],
-  '÷': ['divide'], '/': ['divide'], '+': ['plus', 'add', 'new'], '-': ['minus', 'subtract'], '−': ['minus', 'subtract'], '–': ['minus'],
-  '=': ['equals', 'equal'], '%': ['percent'], '±': ['positive negative', 'negate'], '+/-': ['positive negative', 'negate'], '.': ['decimal'], ',': ['decimal'],
-  '←': ['back'], '→': ['forward', 'next'], '↑': ['up'], '↓': ['down'], '⌫': ['backspace'],
-  '☰': ['navigation', 'menu'], '≡': ['navigation', 'menu'], '⋯': ['more'], '…': ['more'], '...': ['more'], '⋮': ['more'],
-  '🔍': ['search'], '⚙': ['settings'], '⚙️': ['settings'], '⟳': ['refresh'], '↻': ['refresh'], '✓': ['ok', 'done'], '✔': ['ok', 'done'],
-  menu: ['navigation'], hamburger: ['navigation', 'menu'],
+const GLYPH_ID_STEMS = {
+  '×': ['multiply', 'times'], '*': ['multiply'], '✕': ['close', 'dismiss'], '✖': ['close', 'dismiss'], '╳': ['close', 'dismiss'],
+  '÷': ['divide'], '/': ['divide'], '+': ['plus', 'add'], '-': ['minus', 'subtract'], '−': ['minus', 'subtract'], '–': ['minus', 'subtract'],
+  '=': ['equal'], '%': ['percent'], '±': ['negate', 'plusminus', 'positivenegative'], '.': ['decimal'], ',': ['decimal'],
+  '←': ['back'], '→': ['forward', 'next'], '⌫': ['backspace'], '☰': ['togglepane', 'navigation', 'hamburger'], '≡': ['togglepane', 'navigation', 'hamburger'],
+  '⋯': ['more', 'overflow'], '…': ['more', 'overflow'], '...': ['more', 'overflow'], '⋮': ['more', 'overflow'], '🔍': ['search'], '⚙': ['setting'], '⚙️': ['setting'],
+  '⟳': ['refresh', 'reload'], '↻': ['refresh', 'reload'],
 };
-const DIGIT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
 
-/**
- * Từ chỉ loại phần tử ở đầu / cuối mô tả ("nút Lưu", "Save button", "ô Họ tên", "text area") là gợi ý vai trò chứ không phải chữ trên phần
- * tử. Không tách ra thì "Save button" chỉ khớp nửa câu → mơ hồ; "text area" không khớp gì dù cửa sổ chỉ có một ô soạn thảo.
- */
-const EDITABLE_ROLES = ['edit', 'document', 'combobox'];
-const ROLE_HINTS = [
-  [/^(text ?box|text ?field|text ?area|text ?input|input ?box|input ?field|input|edit ?box|field|box|editor|o nhap|o)$/, EDITABLE_ROLES],
-  [/^(button|btn|nut|icon|bieu tuong)$/, ['button', 'splitbutton', 'menuitem', 'hyperlink']],
-  [/^(link|hyperlink|lien ket|duong dan)$/, ['hyperlink']],
-  [/^(tab)$/, ['tabitem']],
-  [/^(check ?box|o tich|o danh dau)$/, ['checkbox']],
-  [/^(drop ?down|combo ?box|combo|danh sach chon)$/, ['combobox']],
-];
+/** Từ của AutomationId tách theo chữ hoa / chữ số ("num7Button" → "num 7 button", "TogglePaneButton" → "toggle pane button"). */
+const idWords = (aid) => normalizeName(String(aid || '').replace(/([a-z])([A-Z0-9])/g, '$1 $2').replace(/([0-9])([A-Za-z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2'));
 
-function roleHintOf(phrase) {
-  for (const [re, roles] of ROLE_HINTS) if (re.test(phrase)) return roles;
-  return null;
-}
-
-/** Tách từ chỉ loại ở cuối rồi ở đầu (một hoặc hai từ). Không có → null. */
-function splitRoleHint(q) {
-  const words = q.split(' ').filter(Boolean);
-  for (const n of [2, 1]) {
-    if (words.length >= n) {
-      const tail = roleHintOf(words.slice(-n).join(' '));
-      if (tail) return { rest: words.slice(0, -n).join(' '), roles: tail };
-      const head = roleHintOf(words.slice(0, n).join(' '));
-      if (head) return { rest: words.slice(n).join(' '), roles: head };
-    }
-  }
-  return null;
-}
-
-/** Các cách hiểu một mô tả: nguyên văn, qua ký hiệu / chữ số, và bỏ từ chỉ loại (kèm vai trò gợi ý). */
+/** Các cách hiểu một mô tả: nguyên văn, và (ký hiệu / chữ số đơn) qua gốc tên mã trong AutomationId (`idStems` / `idDigit`). */
 function queryVariants(raw) {
   const text = String(raw || '').trim();
   const out = [];
-  const add = (q, alias, roles) => {
-    const n = normalizeName(q);
-    const words = n.split(' ').filter(Boolean);
-    if (!words.length && !roles) return;
-    if (out.some((v) => v.q === n && String(v.roles) === String(roles))) return;
-    out.push({ q: n, words, alias, roles });
-  };
-  add(text, false);
-  const lower = text.toLowerCase();
-  for (const a of GLYPH_ALIASES[lower] || []) add(a, true);
-  if (/^\d$/.test(lower)) add(DIGIT_WORDS[+lower], true);
-  const hint = splitRoleHint(normalizeName(text).replace(/^(the|a|an) /, ''));
-  if (hint) add(hint.rest, false, hint.roles);
+  const q = normalizeName(text);
+  if (q) out.push({ q, words: q.split(' ').filter(Boolean) });
+  const glyph = text.toLowerCase();
+  if (GLYPH_ID_STEMS[glyph]) out.push({ q: glyph, words: [], idStems: GLYPH_ID_STEMS[glyph], raw: text });
+  else if (!q && text) out.push({ q: text, words: [], raw: text }); // ký hiệu lạ: chỉ khớp tên trùng nguyên văn
+  if (/^\d$/.test(text)) out.push({ q: text, words: [], idDigit: text, raw: text });
   return out;
 }
 
-/** Mô tả nói thẳng tới khung cửa sổ — chỉ khi đó mới chọn phần tử khung (nút thu nhỏ / đóng, menu hệ thống). */
-const CHROME_QUERY = /\b(minimi[sz]e|maximi[sz]e|restore|close|system menu|title ?bar)\b/;
-const CHROME_QUERY_VI = /(thu nhỏ|phóng to|khôi phục|đóng|thanh tiêu đề)/i;
+const EDITABLE_ROLES = ['edit', 'document', 'combobox'];
 
 /** Phần tử làm được thao tác này không (fill cần ô nhập, toggle cần ô tích…). undefined = không biết thao tác. */
 function compatibleWith(node, action) {
@@ -212,7 +172,6 @@ export function rankGuiNodes(nodes, query, role = '', { matchValue = true, actio
   const variants = queryVariants(query);
   const wantedRole = String(role || '').toLowerCase();
   if (!variants.length) return [];
-  const allowChrome = CHROME_QUERY.test(normalizeName(query)) || CHROME_QUERY_VI.test(String(query || ''));
   // Chữ OCR nằm trên một phần tử đã tắt cũng là đã tắt: bấm vào đó không có tác dụng mà vẫn báo thành công.
   const disabledRects = (nodes || []).filter((n) => n.disabled && n.rect).map((n) => n.rect);
   const onDisabled = (n) => n.source === 'ocr' && n.rect && disabledRects.some((r) => {
@@ -221,10 +180,7 @@ export function rankGuiNodes(nodes, query, role = '', { matchValue = true, actio
     return cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h;
   });
   const pool = (nodes || []).filter((n) => (!wantedRole || String(n.role || '').toLowerCase() === wantedRole || n.source === 'ocr')
-    && !n.disabled && (includeOffscreen || !n.offscreen) && !onDisabled(n) && (allowChrome || !n.chrome));
-  // Mô tả chỉ có từ chỉ loại ("text area"): ứng viên là mọi phần tử đúng loại làm được thao tác — chỉ một thì chắc, nhiều thì mơ hồ.
-  const roleOnly = variants.find((v) => !v.words.length && v.roles);
-  const roleOnlyHits = roleOnly ? pool.filter((n) => roleOnly.roles.includes(String(n.role || '').toLowerCase()) && compatibleWith(n, action) !== false) : [];
+    && !n.disabled && (includeOffscreen || !n.offscreen) && !onDisabled(n));
   return pool
     .map((node, order) => {
       const name = normalizeName(node.name);
@@ -237,16 +193,24 @@ export function rankGuiNodes(nodes, query, role = '', { matchValue = true, actio
       const tokens = combined.split(' ');
       const nodeRole = String(node.role || '').toLowerCase();
       const compat = compatibleWith(node, action);
+      const ids = idWords(node.automation_id);
+      const idFlat = ids.replace(/ /g, '');
       let best = null;
       for (const v of variants) {
         if (!v.words.length) {
-          if (!roleOnlyHits.includes(node)) continue;
-          const entry = { score: 55, hits: 1, total: 1, complete: roleOnlyHits.length === 1, evidence: ['only_of_role'] };
-          if (!best || entry.score > best.score) best = entry;
+          // Ký hiệu / chữ số: tên trùng nguyên văn ký hiệu (nút tên "+"), hoặc gốc tên mã trong AutomationId (không phụ thuộc ngôn ngữ giao diện).
+          let entry = null;
+          if (v.raw && String(node.name || '').trim().toLowerCase() === v.raw.toLowerCase()) entry = { score: 100, evidence: ['exact_symbol_name'] };
+          // Mã BẮT ĐẦU bằng gốc ký hiệu ("plusButton") hơn mã chỉ chứa nó ("MemPlus" — nút M+): phân hạng theo cấu trúc mã, không theo chữ.
+          else if (v.idStems && v.idStems.some((stem) => idFlat.startsWith(stem))) entry = { score: 94, evidence: ['symbol_automation_id'] };
+          else if (v.idStems && v.idStems.some((stem) => idFlat.includes(stem))) entry = { score: 88, evidence: ['symbol_automation_id'] };
+          else if (v.idDigit && ids.split(' ').includes(v.idDigit)) entry = { score: 92, evidence: ['digit_automation_id'] };
+          if (entry && (!best || entry.score > best.score)) best = { ...entry, hits: 1, total: 1, complete: true };
           continue;
         }
         const { q, words } = v;
-        const hits = words.filter((word) => (strictWord(word)
+        // Từ trùng tên vai trò UIA của phần tử ("Save button" → button): tên API, không phải chữ giao diện của một ngôn ngữ.
+        const hits = words.filter((word) => word === nodeRole || (strictWord(word)
           ? shown.includes(word)
           : tokens.some((token) => token.startsWith(word)) || (word.length >= 4 && combined.includes(word)))).length;
         if (!hits) continue;
@@ -258,14 +222,16 @@ export function rankGuiNodes(nodes, query, role = '', { matchValue = true, actio
         else if (longQ && name.startsWith(q)) { score += 35; evidence.push('name_prefix'); }
         else if (words.every((word) => (strictWord(word) ? name.split(' ').includes(word) : name.includes(word)))) { score += 30; evidence.push('all_words_in_name'); }
         else if (hits === words.length) { score += 20; evidence.push('all_words'); }
-        if (v.alias) { score -= 5; evidence.push('alias'); }
-        if (v.roles) {
-          if (v.roles.includes(nodeRole)) { score += 8; evidence.push('role_hint'); } else if (node.source !== 'ocr') score -= 10;
-        }
+        if (words.includes(nodeRole)) evidence.push('role_word');
         const entry = { score, hits, total: words.length, complete: hits === words.length, evidence };
         if (!best || entry.score > best.score || (entry.score === best.score && entry.complete && !best.complete)) best = entry;
       }
       if (!best) return null;
+      // Khung cửa sổ (nút thu nhỏ / đóng, menu hệ thống) chỉ khi mô tả trùng NGUYÊN VĂN tên hoặc AutomationId của nó ("Close", "Đóng") —
+      // không liệt kê từ "close / đóng" của ngôn ngữ nào; "1" / "System" không bao giờ trúng menu hệ thống.
+      // Menu hệ thống / thanh tiêu đề thì không bao giờ (bấm vào mở menu Restore / Move / Close của cửa sổ).
+      if (node.chrome && (String(node.role || '').toLowerCase() !== 'button'
+        || !best.evidence.some((e) => e === 'exact_name' || e === 'exact_automation_id' || e === 'exact_symbol_name'))) return null;
       if (node.source === 'ocr') { best.score -= 5; best.evidence.push('ocr'); }
       if (node.patterns?.length) { best.score += 3; best.evidence.push('actionable_pattern'); }
       // fill vào nhãn chữ / toggle một nút thường không làm được gì mà có thể vẫn "thành công": ưu tiên phần tử làm được thao tác.
@@ -318,6 +284,32 @@ function ambiguousResult(found) {
  * Khung cửa sổ trong kết quả observe: bỏ thanh tiêu đề / menu hệ thống (thang phân giải ở BE cũng chọn nhầm chúng: "System" của Settings),
  * giữ mỗi loại nút thu nhỏ / phóng to / đóng một cái (ứng dụng Store có hai bộ). Id của các node còn lại không đổi.
  */
+/**
+ * Đặc điểm giao diện của một lần observe (14/11/2026) — khoá TẤT ĐỊNH để nạp nguyên lý / kỹ năng theo kiểu giao diện (cùng vai trò "khái niệm trang"
+ * của AI Browser — AIBrowserPageConceptHelper): tính từ lớp cửa sổ, chất lượng cây, vai trò phần tử, cờ của host — không từ chữ của ngôn ngữ nào.
+ * Nguyên lý học ở ứng dụng A (vd "bảng dài: đọc qua danh sách con, đừng cuộn từng trang") chuyển được sang ứng dụng B cùng đặc điểm.
+ */
+export function uiTraits(res) {
+  const traits = new Set();
+  const cls = String(res?.window?.class || '');
+  if (/^Chrome_WidgetWin/.test(cls)) traits.add('chromium'); // Electron / trình duyệt Chromium: cây trợ năng bật trễ vài giây
+  else if (cls === 'ApplicationFrameWindow') traits.add('uwp');
+  else if (/^WindowsForms10\./.test(cls)) traits.add('winforms');
+  else if (/^HwndWrapper/.test(cls)) traits.add('wpf');
+  else if (cls === '#32770') traits.add('win32_dialog');
+  else if (cls) traits.add('win32');
+  if (res?.tree_quality === 'poor') traits.add('poor_tree');
+  if (res?.content_unavailable) traits.add('app_starting');
+  if (res?.modal_dialog_of) traits.add('modal_dialog');
+  if (res?.truncated_by === 'long_list') traits.add('long_list');
+  const nodes = Array.isArray(res?.nodes) ? res.nodes : [];
+  if (nodes.some((n) => /^(table|datagrid)$/.test(String(n.role || '')))) traits.add('data_grid');
+  if (nodes.some((n) => n.source === 'ocr')) traits.add('ocr_text');
+  if (nodes.some((n) => n.password)) traits.add('password_field');
+  if (nodes.some((n) => /^(menu|list)$/.test(String(n.role || '')) && n.expanded === 'expanded')) traits.add('open_menu');
+  return [...traits];
+}
+
 export function withoutChromeNoise(nodes) {
   const seenCaption = new Set();
   return nodes.filter((n) => {
@@ -493,6 +485,7 @@ export function createGuiController({
     }, ctx);
     assertWindowAllowed(res.window, { fullAccess });
     if (Array.isArray(res.nodes)) res.nodes = withoutChromeNoise(res.nodes);
+    res.traits = uiTraits(res);
     snapshotWindows.set(String(res.snapshot), res.window);
     if (snapshotWindows.size > 20) snapshotWindows.delete(snapshotWindows.keys().next().value);
     return res;
@@ -798,7 +791,7 @@ export function buildGuiTools(gui) {
       description: 'List open desktop windows: title, app process, handle, position, which is focused/minimized. blocked = the AI may not control it.',
       input_schema: schema({ include_dialogs: bool('also list owned dialogs') }) },
     { name: 'gui.observe', group: ToolGroup.GUI, read_only: true, handler: (a, c) => gui.observe(a, c),
-      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window. truncated_by = why the list is partial: time / long_list (a very long table or list; scroll it, or use gui.find) / node_limit. In a long table scrolled far down, the rows on screen come back with role "row", source "accessible" and an id like "4.t2" that gui.act can click. content_unavailable = a Store app shows only its frame because it is still starting or suspended — gui.focus it, then observe again. image_error = no screenshot this time (the app can only be captured from the screen and the window is behind/covered — gui.focus it first if a screenshot is needed).',
+      description: 'Read a window as an accessibility tree: each element has an id (node_id), role, name, value, state and supported actions. tree_quality "poor" = the app draws its own UI; a screenshot is then attached and the text on it is read on the device (OCR): each text run becomes a node with role "text", source "ocr" and an id like "4.t2" that gui.act can click / type at. Ids are only valid until the next observe of that window. truncated_by = why the list is partial: time / long_list (a very long table or list; scroll it, or use gui.find) / node_limit. In a long table scrolled far down, the rows on screen come back with role "row", source "accessible" and an id like "4.t2" that gui.act can click. content_unavailable = a Store app shows only its frame because it is still starting or suspended — gui.focus it, then observe again. traits = kind of UI (chromium, uwp, winforms, wpf, win32_dialog, poor_tree, modal_dialog, long_list, data_grid, ocr_text, password_field, open_menu) — modal_dialog: the window is blocked by its own dialog and the result shows that dialog; data_grid / long_list: prefer gui.read_table or select by value over scrolling. image_error = no screenshot this time (the app can only be captured from the screen and the window is behind/covered — gui.focus it first if a screenshot is needed).',
       input_schema: schema({
         window: target.window, include_image: bool('attach a screenshot even when the tree is good'), max_nodes: num('default 300'),
         ocr: bool('read the text on the window even when the tree is good (default: only when poor)'),

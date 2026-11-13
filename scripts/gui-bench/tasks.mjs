@@ -253,7 +253,7 @@ export const TASKS = [
       await t.press({ visible: 'Pause', within: win, pick: (n) => n.role === 'button' && /^pause$/i.test(n.name || '') });
       const r = await t.call('observe', { window: win }, { why: 'đọc thời gian' });
       // Nhãn trợ năng: "0 hours 0 minutes 1 seconds 62 centiseconds".
-      const time = r.nodes.find((n) => /seconds?/i.test(n.name || ''));
+      const time = r.nodes.find((n) => /seconds?\b/i.test(n.name || ''));
       const label = time?.name || '';
       if (!time) t.note(`nhãn có số: ${r.nodes.filter((n) => /\d/.test(n.name || '')).map((n) => n.name).join(' | ').slice(0, 300)}`);
       const secs = Number((label.match(/(\d+)\s*seconds?/i) || [])[1] || 0) + 60 * Number((label.match(/(\d+)\s*minutes?/i) || [])[1] || 0);

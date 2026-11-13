@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
-const { assertAppAllowed, assertWindowAllowed, buildGuiTools, createGuiController, detectGui, isAivinOpenCommand, matchApps, needsServerCheck, rankGuiNodes } = await import('../bin/lib/remote/gui/index.mjs');
+const { assertAppAllowed, assertWindowAllowed, buildGuiTools, createGuiController, detectGui, isAivinOpenCommand, matchApps, needsServerCheck, rankGuiNodes, uiTraits } = await import('../bin/lib/remote/gui/index.mjs');
 const { buildTools } = await import('../bin/lib/remote/toolHandlers.mjs');
 const { buildCatalog } = await import('../bin/lib/remote/deviceProfile.mjs');
 const { DEFAULT_GROUP_LIMITS, ToolGroup } = await import('../bin/lib/remote/constants.mjs');
@@ -350,7 +350,7 @@ test('gui.do: không thấy trong cây UIA thường thì đọc chữ trên ả
   assert.equal(host.calls.find((c) => c.op === 'act').args.node_id, '30.t0');
 });
 
-test('gui.do: ký hiệu / chữ số model nhìn ảnh nói ra khớp tên chữ; khung cửa sổ không bao giờ được chọn nhầm (13/11/2026)', () => {
+test('gui.do: ký hiệu / chữ số khớp qua AutomationId (không phụ thuộc ngôn ngữ giao diện); khung cửa sổ chỉ khi trùng nguyên văn (14/11/2026)', () => {
   const calc = [
     { id: '1.5', role: 'menubar', name: 'System', automation_id: 'SystemMenuBar', chrome: true },
     { id: '1.20', role: 'menuitem', name: 'System', automation_id: 'Item 1', chrome: true, patterns: ['expand'] },
@@ -366,21 +366,33 @@ test('gui.do: ký hiệu / chữ số model nhìn ảnh nói ra khớp tên ch�
   assert.equal(top('×'), '1.44');
   assert.equal(top('='), '1.47');
   assert.equal(top('☰'), '1.16');
-  assert.equal(top('menu'), '1.16', 'menu không khớp menu hệ thống');
+  assert.equal(top('menu'), undefined, 'chữ "menu" không được liệt kê sẵn thành nút điều hướng (BE phân giải bằng nghĩa); cũng không trúng menu hệ thống');
   assert.equal(top('System'), undefined, 'khung cửa sổ bị loại');
-  assert.equal(top('close'), '1.8', 'nói thẳng "close" thì được chọn nút đóng');
+  assert.equal(top('close'), '1.8', 'trùng nguyên văn AutomationId "Close" thì được chọn nút đóng');
   assert.equal(top('C'), undefined, 'một chữ cái không khớp đầu từ "Clear" / "Close"');
-  assert.equal(top('Clear button'), '1.38', 'từ chỉ loại là gợi ý vai trò');
+  assert.equal(top('Clear button'), '1.38', 'từ trùng tên vai trò UIA (button) được tính là khớp');
+  // Máy tính tiếng Việt: tên nút đổi theo ngôn ngữ, AutomationId không — ký hiệu / chữ số vẫn trúng.
+  const vi = calc.map((n) => ({ ...n, name: { '1.44': 'Nhân', '1.47': 'Bằng', '1.49': 'Một', '1.38': 'Xóa', '1.16': 'Mở Điều hướng', '1.8': 'Đóng Máy tính' }[n.id] || n.name }));
+  const topVi = (q) => rankGuiNodes(vi, q, '', { action: 'click' })[0]?.node.id;
+  assert.equal(topVi('×'), '1.44');
+  assert.equal(topVi('='), '1.47');
+  assert.equal(topVi('1'), '1.49');
+  assert.equal(topVi('☰'), '1.16');
+  assert.equal(topVi('Nhân'), '1.44');
+  assert.equal(topVi('Đóng Máy tính'), '1.8', 'nút khung trùng nguyên văn tên tiếng Việt');
+  assert.equal(topVi('Đóng'), undefined, 'không trùng nguyên văn → không chọn nút khung');
+  // Nút tên đúng bằng ký hiệu (không có AutomationId).
+  assert.equal(rankGuiNodes([{ id: '9.1', role: 'button', name: '+', patterns: ['invoke'] }, { id: '9.2', role: 'button', name: 'Plus one' }], '+', '', { action: 'click' })[0]?.node.id, '9.1');
 });
 
-test('gui.do fill: mô tả chỉ có loại ("text area") lấy ô nhập duy nhất; hai ô cùng tên lấy ô cùng hàng với nhãn (13/11/2026)', async () => {
+test('gui.do fill: mô tả không trùng chữ nào của phần tử ("text area") không tự đoán (BE phân giải bằng nghĩa); hai ô cùng tên lấy ô cùng hàng với nhãn', async () => {
   const editor = [
     { id: '2.3', role: 'text', name: 'Line 1, Column 1' },
     { id: '2.36', role: 'document', name: 'Text editor', patterns: ['value', 'text'], rect: { x: 0, y: 80, w: 900, h: 500 } },
   ];
   const r = rankGuiNodes(editor, 'text area', '', { action: 'set_value' });
-  assert.equal(r[0].node.id, '2.36');
-  assert.equal(r[0].complete, true);
+  assert.equal(r.some((x) => x.complete), false, 'không khớp đủ → gui.do trả mơ hồ, không điền thẳng');
+  assert.equal(r[0].node.id, '2.36', 'nhưng ô soạn thảo vẫn xếp đầu (làm được thao tác điền)');
   const form = [
     { id: '5.1', role: 'text', name: 'Số tiền', rect: { x: 24, y: 86, w: 47, h: 23 } },
     { id: '5.2', role: 'edit', name: 'Số tiền', patterns: ['value'], rect: { x: 148, y: 83, w: 300, h: 25 } },
@@ -619,7 +631,26 @@ test('host C#: thử chạy nền trước chuột thật; chỉ gửi thông đ
   assert.doesNotMatch(cs, /ClassicClasses = [^;]*Chrome_/);
   assert.match(cs, /if \(passedView\) break;/);
   assert.match(cs, /AddVisibleRows\(list, snap, nodes, wr, sw, budgetMs\)/);
-  assert.match(cs, /GiveBackRealInput\(action, window, fgBefore, haveCursor, cursorBefore\)/);
+  assert.match(cs, /GiveBackRealInput\(action, window, fgBefore, haveCursor, cursorBefore, caretBefore\)/);
+  // 14/11/2026: phím vừa mở ô nhập tạm (dấu nháy ở ô mới, so với lúc vừa gửi phím) → giữ focus; ô đó đóng → trả focus cho người dùng.
+  assert.match(cs, /caretAtKeys = CaretOf\(window\); KeyCombo/);
+  assert.match(cs, /caretNow != IntPtr\.Zero && caretNow != caretRef/);
+  assert.match(cs, /CaretOf\(heldWindow\) != heldCaret/);
   assert.match(cs, /stale >= READ_TABLE_STALL_NOTCHES/);
   assert.match(cs, /FindMenuCommand\(Native\.GetMenu\(window\), chord, 0, out id\)/);
+});
+
+test('traits: đặc điểm giao diện tất định từ lớp cửa sổ / chất lượng cây / vai trò / cờ host — khoá nạp nguyên lý theo kiểu giao diện (14/11/2026)', () => {
+  assert.deepEqual(uiTraits({ window: { class: 'Chrome_WidgetWin_1' }, tree_quality: 'good', nodes: [] }), ['chromium']);
+  assert.deepEqual(uiTraits({ window: { class: 'WindowsForms10.Window.8.app.0.1' }, truncated_by: 'long_list', nodes: [{ role: 'table' }] }).sort(), ['data_grid', 'long_list', 'winforms']);
+  assert.deepEqual(uiTraits({ window: { class: '#32770' }, modal_dialog_of: { window: '0x1' }, nodes: [{ role: 'edit', password: true }] }).sort(), ['modal_dialog', 'password_field', 'win32_dialog']);
+  assert.deepEqual(uiTraits({ window: { class: 'ApplicationFrameWindow' }, tree_quality: 'poor', content_unavailable: true, nodes: [{ source: 'ocr' }] }).sort(), ['app_starting', 'ocr_text', 'poor_tree', 'uwp']);
+  assert.deepEqual(uiTraits({}), []);
+});
+
+test('observe trả traits', async () => {
+  const host = fakeHost({ observe: () => ({ snapshot: 3, window: { window: '0x1', title: 'X', process: 'notepad', class: 'HwndWrapper[App;;1]' }, tree_quality: 'good', nodes: [{ id: '3.1', role: 'datagrid' }] }) });
+  const gui = createGuiController({ host, notify: () => {} });
+  const r = await gui.observe({ window: '0x1' }, {});
+  assert.deepEqual(r.traits.sort(), ['data_grid', 'wpf']);
 });

@@ -16,6 +16,7 @@ import { tokenize } from './textIndex.mjs';
 import { showOSNotification } from './notify.mjs';
 import { accountEnv, withProcessCap } from './multiUser.mjs';
 import { buildGuiTools } from './gui/index.mjs';
+import { buildSkillTools } from './gui/skills.mjs';
 import { buildOfficeTools } from './office/index.mjs';
 import { measurePath } from './undoStore.mjs';
 import { buildProcessTools, shellCommand } from './processes.mjs';
@@ -831,7 +832,7 @@ export function buildTools(env) {
     );
   }
   // Điều khiển giao diện (Windows, CLI ≥ 1.0.9) — chỉ khi máy có màn hình tương tác và không tắt bằng --no-gui.
-  if (env.gui) tools.push(...buildGuiTools(env.gui));
+  if (env.gui) tools.push(...buildGuiTools(env.gui), ...buildSkillTools(env.gui));
   // Excel / Word / Outlook có trên máy → làm qua API của ứng dụng (tự phát hiện, không cấu hình).
   if (env.office?.apps?.length) tools.push(...buildOfficeTools(env.office.host, env.office.apps));
   // Tiến trình nền + đọc log thời gian thực (dev server, build watch, claude -p, tail log).

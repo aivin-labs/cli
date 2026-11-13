@@ -1100,6 +1100,8 @@ namespace AivinGui {
       return false;
     }
 
+    const int STATE_SYSTEM_READONLY = 0x40;
+
     static bool SelectFirstCell(Accessibility.IAccessible row) {
       try {
         int n = row.accChildCount;
@@ -1111,10 +1113,14 @@ namespace AivinGui {
           var cell = cells[i] as Accessibility.IAccessible;
           if (cell == null || Convert.ToInt32(cell.get_accRole(0)) != ROLE_SYSTEM_CELL) continue;
           cell.accSelect(SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION, 0);
-          // Lệnh mặc định của ô (DataGridView: đặt ô hiện hành) — accSelect chỉ tô chọn, chưa chắc đổi dòng hiện hành.
+          // Lệnh mặc định của ô = đặt ô hiện hành (DataGridView). accSelect chỉ tô chọn: dòng hiện hành vẫn là dòng cũ (gui-bench 13/11). Ô SỬA ĐƯỢC
+          // thì lệnh mặc định còn mở chế độ sửa (phím sau rơi vào ô) → chỉ chạy khi ô chỉ đọc (cờ STATE_SYSTEM_READONLY) hoặc lệnh không phải sửa.
           string def = null;
+          int state = 0;
           try { def = cell.get_accDefaultAction(0); } catch (COMException) { }
-          if (!string.IsNullOrEmpty(def) && def.IndexOf("edit", StringComparison.OrdinalIgnoreCase) < 0) { try { cell.accDoDefaultAction(0); } catch (COMException) { } }
+          try { state = Convert.ToInt32(cell.get_accState(0)); } catch (COMException) { } catch (InvalidCastException) { }
+          bool readOnlyCell = (state & STATE_SYSTEM_READONLY) != 0;
+          if (!string.IsNullOrEmpty(def) && (readOnlyCell || def.IndexOf("edit", StringComparison.OrdinalIgnoreCase) < 0)) { try { cell.accDoDefaultAction(0); } catch (COMException) { } }
           return true;
         }
       } catch (COMException) { } catch (InvalidCastException) { } catch (NotImplementedException) { } catch (ArgumentException) { }
@@ -1423,6 +1429,8 @@ namespace AivinGui {
         screenPoint = new Dictionary<string, object> { { "x", (int)Math.Round(sp.X) }, { "y", (int)Math.Round(sp.Y) } };
       } catch { }
       IntPtr fgBefore = Native.GetForegroundWindow();
+      IntPtr caretBefore = CaretOf(window);
+      caretAtKeys = IntPtr.Zero;
       Native.POINT cursorBefore;
       bool haveCursor = Native.GetCursorPos(out cursorBefore);
       string used = DoAction(action, method, el, window, a);
@@ -1437,7 +1445,7 @@ namespace AivinGui {
         try { restored = ForceForeground(fgBefore); } catch (GuiError) { }
       }
       // Chạy nền: người dùng đang ở cửa sổ khác → cửa sổ của AI về lại dưới đáy (không chồng lên việc của người dùng).
-      if (used == "mouse" || used == "keyboard") restored = GiveBackRealInput(action, window, fgBefore, haveCursor, cursorBefore);
+      if (used == "mouse" || used == "keyboard") restored = GiveBackRealInput(action, window, fgBefore, haveCursor, cursorBefore, caretBefore);
       if (restored || (used != "mouse" && used != "keyboard" && fgBefore != window && window != IntPtr.Zero)) SendToBack(window);
       // Pattern actions expose their new state synchronously in most UIA providers. Keep a short grace for
       // providers that publish property changes just after returning; real mouse/keyboard still needs longer.
@@ -1447,6 +1455,19 @@ namespace AivinGui {
       if (window != IntPtr.Zero && Native.IsWindow(window)) res["window_class"] = ClassOf(window);
       if (lastMousePoint != null) screenPoint = lastMousePoint;
       if (screenPoint != null) res["screen_point"] = screenPoint;
+      // Đang giữ focus cho ô nhập tạm (vd ô đổi tên) mà ô đó đã đóng (hết dấu nháy) → trả focus cho cửa sổ người dùng đã dùng lúc bắt đầu giữ.
+      // Xét cả hộp thoại của cửa sổ đang giữ (bấm "Lưu" trong hộp Lưu thành): dấu nháy về lại ô soạn cũ / mất hẳn = ô tạm đã đóng.
+      if (!restored && heldFromUser != IntPtr.Zero && Native.IsWindow(heldWindow) && (window == heldWindow || BelongsTo(window, heldWindow))
+          && CaretOf(heldWindow) != heldCaret && !InMenuMode(heldWindow)) {
+        IntPtr give = heldFromUser;
+        IntPtr held = heldWindow;
+        heldFromUser = IntPtr.Zero; heldWindow = IntPtr.Zero; heldCaret = IntPtr.Zero;
+        if (Native.IsWindow(give) && TookForeground(Native.GetForegroundWindow(), held)) {
+          restored = RestoreForeground(give, held);
+          if (!restored && UserIdleMs() >= 300) { try { restored = ForceForeground(give); } catch (GuiError) { } }
+          if (restored) SendToBack(held);
+        }
+      }
       if (restored) res["focus_returned_to_user"] = true;
       // Nút khởi chạy việc nặng làm luồng giao diện đứng: đọc bằng chứng lúc đó sẽ kẹt theo ứng dụng, nên báo đang bận rồi trả về ngay.
       bool appBusy = window != IntPtr.Zero && Native.IsWindow(window) && !IsWindowResponsive(window, 1500);
@@ -1536,7 +1557,7 @@ namespace AivinGui {
         }
         case "key":
           if ((method == "auto" || method == "background") && TryBackgroundKeys(el, window, Str(a, "keys") ?? "")) return "posted";
-          FocusTarget(el, window); KeyCombo(Str(a, "keys") ?? "", window); return "keyboard";
+          FocusTarget(el, window); caretAtKeys = CaretOf(window); KeyCombo(Str(a, "keys") ?? "", window); return "keyboard";
         case "scroll": {
           string dir = (Str(a, "direction") ?? "down").ToLowerInvariant();
           int amount = Math.Max(1, Math.Min(Int(a, "amount", 3), 30));
@@ -1778,7 +1799,18 @@ namespace AivinGui {
      * Mượn xong thì trả: con trỏ về chỗ cũ, tiêu điểm về cửa sổ người dùng đang dùng. Họ đã cầm lại chuột thì không kéo con trỏ của họ đi; menu AI vừa
      * mở thì giữ (mất tiêu điểm là menu đóng, bước sau không chọn được).
      */
-    static bool GiveBackRealInput(string action, IntPtr window, IntPtr fgBefore, bool haveCursor, Native.POINT cursorBefore) {
+    /** Ô đang có dấu nháy nhập chữ (caret) của luồng giao diện sở hữu cửa sổ; không có → IntPtr.Zero. */
+    static IntPtr CaretOf(IntPtr window) {
+      if (window == IntPtr.Zero) return IntPtr.Zero;
+      uint pid;
+      var info = new Native.GUITHREADINFO();
+      info.cbSize = (uint)Marshal.SizeOf(info);
+      uint thread = Native.GetWindowThreadProcessId(window, out pid);
+      if (thread == 0 || !Native.GetGUIThreadInfo(thread, ref info)) return IntPtr.Zero;
+      return info.hwndCaret;
+    }
+
+    static bool GiveBackRealInput(string action, IntPtr window, IntPtr fgBefore, bool haveCursor, Native.POINT cursorBefore, IntPtr caretBefore) {
       Native.POINT aiCursor;
       bool haveAi = Native.GetCursorPos(out aiCursor);
       Thread.Sleep(150); // để ứng dụng nhận xong cú bấm / phím trước khi đổi tiêu điểm
@@ -1787,6 +1819,18 @@ namespace AivinGui {
         Native.SetCursorPos(cursorBefore.X, cursorBefore.Y);
       }
       if (action == "right_click" || InMenuMode(window)) return false;
+      // Phím vừa MỞ một ô nhập tạm (dấu nháy hiện ở ô mới: ô đổi tên của Explorer sau F2, ô sửa trong bảng, ô gợi ý) → giữ focus như menu đang mở:
+      // trả focus là ô đó tự đóng, chữ gõ ở bước sau không vào đâu (gui-bench 13/11: đổi tên tệp không bao giờ được). Dấu nháy vẫn ở ô cũ
+      // (Ctrl+S trong Notepad) → trả focus như thường. Nhận theo trạng thái hệ điều hành, không theo ứng dụng.
+      if (action == "key") {
+        IntPtr caretNow = CaretOf(window);
+        IntPtr caretRef = caretAtKeys != IntPtr.Zero || caretBefore == IntPtr.Zero ? caretAtKeys : caretBefore;
+        if (caretNow != IntPtr.Zero && caretNow != caretRef) {
+          if (fgBefore != IntPtr.Zero && fgBefore != window && Native.IsWindow(fgBefore)) { heldFromUser = fgBefore; heldWindow = window; heldCaret = caretNow; }
+          else if (heldFromUser != IntPtr.Zero && BelongsTo(window, heldWindow)) heldCaret = caretNow; // ô tạm mới mở tiếp trong lúc đang giữ
+          return false;
+        }
+      }
       IntPtr fg = Native.GetForegroundWindow();
       if (fgBefore == IntPtr.Zero || fgBefore == window || !Native.IsWindow(fgBefore) || !TookForeground(fg, window)) return false;
       if (RestoreForeground(fgBefore, window)) return true;
@@ -2062,6 +2106,13 @@ namespace AivinGui {
 
     /** Điểm màn hình của node chữ OCR của thao tác đang chạy (null = không phải node OCR). */
     static System.Windows.Point? ocrPoint = null;
+    /** Dấu nháy lúc vừa gửi phím thật (sau khi cửa sổ lên trên + phần tử được focus) — so với sau phím để biết phím vừa mở ô nhập tạm. */
+    static IntPtr caretAtKeys = IntPtr.Zero;
+    /** Đang giữ focus ở cửa sổ AI (ô nhập tạm vừa mở) thay cho cửa sổ người dùng này; trả lại khi ô đó đóng. */
+    static IntPtr heldFromUser = IntPtr.Zero;
+    static IntPtr heldWindow = IntPtr.Zero;
+    /** Ô nhập tạm (có dấu nháy) đã khiến giữ focus — khi dấu nháy rời ô đó (ô đóng, hoặc về lại ô soạn cũ) thì trả focus. */
+    static IntPtr heldCaret = IntPtr.Zero;
     /** node_id OCR của thao tác đang chạy — tính lại điểm theo vị trí cửa sổ lúc bấm (sau khi khôi phục cửa sổ thu nhỏ). */
     static string ocrNodeId = null;
 

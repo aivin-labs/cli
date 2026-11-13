@@ -78,9 +78,41 @@ export function claudeAbsPath(abs, platform = process.platform) {
  * Cờ của job có hợp đồng kiểm trên 2.1.322 (11/11/2026): `--worktree`, `--max-budget-usd`, `--effort`, `--allowedTools`, `--add-dir`,
  * `--settings`, `--setting-sources`, `--strict-mcp-config`, `--permission-prompts none`.
  */
+/**
+ * Hồ sơ tài khoản của agent lập trình (14/11/2026) — mỗi tài khoản một thư mục cấu hình riêng, truyền qua biến môi trường CHÍNH THỨC của agent
+ * (`profileEnv` của adapter: Claude Code `CLAUDE_CONFIG_DIR`; adapter Codex sau này `CODEX_HOME`). Chuyển tài khoản = chọn hồ sơ, không sao chép
+ * token, không đụng giao diện. Người dùng đăng nhập vào mỗi hồ sơ MỘT lần (máy không đăng nhập hộ). Thư mục: ~/.aivin/agent-profiles/<agent>/<tên>.
+ */
+export const AGENT_PROFILES_DIR = path.join(REMOTE_CONFIG_DIR, 'agent-profiles');
+const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/i;
+
+/** Thư mục hồ sơ `name` của adapter — tên sai / adapter không hỗ trợ / chưa tạo → lỗi kèm cách tạo. */
+export function agentProfileDir(adapter, name, { root = AGENT_PROFILES_DIR } = {}) {
+  const n = String(name || '').trim();
+  if (!adapter.profileEnv) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `${adapter.label} has no account profiles on this device`);
+  if (!PROFILE_NAME_RE.test(n)) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'account: letters, digits, - or _ (max 40)');
+  const dir = path.join(root, adapter.id, n);
+  if (!fs.existsSync(dir)) {
+    throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `No ${adapter.label} account profile "${n}" — the person creates it once: set ${adapter.profileEnv}=${dir}, run ${adapter.id} and sign in`);
+  }
+  return dir;
+}
+
+/** Hồ sơ đã có của từng adapter (tên thư mục). */
+export function listAgentProfiles(adapters, { root = AGENT_PROFILES_DIR } = {}) {
+  const out = {};
+  for (const a of adapters) {
+    if (!a.profileEnv) continue;
+    const dir = path.join(root, a.id);
+    out[a.id] = fs.existsSync(dir) ? fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory() && PROFILE_NAME_RE.test(d.name)).map((d) => d.name) : [];
+  }
+  return out;
+}
+
 export const CLAUDE_ADAPTER = Object.freeze({
   id: 'claude',
   label: 'Claude Code',
+  profileEnv: 'CLAUDE_CONFIG_DIR',
   candidates({ env = process.env, platform = process.platform, home = os.homedir() } = {}) {
     const exe = platform === 'win32' ? 'claude.exe' : 'claude';
     const out = [...onPath(exe, env), path.join(home, '.local', 'bin', exe), path.join(home, '.claude', 'local', exe)];
@@ -226,6 +258,7 @@ function contractPrompt({ jobId, jobDir, contract, hasTestCheck, note }) {
 
 export function createAgentRunner({
   adapters = DEFAULT_AGENT_ADAPTERS, find = findAgentBinary, spawnImpl = spawn, now = Date.now, jobsDir = JOBS_DIR, measure = measureEvidence, probeFlags = helpFlags,
+  profilesRoot = AGENT_PROFILES_DIR,
 } = {}) {
   const found = new Map();
   const flagCache = new Map();
@@ -314,7 +347,7 @@ export function createAgentRunner({
   function remember(j) {
     if (!j.session_id) return;
     const list = loadSessions().filter((s) => !(s.agent === j.agent && s.session_id === j.session_id));
-    list.unshift({ agent: j.agent, session_id: j.session_id, cwd: j.cwd, prompt: j.prompt.slice(0, 200), at: new Date(now()).toISOString(), ok: j.result?.ok });
+    list.unshift({ agent: j.agent, session_id: j.session_id, cwd: j.cwd, prompt: j.prompt.slice(0, 200), at: new Date(now()).toISOString(), ok: j.result?.ok, ...(j.account ? { account: j.account } : {}) });
     saveSessions(list);
   }
 
@@ -419,6 +452,8 @@ export function createAgentRunner({
     if (prompt.length > MAX_PROMPT_CHARS) throw invalid(`prompt is longer than ${MAX_PROMPT_CHARS} characters`);
     if ([...jobs.values()].filter((j) => RUNNING.has(j.status)).length >= MAX_JOBS) throw new DeviceToolError(AGENT_BUSY, `${MAX_JOBS} agent tasks are already running — wait or agent.stop one`);
     const adapter = adapterFor(args.agent ? String(args.agent) : undefined);
+    const account = args.account ? String(args.account).trim() : '';
+    const accountDir = account ? agentProfileDir(adapter, account, { root: profilesRoot }) : null;
     const jobId = `${adapter.id}-${randomUUID().slice(0, 8)}`;
 
     let cwd;
@@ -447,7 +482,7 @@ export function createAgentRunner({
     }
     const session = prev ? prev.session_id : String(args.session || 'new');
     const resume = session === 'new' ? undefined
-      : session === 'continue' ? loadSessions().find((s) => s.agent === adapter.id && s.cwd === cwd)?.session_id
+      : session === 'continue' ? loadSessions().find((s) => s.agent === adapter.id && s.cwd === cwd && (s.account || '') === account)?.session_id
       : session;
     if (session === 'continue' && !resume) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `No earlier ${adapter.label} session in this folder — use session "new"`);
     // Nói tiếp một phiên: agent đã có worktree từ lần đầu — không tạo thêm.
@@ -469,9 +504,11 @@ export function createAgentRunner({
     const j = {
       id: jobId, agent: adapter.id, status: 'running', prompt: prompt || `contract ${extra.contractId}`, cwd, cwdShown: args.cwd || cwd, mode: agentOpts.mode,
       session_id: resume, model: undefined, texts: [], tools: [], result: null, error: null, startedAt: now(), endedAt: 0, waiters: new Set(), child: null,
-      abort: new AbortController(), ...extra,
+      abort: new AbortController(), ...extra, ...(account ? { account } : {}),
     };
-    const child = spawnImpl(binaryOf(adapter).bin, argv, { cwd: spawnCwd || cwd, env: agentEnv(process.env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    // Hồ sơ tài khoản: thư mục cấu hình riêng qua biến môi trường chính thức của agent — phiên / đăng nhập / hạn mức của tài khoản đó.
+    const childEnv = accountDir ? { ...agentEnv(process.env), [adapter.profileEnv]: accountDir } : agentEnv(process.env);
+    const child = spawnImpl(binaryOf(adapter).bin, argv, { cwd: spawnCwd || cwd, env: childEnv, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     j.child = child;
     jobs.set(j.id, j);
     persist(j);
@@ -557,6 +594,7 @@ export function createAgentRunner({
 
   return {
     run, status, stop, sessions,
+    profiles: () => ({ profiles: listAgentProfiles(installed(), { root: profilesRoot }) }),
     installed: () => installed().map((a) => ({ id: a.id, label: a.label, version: binaryOf(a).version })),
     /** Còn job đang chạy / đang đo — daemon không tự khởi động lại để cập nhật lúc này. */
     hasRunning: () => [...jobs.values()].some((j) => RUNNING.has(j.status)),
@@ -579,6 +617,7 @@ export function buildAgentTools(runner) {
         project_config: bool('load the folder\'s own agent settings, hooks and MCP servers (default true; false for a folder you do not trust; always false with contract)'),
         contract: str('CONTRACT.md text issued by Aivin'), contract_sha256: str('sha256 of that CONTRACT.md'), test_check: str('TEST_CHECK.md text, when the contract names test_check'),
         continue_job: str('fix round: an earlier contract job — continue its session in its worktree (send the contract again)'),
+        account: str('run as this account profile of the agent (from agent.profiles) — its own sign-in, sessions and usage limits; default: the usual account of the agent'),
         wait_ms: num(`wait for the answer up to this long (default ${DEFAULT_WAIT_MS}, max ${MAX_WAIT_MS})`),
       }) },
     { name: 'agent.status', group: ToolGroup.PROC, read_only: true, handler: (a, c) => runner.status(a, c),
@@ -587,6 +626,9 @@ export function buildAgentTools(runner) {
     { name: 'agent.stop', group: ToolGroup.PROC, handler: (a) => runner.stop(a),
       description: 'Stop a running coding-agent task.',
       input_schema: schema({ job: str('job from agent.run') }, ['job']) },
+    { name: 'agent.profiles', group: ToolGroup.PROC, read_only: true, handler: () => runner.profiles(),
+      description: 'Account profiles of each installed coding agent on this computer (each has its own sign-in and usage limits). Pass one as account to agent.run to switch account without any UI. The person creates a profile once by signing in to it.',
+      input_schema: schema({}) },
     { name: 'agent.sessions', group: ToolGroup.PROC, read_only: true, handler: (a, c, e) => runner.sessions(a, c, e),
       description: 'Recent coding-agent sessions started from Aivin on this computer (agent, folder, first words of the task, when, ok) — to continue one.',
       input_schema: schema({ cwd: str('only sessions of this folder'), agent: str('only this agent') }) },
