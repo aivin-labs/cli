@@ -45,6 +45,8 @@ const EXECUTABLE_EXT = /\.(exe|com|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|msi|m
 const OBSERVE_MAX_NODES = 300;
 const APPS_CACHE_MS = 10 * 60_000;
 const OPEN_WAIT_MS = 10_000;
+/** Mở tệp: Excel / Word khởi động nguội mất 10–15 s mới ghi tên tệp lên tiêu đề. */
+const OPEN_FILE_WAIT_MS = 20_000;
 const WAIT_MAX_MS = 60_000;
 const FIND_DEFAULT = 20;
 const FIND_MAX = 60;
@@ -111,15 +113,106 @@ export function assertAppAllowed(name, { fullAccess }) {
 const normalizeName = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/gi, 'd').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 /**
+ * Planner nhìn ảnh nói theo ký hiệu trên nút ("×", "7", "☰"), cây trợ năng gọi bằng chữ ("Multiply by", "Seven", "Open Navigation").
+ * Mỗi ký hiệu → các tên chữ hay gặp; khớp qua tên chữ bị trừ nhẹ điểm so với khớp thẳng (gui-bench 13/11/2026: "×" / "=" bị bỏ hết ký tự
+ * thành truy vấn rỗng, "7" không khớp "Seven").
+ */
+const GLYPH_ALIASES = {
+  '×': ['multiply', 'times', 'close'], '*': ['multiply'], '✕': ['close'], '✖': ['close'], '╳': ['close'], 'x': ['close'],
+  '÷': ['divide'], '/': ['divide'], '+': ['plus', 'add', 'new'], '-': ['minus', 'subtract'], '−': ['minus', 'subtract'], '–': ['minus'],
+  '=': ['equals', 'equal'], '%': ['percent'], '±': ['positive negative', 'negate'], '+/-': ['positive negative', 'negate'], '.': ['decimal'], ',': ['decimal'],
+  '←': ['back'], '→': ['forward', 'next'], '↑': ['up'], '↓': ['down'], '⌫': ['backspace'],
+  '☰': ['navigation', 'menu'], '≡': ['navigation', 'menu'], '⋯': ['more'], '…': ['more'], '...': ['more'], '⋮': ['more'],
+  '🔍': ['search'], '⚙': ['settings'], '⚙️': ['settings'], '⟳': ['refresh'], '↻': ['refresh'], '✓': ['ok', 'done'], '✔': ['ok', 'done'],
+  menu: ['navigation'], hamburger: ['navigation', 'menu'],
+};
+const DIGIT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+
+/**
+ * Từ chỉ loại phần tử ở đầu / cuối mô tả ("nút Lưu", "Save button", "ô Họ tên", "text area") là gợi ý vai trò chứ không phải chữ trên phần
+ * tử. Không tách ra thì "Save button" chỉ khớp nửa câu → mơ hồ; "text area" không khớp gì dù cửa sổ chỉ có một ô soạn thảo.
+ */
+const EDITABLE_ROLES = ['edit', 'document', 'combobox'];
+const ROLE_HINTS = [
+  [/^(text ?box|text ?field|text ?area|text ?input|input ?box|input ?field|input|edit ?box|field|box|editor|o nhap|o)$/, EDITABLE_ROLES],
+  [/^(button|btn|nut|icon|bieu tuong)$/, ['button', 'splitbutton', 'menuitem', 'hyperlink']],
+  [/^(link|hyperlink|lien ket|duong dan)$/, ['hyperlink']],
+  [/^(tab)$/, ['tabitem']],
+  [/^(check ?box|o tich|o danh dau)$/, ['checkbox']],
+  [/^(drop ?down|combo ?box|combo|danh sach chon)$/, ['combobox']],
+];
+
+function roleHintOf(phrase) {
+  for (const [re, roles] of ROLE_HINTS) if (re.test(phrase)) return roles;
+  return null;
+}
+
+/** Tách từ chỉ loại ở cuối rồi ở đầu (một hoặc hai từ). Không có → null. */
+function splitRoleHint(q) {
+  const words = q.split(' ').filter(Boolean);
+  for (const n of [2, 1]) {
+    if (words.length >= n) {
+      const tail = roleHintOf(words.slice(-n).join(' '));
+      if (tail) return { rest: words.slice(0, -n).join(' '), roles: tail };
+      const head = roleHintOf(words.slice(0, n).join(' '));
+      if (head) return { rest: words.slice(n).join(' '), roles: head };
+    }
+  }
+  return null;
+}
+
+/** Các cách hiểu một mô tả: nguyên văn, qua ký hiệu / chữ số, và bỏ từ chỉ loại (kèm vai trò gợi ý). */
+function queryVariants(raw) {
+  const text = String(raw || '').trim();
+  const out = [];
+  const add = (q, alias, roles) => {
+    const n = normalizeName(q);
+    const words = n.split(' ').filter(Boolean);
+    if (!words.length && !roles) return;
+    if (out.some((v) => v.q === n && String(v.roles) === String(roles))) return;
+    out.push({ q: n, words, alias, roles });
+  };
+  add(text, false);
+  const lower = text.toLowerCase();
+  for (const a of GLYPH_ALIASES[lower] || []) add(a, true);
+  if (/^\d$/.test(lower)) add(DIGIT_WORDS[+lower], true);
+  const hint = splitRoleHint(normalizeName(text).replace(/^(the|a|an) /, ''));
+  if (hint) add(hint.rest, false, hint.roles);
+  return out;
+}
+
+/** Mô tả nói thẳng tới khung cửa sổ — chỉ khi đó mới chọn phần tử khung (nút thu nhỏ / đóng, menu hệ thống). */
+const CHROME_QUERY = /\b(minimi[sz]e|maximi[sz]e|restore|close|system menu|title ?bar)\b/;
+const CHROME_QUERY_VI = /(thu nhỏ|phóng to|khôi phục|đóng|thanh tiêu đề)/i;
+
+/** Phần tử làm được thao tác này không (fill cần ô nhập, toggle cần ô tích…). undefined = không biết thao tác. */
+function compatibleWith(node, action) {
+  const role = String(node.role || '').toLowerCase();
+  const p = node.patterns || [];
+  if (node.source === 'ocr') return true;
+  switch (action) {
+    case GuiAction.SET_VALUE: case GuiAction.TYPE: return !node.readonly && (EDITABLE_ROLES.includes(role) || p.includes('value'));
+    case GuiAction.TOGGLE: return p.includes('toggle') || role === 'checkbox' || role === 'radiobutton';
+    case GuiAction.SELECT: return p.includes('select') || p.includes('expand') || ['combobox', 'list', 'listitem', 'tabitem', 'radiobutton', 'dataitem', 'treeitem'].includes(role);
+    case GuiAction.CLICK: case GuiAction.DOUBLE_CLICK: return p.length > 0 || ['button', 'menuitem', 'hyperlink', 'listitem', 'tabitem', 'treeitem', 'checkbox', 'radiobutton', 'dataitem', 'splitbutton'].includes(role);
+    default: return undefined;
+  }
+}
+
+/** Từ ngắn (≤ 2 ký tự) và số chỉ khớp nguyên một từ của chữ hiện trên phần tử — không khớp đầu từ, không khớp AutomationId ("1" ≠ "Item 1"). */
+const strictWord = (word) => word.length <= 2 || /^\d+$/.test(word);
+
+/**
  * Rank UI nodes with richer evidence while keeping the model-facing schema small. Hard exclusions happen
  * before scoring; exact accessible names and AutomationIds beat loose word matches. The margin between the
  * first two candidates is used by gui.do to refuse ambiguous actions instead of guessing.
+ * `complete` = mọi từ của (một cách hiểu) mô tả đều khớp. `action` (tuỳ chọn) ưu tiên phần tử làm được thao tác đó.
  */
-export function rankGuiNodes(nodes, query, role = '', { matchValue = true } = {}) {
-  const q = normalizeName(query);
-  const words = q.split(' ').filter(Boolean);
+export function rankGuiNodes(nodes, query, role = '', { matchValue = true, action, includeOffscreen = false } = {}) {
+  const variants = queryVariants(query);
   const wantedRole = String(role || '').toLowerCase();
-  if (!words.length) return [];
+  if (!variants.length) return [];
+  const allowChrome = CHROME_QUERY.test(normalizeName(query)) || CHROME_QUERY_VI.test(String(query || ''));
   // Chữ OCR nằm trên một phần tử đã tắt cũng là đã tắt: bấm vào đó không có tác dụng mà vẫn báo thành công.
   const disabledRects = (nodes || []).filter((n) => n.disabled && n.rect).map((n) => n.rect);
   const onDisabled = (n) => n.source === 'ocr' && n.rect && disabledRects.some((r) => {
@@ -127,31 +220,61 @@ export function rankGuiNodes(nodes, query, role = '', { matchValue = true } = {}
     const cy = n.rect.y + n.rect.h / 2;
     return cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h;
   });
-  return (nodes || [])
-    .filter((n) => (!wantedRole || String(n.role || '').toLowerCase() === wantedRole || n.source === 'ocr') && !n.disabled && !n.offscreen && !onDisabled(n))
+  const pool = (nodes || []).filter((n) => (!wantedRole || String(n.role || '').toLowerCase() === wantedRole || n.source === 'ocr')
+    && !n.disabled && (includeOffscreen || !n.offscreen) && !onDisabled(n) && (allowChrome || !n.chrome));
+  // Mô tả chỉ có từ chỉ loại ("text area"): ứng viên là mọi phần tử đúng loại làm được thao tác — chỉ một thì chắc, nhiều thì mơ hồ.
+  const roleOnly = variants.find((v) => !v.words.length && v.roles);
+  const roleOnlyHits = roleOnly ? pool.filter((n) => roleOnly.roles.includes(String(n.role || '').toLowerCase()) && compatibleWith(n, action) !== false) : [];
+  return pool
     .map((node, order) => {
       const name = normalizeName(node.name);
       const aid = normalizeName(node.automation_id);
       const value = matchValue ? normalizeName(node.value) : '';
       const help = normalizeName(node.help);
       const combined = [name, aid, value, help].filter(Boolean).join(' ');
+      const shown = [name, value, help].filter(Boolean).join(' ').split(' ');
       // Khớp theo đầu từ; chỉ từ đủ dài mới được khớp giữa chuỗi (AutomationId dính liền) — "ton" (tồn) không được khớp "TogglePaneButton".
       const tokens = combined.split(' ');
-      const hits = words.filter((word) => tokens.some((token) => token.startsWith(word)) || (word.length >= 4 && combined.includes(word))).length;
-      if (!hits) return null;
-      let score = Math.round((hits / words.length) * 50);
-      const evidence = [];
-      if (name === q) { score += 50; evidence.push('exact_name'); }
-      else if (aid === q) { score += 45; evidence.push('exact_automation_id'); }
-      else if (name.startsWith(q)) { score += 35; evidence.push('name_prefix'); }
-      else if (words.every((word) => name.includes(word))) { score += 30; evidence.push('all_words_in_name'); }
-      else if (words.every((word) => combined.includes(word))) { score += 20; evidence.push('all_words'); }
-      if (node.source === 'ocr') { score -= 5; evidence.push('ocr'); }
-      if (node.patterns?.length) { score += 3; evidence.push('actionable_pattern'); }
-      return { node, score, hits, evidence, order };
+      const nodeRole = String(node.role || '').toLowerCase();
+      const compat = compatibleWith(node, action);
+      let best = null;
+      for (const v of variants) {
+        if (!v.words.length) {
+          if (!roleOnlyHits.includes(node)) continue;
+          const entry = { score: 55, hits: 1, total: 1, complete: roleOnlyHits.length === 1, evidence: ['only_of_role'] };
+          if (!best || entry.score > best.score) best = entry;
+          continue;
+        }
+        const { q, words } = v;
+        const hits = words.filter((word) => (strictWord(word)
+          ? shown.includes(word)
+          : tokens.some((token) => token.startsWith(word)) || (word.length >= 4 && combined.includes(word)))).length;
+        if (!hits) continue;
+        let score = Math.round((hits / words.length) * 50);
+        const evidence = [];
+        const longQ = q.length > 2;
+        if (name === q) { score += 50; evidence.push('exact_name'); }
+        else if (longQ && aid === q) { score += 45; evidence.push('exact_automation_id'); }
+        else if (longQ && name.startsWith(q)) { score += 35; evidence.push('name_prefix'); }
+        else if (words.every((word) => (strictWord(word) ? name.split(' ').includes(word) : name.includes(word)))) { score += 30; evidence.push('all_words_in_name'); }
+        else if (hits === words.length) { score += 20; evidence.push('all_words'); }
+        if (v.alias) { score -= 5; evidence.push('alias'); }
+        if (v.roles) {
+          if (v.roles.includes(nodeRole)) { score += 8; evidence.push('role_hint'); } else if (node.source !== 'ocr') score -= 10;
+        }
+        const entry = { score, hits, total: words.length, complete: hits === words.length, evidence };
+        if (!best || entry.score > best.score || (entry.score === best.score && entry.complete && !best.complete)) best = entry;
+      }
+      if (!best) return null;
+      if (node.source === 'ocr') { best.score -= 5; best.evidence.push('ocr'); }
+      if (node.patterns?.length) { best.score += 3; best.evidence.push('actionable_pattern'); }
+      // fill vào nhãn chữ / toggle một nút thường không làm được gì mà có thể vẫn "thành công": ưu tiên phần tử làm được thao tác.
+      if (compat === true) { best.score += 8; best.evidence.push('fits_action'); }
+      else if (compat === false && action !== GuiAction.CLICK) { best.score -= 30; best.evidence.push('wrong_kind'); }
+      return { node, ...best, order };
     })
     .filter(Boolean)
-    .sort((a, b) => b.score - a.score || b.hits - a.hits || a.order - b.order);
+    .sort((a, b) => b.score - a.score || Number(b.complete) - Number(a.complete) || b.hits - a.hits || a.order - b.order);
 }
 
 /**
@@ -176,6 +299,82 @@ export function needsServerCheck(query, node) {
   return riskyLabelWords(node?.name || node?.automation_id).some((w) => !asked.has(w));
 }
 
+/**
+ * gui.do không chắc → trả ứng viên để BE phân giải. BE đọc `role` / `name` / `id` (DeviceGuiService: `${role} "${name}" [${id}]`), bản cũ chỉ
+ * có `ref` / `label` nên thông báo cho Planner thành `item "" []` — giữ cả hai kiểu.
+ */
+function ambiguousResult(found) {
+  return {
+    ok: false, code: DeviceErrorCode.GUI_AMBIGUOUS_TARGET,
+    choices: found.nodes.map((n) => ({
+      ref: n.id, id: n.id, role: n.role, name: n.name || n.automation_id || undefined,
+      label: [n.name || n.automation_id || n.role, n.role].filter(Boolean).join(' — '),
+    })),
+    observation: found._raw_observation,
+  };
+}
+
+/**
+ * Khung cửa sổ trong kết quả observe: bỏ thanh tiêu đề / menu hệ thống (thang phân giải ở BE cũng chọn nhầm chúng: "System" của Settings),
+ * giữ mỗi loại nút thu nhỏ / phóng to / đóng một cái (ứng dụng Store có hai bộ). Id của các node còn lại không đổi.
+ */
+export function withoutChromeNoise(nodes) {
+  const seenCaption = new Set();
+  return nodes.filter((n) => {
+    if (!n.chrome) return true;
+    if (n.role !== 'button') return false;
+    const key = n.automation_id || n.name;
+    if (seenCaption.has(key)) return false;
+    seenCaption.add(key);
+    return true;
+  });
+}
+
+/**
+ * Nhiều ô nhập cùng tên: MSAA đặt tên ô theo nhãn chữ đứng trước nó, nên ô không có nhãn ngay sau cũng mang tên nhãn trên (gui-bench
+ * 13/11/2026: phiếu thu WinForms có hai ô "Số tiền"). Lấy ô nằm cùng hàng, bên phải nhãn chữ đúng tên đó; không phân định được → null.
+ */
+export function pickByLabelRow(candidates, nodes, query) {
+  const editable = candidates.filter((n) => n.rect && compatibleWith(n, GuiAction.SET_VALUE) === true);
+  if (editable.length < 2) return null;
+  const want = normalizeName(query);
+  const labels = nodes.filter((n) => n.rect && n.source !== 'ocr' && String(n.role || '').toLowerCase() === 'text' && normalizeName(n.name) === want);
+  const sameRow = editable.filter((e) => labels.some((l) => {
+    const cy = e.rect.y + e.rect.h / 2;
+    return cy >= l.rect.y - 4 && cy <= l.rect.y + l.rect.h + 4 && e.rect.x >= l.rect.x + l.rect.w - 4;
+  }));
+  return sameRow.length === 1 ? sameRow[0] : null;
+}
+
+const CLICK_GROUND_ROLES = new Set(['button', 'splitbutton', 'menuitem', 'hyperlink', 'listitem', 'tabitem', 'treeitem', 'checkbox', 'radiobutton', 'dataitem']);
+
+/**
+ * Chữ đọc trên ảnh nằm gọn trong một phần tử thật làm được thao tác (nút hiện "C" là "Clear", nút biểu tượng có chữ khác tên trợ năng) →
+ * thao tác trên phần tử đó: chạy bằng pattern dưới nền, có bằng chứng đọc lại, thay vì bấm toạ độ bằng chuột thật. Phần tử chứa phải ôm sát
+ * chữ (không lấy cả khung / vùng cuộn chứa mọi chữ). Không có → giữ node chữ.
+ */
+export function groundOcrNode(ocrNode, nodes, action) {
+  if (ocrNode?.source !== 'ocr' || !ocrNode.rect) return ocrNode;
+  const r = ocrNode.rect;
+  const cx = r.x + r.w / 2;
+  const cy = r.y + r.h / 2;
+  const textArea = Math.max(1, r.w * r.h);
+  let best = null;
+  for (const n of nodes) {
+    if (n.source === 'ocr' || n.chrome || n.disabled || n.offscreen || !n.rect) continue;
+    const b = n.rect;
+    if (cx < b.x || cx > b.x + b.w || cy < b.y || cy > b.y + b.h) continue;
+    const area = b.w * b.h;
+    if (area > Math.max(60 * textArea, 6000) || area > 160_000) continue;
+    const role = String(n.role || '').toLowerCase();
+    const fits = action === GuiAction.CLICK || action === GuiAction.DOUBLE_CLICK || action === GuiAction.RIGHT_CLICK
+      ? CLICK_GROUND_ROLES.has(role) || (n.patterns || []).includes('invoke')
+      : compatibleWith(n, action) === true;
+    if (fits && (!best || area < best.rect.w * best.rect.h)) best = n;
+  }
+  return best || ocrNode;
+}
+
 /** Chọn ứng dụng theo tên: trùng hẳn > bắt đầu bằng > chứa. Nhiều ứng viên ngang nhau → trả danh sách để Planner chọn lại. */
 export function matchApps(apps, query) {
   const q = normalizeName(query);
@@ -188,6 +387,22 @@ export function matchApps(apps, query) {
   if (!scored.length) return [];
   const top = scored[0].score;
   return scored.filter((x) => x.score === top).map((x) => x.app);
+}
+
+/**
+ * Mở qua explorer.exe. KHÔNG `windowsHide` (13/11/2026, gui-bench): cờ đó đặt SW_HIDE trong STARTUPINFO và Explorer / ứng dụng mở tệp làm
+ * theo — thư mục, Notepad lần đầu mở ra cửa sổ ẨN: người dùng không thấy, gui.windows không liệt kê, open_app chờ hết 10 s rồi báo không có
+ * cửa sổ. explorer.exe không có cửa sổ console nên không cần giấu gì; cửa sổ mới vẫn được đưa xuống nền ở settleNewWindow.
+ */
+/** Lệnh liên kết tệp là "Open with AIVIN Office Suite" (`"…\Aivin.exe" --open "%1"`). */
+export function isAivinOpenCommand(command, executable) {
+  const exe = path.win32.basename(String(executable || '')).toLowerCase();
+  const cmd = String(command || '');
+  return (exe === 'aivin.exe' || /\baivin\.exe\b/i.test(cmd)) && /(^|\s)--open\b/i.test(cmd);
+}
+
+function launchShell(target) {
+  spawn('explorer.exe', [target], { windowsHide: false, detached: true, stdio: 'ignore' }).on('error', () => undefined).unref();
 }
 
 function runPowerShellJson(script, signal) {
@@ -277,6 +492,7 @@ export function createGuiController({
       budget_ms: Number(args.budget_ms) || undefined,
     }, ctx);
     assertWindowAllowed(res.window, { fullAccess });
+    if (Array.isArray(res.nodes)) res.nodes = withoutChromeNoise(res.nodes);
     snapshotWindows.set(String(res.snapshot), res.window);
     if (snapshotWindows.size > 20) snapshotWindows.delete(snapshotWindows.keys().next().value);
     return res;
@@ -288,15 +504,26 @@ export function createGuiController({
    * hết từ thì lấy phần tử khớp nhiều từ nhất.
    */
   async function find(args, ctx) {
-    const words = normalizeName(args.query).split(' ').filter(Boolean);
-    if (!words.length) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give query (words of the element to find)');
+    if (!queryVariants(args.query).length) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give query (words of the element to find)');
+    const res = await observe({ ...args, max_nodes: 1500, budget_ms: 10_000 }, ctx);
+    return rankObservation(res, args);
+  }
+
+  /** Lọc / xếp hạng một lần observe theo mô tả (dùng chung cho gui.find và cho gui.do sau khi thêm chữ OCR vào cùng snapshot). */
+  function rankObservation(res, args) {
     const role = String(args.role || '').toLowerCase();
     const max = Math.max(1, Math.min(Number(args.max) || FIND_DEFAULT, FIND_MAX));
-    const res = await observe({ ...args, max_nodes: 1500, budget_ms: 10_000 }, ctx);
     // gui.do chọn phần tử để BẤM: không tính nội dung ô — chữ trên màn hình (thư, trang web) không được lái việc chọn nút (02/11/2026).
-    const scored = rankGuiNodes(res.nodes, args.query, role, { matchValue: args.match_value !== false });
-    const all = scored.filter((x) => x.hits === words.length);
-    const pool = all.length ? all : scored.filter((x) => x.hits === scored[0]?.hits);
+    let scored = rankGuiNodes(res.nodes, args.query, role, { matchValue: args.match_value !== false, action: args.action });
+    // Không có phần tử đang hiện nào khớp đủ: xét cả phần tử khuất trong vùng cuộn (mục cuối trang Settings, danh sách dài) — host cuộn tới
+    // hoặc gọi pattern khi thao tác. Phần tử đang hiện luôn được ưu tiên, menu ẩn không lấn được nút đang thấy.
+    if (!scored.some((x) => x.complete)) {
+      const hidden = rankGuiNodes(res.nodes, args.query, role, { matchValue: args.match_value !== false, action: args.action, includeOffscreen: true });
+      if (hidden.some((x) => x.complete)) scored = hidden;
+    }
+    const all = scored.filter((x) => x.complete);
+    const cover = (x) => x.hits / x.total;
+    const pool = all.length ? all : scored.filter((x) => cover(x) === cover(scored[0]));
     const picked = pool.slice(0, max);
     const margin = picked.length > 1 ? picked[0].score - picked[1].score : picked.length ? picked[0].score : 0;
     const out = { ...res, nodes: picked.map((x) => x.node), query: String(args.query), matched: all.length || scored.length, exact: all.length > 0, confidence: !picked.length ? 'none' : margin >= 15 || picked.length === 1 ? 'high' : margin >= 5 ? 'medium' : 'low', ambiguous: picked.length > 1 && margin < 5 || undefined };
@@ -323,34 +550,30 @@ export function createGuiController({
         action, window: args.within || args.window, keys: command === 'key' ? args.value : undefined,
         direction: command === 'scroll' ? args.value : undefined,
       }, ctx);
-      return { ok: true, action: command, effect: result.window_title_changed || result.focused_element || command };
+      return { ok: true, action: command, method: result.method, effect: result.window_title_changed || result.focused_element || command };
     }
 
     const query = String(args.target || '').trim();
     if (!query) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give target');
-    let found = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, match_value: false }, ctx);
+    const findArgs = { query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, match_value: false, action };
+    let found = await find(findArgs, ctx);
     if ((!found.nodes.length || !found.exact) && !found.ocr && found.tree_quality !== 'poor') {
-      const viaOcr = await find({ query, role: args.role, window: args.within || args.window, max: SEMANTIC_CHOICES, match_value: false, ocr: true }, ctx);
-      if (viaOcr.nodes.length && (viaOcr.exact || !found.nodes.length)) found = viaOcr;
+      // Đọc chữ trên ảnh của CHÍNH lần observe vừa rồi (cùng snapshot, id nối tiếp) — không đi lại cây trợ năng lần hai.
+      const raw = found._raw_observation;
+      const extra = await host.call('ocr', { snapshot: raw.snapshot }, ctx).catch(() => null);
+      if (extra?.nodes?.length) {
+        const viaOcr = rankObservation({ ...raw, nodes: [...raw.nodes, ...extra.nodes], ocr: extra.ocr }, findArgs);
+        if (viaOcr.nodes.length && (viaOcr.exact || !found.nodes.length)) found = viaOcr;
+      }
     }
     if (!found.nodes.length) throw new DeviceToolError(DeviceErrorCode.GUI_TARGET_NOT_FOUND, `No enabled visible target matched "${query}"`);
+    let picked = found.ambiguous ? null : found.nodes[0];
+    if (found.ambiguous && found.exact && action === GuiAction.SET_VALUE) picked = pickByLabelRow(found.nodes, found._raw_observation?.nodes || [], query);
     // Khớp một phần (không phần tử nào có đủ mọi từ) cũng là không chắc: chỉ trả ứng viên để BE phân giải, không bấm thẳng.
-    if (found.ambiguous || !found.exact) {
-      return {
-        ok: false, code: DeviceErrorCode.GUI_AMBIGUOUS_TARGET,
-        choices: found.nodes.map((n) => ({ ref: n.id, label: [n.name || n.automation_id || n.role, n.role].filter(Boolean).join(' — ') })),
-        observation: found._raw_observation,
-      };
-    }
+    if (!picked || !found.exact) return ambiguousResult(found);
 
-    const node = found.nodes[0];
-    if (command !== 'fill' && needsServerCheck(query, node)) {
-      return {
-        ok: false, code: DeviceErrorCode.GUI_AMBIGUOUS_TARGET,
-        choices: found.nodes.map((n) => ({ ref: n.id, label: [n.name || n.automation_id || n.role, n.role].filter(Boolean).join(' — ') })),
-        observation: found._raw_observation,
-      };
-    }
+    const node = groundOcrNode(picked, found._raw_observation?.nodes || [], action);
+    if (command !== 'fill' && needsServerCheck(query, node)) return ambiguousResult(found);
     if (command === 'fill' && node.password) {
       throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'AI may not fill password or secret fields — ask the user to enter it');
     }
@@ -453,6 +676,36 @@ export function createGuiController({
     return null;
   }
 
+  /**
+   * Cửa sổ đang hiện tệp vừa mở: tiêu đề chứa tên tệp, là cửa sổ mới HOẶC cửa sổ có sẵn vừa đổi tiêu đề. gui-bench 13/11/2026: Notepad / Excel /
+   * Explorer đang chạy thì mở tệp thành tab trong cửa sổ cũ và đóng cửa sổ tạm — trước đây trả về cửa sổ tạm (đã chết, GUI_WINDOW_GONE ở bước
+   * sau) hoặc chờ đủ 10 s "cửa sổ mới" không bao giờ tới. Ứng dụng không ghi tên tệp lên tiêu đề → lấy cửa sổ mới đầu tiên còn sống.
+   */
+  async function waitFileWindow(before, base, ctx) {
+    const want = normalizeName(base);
+    const titleOf = new Map(before.map((w) => [w.window, w.title]));
+    const started = Date.now();
+    const deadline = started + OPEN_FILE_WAIT_MS;
+    let firstFresh = null;
+    let freshSince = 0;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 300));
+      if (ctx.signal?.aborted) throw ctx.signal.reason;
+      const now = await host.call('windows', {}, ctx);
+      const showing = now.filter((w) => normalizeName(w.title).includes(want));
+      const hit = showing.find((w) => titleOf.get(w.window) !== w.title)
+        // Tệp đã mở sẵn ở tab đang hiện: tiêu đề không đổi — nhận sau một nhịp (không thì vừa mở là trả ngay cửa sổ cũ trước khi tab mới kịp hiện).
+        || (Date.now() - started > 1500 ? showing[0] : undefined);
+      if (hit) return hit;
+      const fresh = now.find((w) => !titleOf.has(w.window));
+      if (fresh && !firstFresh) { firstFresh = fresh; freshSince = Date.now(); }
+      if (firstFresh && !now.some((w) => w.window === firstFresh.window)) firstFresh = null;
+      // Cửa sổ mới đã đứng yên một lúc mà tiêu đề không có tên tệp: ứng dụng đó không ghi tên tệp lên tiêu đề.
+      if (firstFresh && Date.now() - freshSince > 2500) return now.find((w) => w.window === firstFresh.window);
+    }
+    return firstFresh;
+  }
+
   /** Cửa sổ đang ở trên cùng trước khi mở ứng dụng, kể cả loại không có trong gui.windows (hộp hệ thống, cửa sổ công cụ). */
   const currentForeground = (ctx) => host.call('window_info', {}, ctx).then((w) => w?.window).catch(() => undefined);
 
@@ -480,6 +733,20 @@ export function createGuiController({
     return next;
   }
 
+  /**
+   * Chặn mở tệp khi ứng dụng Windows sẽ dùng là "Open with AIVIN Office Suite" (`Aivin.exe --open`) — 13/11/2026, gui-bench: `.csv` trong HKCU
+   * trỏ tới ProgID không tồn tại nên Windows rơi về verb AIVIN, tệp bị đem TẢI LÊN Drive thay vì mở trong Excel. AI mở tệp trên máy không được
+   * kéo theo việc tải tệp lên mạng. Host không trả lời được thì cho qua (không chặn nhầm vì lỗi tra cứu).
+   */
+  async function assertNotAivinOpen(abs, ctx) {
+    const ext = path.extname(abs);
+    if (!ext) return;
+    const assoc = await host.call('assoc', { ext }, ctx).catch(() => null);
+    if (!assoc || !isAivinOpenCommand(assoc.command, assoc.executable)) return;
+    throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP,
+      `Windows opens ${ext} files on this computer with "AIVIN Office Suite", which uploads the file to Drive — not opened. Open the app by name (e.g. gui.open_app name="Excel") and open the file from there, or ask the user`);
+  }
+
   /** Mở ứng dụng theo tên trong danh sách Start, hoặc mở một tệp trong vùng được phép bằng ứng dụng mặc định. Không chạy lệnh tuỳ ý. */
   async function openApp(args, ctx, env) {
     const before = await host.call('windows', {}, ctx);
@@ -488,9 +755,14 @@ export function createGuiController({
       const abs = resolveInRoots(env.roots, String(args.file));
       if (EXECUTABLE_EXT.test(abs)) throw new DeviceToolError(DeviceErrorCode.GUI_BLOCKED_APP, 'Opening programs or scripts is not allowed — use an app name, or shell.exec');
       if (!fs.existsSync(abs)) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `File not found: ${args.file}`);
-      spawn('explorer.exe', [abs], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
-      const win = await settleNewWindow(await waitNewWindow(before, ctx, path.basename(abs, path.extname(abs))), before, userWindow, path.basename(abs, path.extname(abs)), ctx);
-      return { opened: path.basename(abs), window: win, hint: win ? undefined : 'No new window appeared — the file may have opened in an existing window, or Windows has no working default app for this file type; check gui.windows, or open the app by name' };
+      await assertNotAivinOpen(abs, ctx);
+      launchShell(abs);
+      const base = path.basename(abs, path.extname(abs));
+      const shown = await waitFileWindow(before, base, ctx);
+      const win = shown && before.some((w) => w.window === shown.window)
+        ? (await sendToBack(shown, userWindow, ctx), shown)
+        : await settleNewWindow(shown, before, userWindow, base, ctx);
+      return { opened: path.basename(abs), window: win, hint: win ? undefined : 'No window shows this file yet — Windows may have no working default app for this file type; check gui.windows, or open the app by name' };
     }
     const name = String(args.name || '').trim();
     if (!name) throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, 'Give name (an installed app) or file');
@@ -499,7 +771,7 @@ export function createGuiController({
     if (matches.length > 1 && !args.first) return { ambiguous: true, candidates: matches.slice(0, 10).map((m) => m.name), hint: 'Call again with the exact name' };
     const app = matches[0];
     assertAppAllowed(app.name, { fullAccess });
-    spawn('explorer.exe', [`shell:AppsFolder\\${app.app_id}`], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
+    launchShell(`shell:AppsFolder\\${app.app_id}`);
     const win = await settleNewWindow(await waitNewWindow(before, ctx, app.name), before, userWindow, app.name, ctx);
     if (win) assertWindowAllowed(win, { fullAccess });
     return { opened: app.name, window: win, hint: win ? undefined : 'App started but no new window yet — call gui.windows in a moment' };

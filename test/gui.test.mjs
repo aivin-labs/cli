@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
-const { assertAppAllowed, assertWindowAllowed, buildGuiTools, createGuiController, detectGui, matchApps, needsServerCheck, rankGuiNodes } = await import('../bin/lib/remote/gui/index.mjs');
+const { assertAppAllowed, assertWindowAllowed, buildGuiTools, createGuiController, detectGui, isAivinOpenCommand, matchApps, needsServerCheck, rankGuiNodes } = await import('../bin/lib/remote/gui/index.mjs');
 const { buildTools } = await import('../bin/lib/remote/toolHandlers.mjs');
 const { buildCatalog } = await import('../bin/lib/remote/deviceProfile.mjs');
 const { DEFAULT_GROUP_LIMITS, ToolGroup } = await import('../bin/lib/remote/constants.mjs');
@@ -119,6 +119,20 @@ test('open_app: không mở tệp chạy được; tên trùng nhiều → trả
   const gui = createGuiController({ host, notify: () => {} });
   await assert.rejects(gui.openApp({ file: 'evil.bat' }, {}, { roots: [root] }), (e) => e.code === 'GUI_BLOCKED_APP');
   await assert.rejects(gui.openApp({}, {}, { roots: [root] }), (e) => e.code === 'INVALID_ARGS');
+});
+
+test('open_app: tệp mà Windows sẽ mở bằng "AIVIN Office Suite" (tải lên Drive) → chặn, không chạy gì (13/11/2026)', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gui-root-'));
+  fs.writeFileSync(path.join(root, 'bang.csv'), 'a,b\r\n');
+  const exe = 'C:\\Users\\u\\AppData\\Local\\Aivin\\Aivin.exe';
+  const host = fakeHost({ windows: { windows: [] }, window_info: { window: '0x1' }, assoc: { command: `"${exe}" --open "%1"`, executable: exe } });
+  const gui = createGuiController({ host, notify: () => {} });
+  await assert.rejects(gui.openApp({ file: 'bang.csv' }, {}, { roots: [root] }), (e) => e.code === 'GUI_BLOCKED_APP' && /AIVIN Office Suite/.test(e.message));
+  assert.deepEqual(host.calls.find((c) => c.op === 'assoc')?.args, { ext: '.csv' });
+  assert.ok(isAivinOpenCommand(`"${exe}" --open "%1"`, exe));
+  assert.ok(!isAivinOpenCommand('"C:\\Program Files\\Microsoft Office\\Root\\Office16\\EXCEL.EXE" "%1"', 'C:\\Program Files\\Microsoft Office\\Root\\Office16\\EXCEL.EXE'));
+  assert.ok(!isAivinOpenCommand(`"${exe}" --share "%1"`, exe));
+  assert.ok(!isAivinOpenCommand('', ''));
 });
 
 test('danh mục: công cụ GUI chỉ có khi env.gui, nhóm GUI chạy một luồng', () => {
@@ -322,24 +336,64 @@ test('windowsHost: huỷ wait_for gửi { cancel: id } qua stdin mà không gi�
   assert.deepEqual(written.at(-1), { cancel: '1' });
 });
 
-test('gui.do: không thấy trong cây UIA thường thì tự thử lại với OCR; khi mơ hồ đính kèm luôn observation cho BE', async () => {
-  const obsList = [
-    { snapshot: 30, window: NOTEPAD, tree_quality: 'good', nodes: [{ id: '30.1', role: 'button', name: 'Cancel' }] },
-    { snapshot: 31, window: NOTEPAD, tree_quality: 'good', ocr: { lang: 'vi', count: 1, ms: 12 }, nodes: [
-      { id: '31.1', role: 'button', name: 'Cancel' },
-      { id: '31.t0', role: 'text', name: 'Ghi sổ', source: 'ocr' },
-    ] },
-  ];
+test('gui.do: không thấy trong cây UIA thường thì đọc chữ trên ảnh của CHÍNH snapshot đó (không observe lại, 13/11/2026)', async () => {
   const host = fakeHost({
-    observe: () => obsList.shift(),
+    observe: () => ({ snapshot: 30, window: NOTEPAD, tree_quality: 'good', nodes: [{ id: '30.1', role: 'button', name: 'Cancel' }] }),
+    ocr: (a) => ({ snapshot: a.snapshot, ocr: { lang: 'vi', count: 1, ms: 12 }, nodes: [{ id: '30.t0', role: 'text', name: 'Ghi sổ', source: 'ocr' }] }),
     act: (a) => ({ action: a.action, method: 'mouse', target: { exists: true } }),
   });
   const gui = createGuiController({ host, notify: () => {} });
   const clicked = await gui.semanticDo({ do: 'click', target: 'Ghi sổ', role: 'button', within: 'notepad' }, {}, {});
   assert.equal(clicked.ok, true);
-  assert.equal(host.calls.filter((c) => c.op === 'observe').length, 2);
-  assert.equal(host.calls.filter((c) => c.op === 'observe')[1].args.ocr, true);
-  assert.equal(host.calls.find((c) => c.op === 'act').args.node_id, '31.t0');
+  assert.equal(host.calls.filter((c) => c.op === 'observe').length, 1);
+  assert.equal(host.calls.find((c) => c.op === 'ocr').args.snapshot, 30);
+  assert.equal(host.calls.find((c) => c.op === 'act').args.node_id, '30.t0');
+});
+
+test('gui.do: ký hiệu / chữ số model nhìn ảnh nói ra khớp tên chữ; khung cửa sổ không bao giờ được chọn nhầm (13/11/2026)', () => {
+  const calc = [
+    { id: '1.5', role: 'menubar', name: 'System', automation_id: 'SystemMenuBar', chrome: true },
+    { id: '1.20', role: 'menuitem', name: 'System', automation_id: 'Item 1', chrome: true, patterns: ['expand'] },
+    { id: '1.8', role: 'button', name: 'Close Calculator', automation_id: 'Close', chrome: true, patterns: ['invoke'] },
+    { id: '1.16', role: 'button', name: 'Open Navigation', automation_id: 'TogglePaneButton', patterns: ['invoke'] },
+    { id: '1.44', role: 'button', name: 'Multiply by', automation_id: 'multiplyButton', patterns: ['invoke'] },
+    { id: '1.47', role: 'button', name: 'Equals', automation_id: 'equalButton', patterns: ['invoke'] },
+    { id: '1.49', role: 'button', name: 'One', automation_id: 'num1Button', patterns: ['invoke'] },
+    { id: '1.38', role: 'button', name: 'Clear', automation_id: 'clearButton', patterns: ['invoke'] },
+  ];
+  const top = (q) => rankGuiNodes(calc, q, '', { action: 'click' })[0]?.node.id;
+  assert.equal(top('1'), '1.49', '"1" là nút One, không phải AutomationId "Item 1" của menu hệ thống');
+  assert.equal(top('×'), '1.44');
+  assert.equal(top('='), '1.47');
+  assert.equal(top('☰'), '1.16');
+  assert.equal(top('menu'), '1.16', 'menu không khớp menu hệ thống');
+  assert.equal(top('System'), undefined, 'khung cửa sổ bị loại');
+  assert.equal(top('close'), '1.8', 'nói thẳng "close" thì được chọn nút đóng');
+  assert.equal(top('C'), undefined, 'một chữ cái không khớp đầu từ "Clear" / "Close"');
+  assert.equal(top('Clear button'), '1.38', 'từ chỉ loại là gợi ý vai trò');
+});
+
+test('gui.do fill: mô tả chỉ có loại ("text area") lấy ô nhập duy nhất; hai ô cùng tên lấy ô cùng hàng với nhãn (13/11/2026)', async () => {
+  const editor = [
+    { id: '2.3', role: 'text', name: 'Line 1, Column 1' },
+    { id: '2.36', role: 'document', name: 'Text editor', patterns: ['value', 'text'], rect: { x: 0, y: 80, w: 900, h: 500 } },
+  ];
+  const r = rankGuiNodes(editor, 'text area', '', { action: 'set_value' });
+  assert.equal(r[0].node.id, '2.36');
+  assert.equal(r[0].complete, true);
+  const form = [
+    { id: '5.1', role: 'text', name: 'Số tiền', rect: { x: 24, y: 86, w: 47, h: 23 } },
+    { id: '5.2', role: 'edit', name: 'Số tiền', patterns: ['value'], rect: { x: 148, y: 83, w: 300, h: 25 } },
+    { id: '5.3', role: 'edit', name: 'Số tiền', patterns: ['value'], rect: { x: 148, y: 119, w: 300, h: 25 } },
+  ];
+  const host = fakeHost({
+    observe: () => ({ snapshot: 5, window: NOTEPAD, tree_quality: 'good', nodes: form }),
+    act: (a) => ({ action: a.action, method: 'value', target: { exists: true, value: a.text } }),
+  });
+  const gui = createGuiController({ host, notify: () => {} });
+  const filled = await gui.semanticDo({ do: 'fill', target: 'Số tiền', value: '100', within: 'notepad' }, {}, {});
+  assert.equal(filled.ok, true);
+  assert.equal(host.calls.find((c) => c.op === 'act').args.node_id, '5.2');
 });
 
 test('gui.prewarm: làm ấm trước danh sách ứng dụng, các lời gọi đồng thời dùng chung một lượt quét', async () => {

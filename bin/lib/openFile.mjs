@@ -162,11 +162,35 @@ export function appWindowCommand(url, { defaultId = detectDefaultBrowserId(), re
   return install ? { exe: install.exe, args: ['--start-maximized', `--app=${url}`] } : null;
 }
 
+/**
+ * Windows: `--start-maximized` chỉ có hiệu lực khi trình duyệt KHỞI ĐỘNG. Edge/Chrome đang chạy (Edge còn chạy nền sẵn nhờ startup boost) thì
+ * tiến trình mới chỉ chuyển lệnh cho tiến trình cũ → cờ bị bỏ qua, cửa sổ app mở cỡ mặc định. Nên PowerShell mở trình duyệt rồi tự phóng to
+ * cửa sổ mới lên trước (cùng cách khay LaunchPlatformApp). Đường dẫn + tham số qua biến môi trường, không phải lo thoát ký tự.
+ */
+const WINDOWS_MAXIMIZE_SCRIPT = [
+  "$sig = '[DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr h, int c); [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);'",
+  '$w = Add-Type -MemberDefinition $sig -Name AivinOpenWindow -Namespace Aivin -PassThru',
+  '$before = $w::GetForegroundWindow()',
+  '$name = [IO.Path]::GetFileNameWithoutExtension($env:AIVIN_OPEN_EXE)',
+  '[void][Diagnostics.Process]::Start($env:AIVIN_OPEN_EXE, $env:AIVIN_OPEN_ARGS)',
+  'for ($i = 0; $i -lt 60; $i++) { Start-Sleep -Milliseconds 100; $h = $w::GetForegroundWindow(); if ($h -ne [IntPtr]::Zero -and $h -ne $before) { $p = [uint32]0; [void]$w::GetWindowThreadProcessId($h, [ref]$p); try { if ((Get-Process -Id $p).ProcessName -eq $name) { [void]$w::ShowWindowAsync($h, 3); break } } catch { } } }',
+].join('; ');
+
+function spawnDirect(cmd, url) {
+  const child = spawn(cmd.exe, cmd.args, { detached: true, stdio: 'ignore' });
+  child.on('error', () => openBrowser(url));
+  child.unref();
+}
+
 function openInWindow(url) {
   const cmd = appWindowCommand(url);
   if (!cmd) return openBrowser(url);
-  const child = spawn(cmd.exe, cmd.args, { detached: true, stdio: 'ignore' });
-  child.on('error', () => openBrowser(url));
+  if (process.platform !== 'win32') return spawnDirect(cmd, url);
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', WINDOWS_MAXIMIZE_SCRIPT], {
+    detached: true, stdio: 'ignore', windowsHide: true,
+    env: { ...process.env, AIVIN_OPEN_EXE: cmd.exe, AIVIN_OPEN_ARGS: cmd.args.map((a) => `"${a}"`).join(' ') },
+  });
+  child.on('error', () => spawnDirect(cmd, url));
   child.unref();
 }
 

@@ -32,6 +32,7 @@ namespace AivinGui {
   }
 
   public static class Native {
+    [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)] public static extern int AssocQueryString(int flags, int str, string assoc, string extra, StringBuilder outStr, ref uint outLen);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
@@ -54,6 +55,7 @@ namespace AivinGui {
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmd);
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int index);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
@@ -83,6 +85,7 @@ namespace AivinGui {
     [DllImport("user32.dll")] public static extern uint GetMenuState(IntPtr menu, uint id, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetMenuString(IntPtr menu, uint id, StringBuilder text, int max, uint flags);
     [DllImport("oleacc.dll")] public static extern int AccessibleObjectFromWindow(IntPtr hWnd, uint objectId, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object acc);
+    [DllImport("oleacc.dll")] public static extern int AccessibleChildren(Accessibility.IAccessible container, int start, int count, [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 2)] object[] children, out int obtained);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attr, out int value, int size);
@@ -155,6 +158,18 @@ namespace AivinGui {
     }
 
     static void MoveCursor(int x, int y) { GuardInput(); Native.SetCursorPos(x, y); }
+
+    /**
+     * Di chuột bằng SendInput (toạ độ tuyệt đối trên màn hình ảo) — sinh sự kiện di chuyển thật như chuột người. SetCursorPos chỉ đặt vị trí:
+     * ứng dụng nhận input kiểu pointer (Paint mới, canvas XAML / WinUI) không thấy nét kéo (gui-bench 13/11/2026: kéo trên Paint không vẽ gì).
+     */
+    static void MoveCursorInput(int x, int y) {
+      GuardInput();
+      var vs = System.Windows.Forms.SystemInformation.VirtualScreen;
+      int nx = (int)Math.Round((x - vs.Left) * 65535.0 / Math.Max(1, vs.Width - 1));
+      int ny = (int)Math.Round((y - vs.Top) * 65535.0 / Math.Max(1, vs.Height - 1));
+      Send(new[] { MouseInput(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny, 0) });
+    }
 
     public static void Run() {
       try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
@@ -257,9 +272,11 @@ namespace AivinGui {
         }
         case "act": return Act(a);
         case "read_table": return ReadTable(a);
+        case "ocr": return OcrSnapshot(a);
         case "wait_for": return WaitFor(a);
         case "office": return Office.Run(a);
         case "idle": return new Dictionary<string, object> { { "idle_ms", IdleMs() }, { "user_idle_ms", UserIdleMs() } };
+        case "assoc": return Assoc(Str(a, "ext"));
         default: throw new GuiError("INVALID_ARGS", "Unknown op: " + op);
       }
     }
@@ -287,6 +304,23 @@ namespace AivinGui {
       if (d == IntPtr.Zero) return false;
       Native.CloseDesktop(d);
       return true;
+    }
+
+    /**
+     * Lệnh mà Windows sẽ chạy khi mở tệp có đuôi này bằng verb mặc định (cùng cách explorer.exe / ShellExecute chọn — kể cả khi ProgID mặc định
+     * hỏng và Windows rơi về verb đầu tiên còn lại, vd "Open with AIVIN Office Suite" ở SystemFileAssociations). Không có liên kết → command rỗng.
+     */
+    static Dictionary<string, object> Assoc(string ext) {
+      if (string.IsNullOrEmpty(ext)) throw new GuiError("INVALID_ARGS", "ext is required");
+      if (ext[0] != '.') ext = "." + ext;
+      return new Dictionary<string, object> { { "command", AssocString(ext, 1) }, { "executable", AssocString(ext, 2) } };
+    }
+
+    static string AssocString(string ext, int which) {
+      uint len = 2048;
+      var sb = new StringBuilder((int)len);
+      // ASSOCF_NOTRUNCATE (0x20); which: ASSOCSTR_COMMAND = 1, ASSOCSTR_EXECUTABLE = 2.
+      return Native.AssocQueryString(0x20, which, ext, null, sb, ref len) == 0 ? sb.ToString() : "";
     }
 
     static uint IdleMs() {
@@ -505,7 +539,14 @@ namespace AivinGui {
      */
     static bool ForceForeground(IntPtr h) {
       if (h == IntPtr.Zero) return false;
-      if (Native.GetForegroundWindow() == h && !Native.IsIconic(h)) return true;
+      if (Native.GetForegroundWindow() == h && !Native.IsIconic(h)) {
+        // Đang là cửa sổ được focus nhưng có thể đã bị SendToBack đẩy xuống đáy chồng (cửa sổ AI vừa mở / vừa thao tác) — vẫn bị cửa sổ khác che,
+        // chuột thật sẽ GUI_FOCUS_LOST (gui-bench 13/11/2026). Đưa lên trên cùng; không đổi focus nên không cần mẹo phím Alt.
+        Native.BringWindowToTop(h);
+        Native.SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0010);
+        Thread.Sleep(30);
+        return true;
+      }
       GuardInput();
       if (Native.IsIconic(h)) { Native.ShowWindow(h, 9); Thread.Sleep(120); }
       if (Native.GetForegroundWindow() == h) return true;
@@ -574,6 +615,38 @@ namespace AivinGui {
     }
 
     static string Clip(string s, int max) { if (s == null) return null; s = s.Replace("\r", " ").Replace("\n", " ").Trim(); return s.Length > max ? s.Substring(0, max) + "…" : s; }
+
+    class ObsItem { public AutomationElement E; public int Depth; public bool InChrome; }
+
+    /**
+     * Khung cửa sổ do hệ điều hành / khung ứng dụng vẽ: thanh tiêu đề, menu hệ thống ("System", AutomationId "Item 1"), nút thu nhỏ / phóng to /
+     * đóng. gui-bench 13/11/2026: "bấm 1" khớp AutomationId "Item 1" của menu hệ thống và bấm bằng chuột thật mà vẫn báo ok; "System" của Settings
+     * mơ hồ với menu hệ thống. Đánh dấu "chrome" để chọn đích bỏ qua (trừ khi nói thẳng thu nhỏ / đóng…) và để không tính vào chất lượng cây.
+     */
+    static bool IsChromeRoot(Dictionary<string, object> n) {
+      string role = Convert.ToString(n["role"]);
+      string aid = n.ContainsKey("automation_id") ? Convert.ToString(n["automation_id"]) : "";
+      string cls = n.ContainsKey("class") ? Convert.ToString(n["class"]) : "";
+      return role == "titlebar" || aid == "TitleBar" || aid == "SystemMenuBar" || cls == "ApplicationFrameTitleBarWindow";
+    }
+
+    /** Trong vùng khung: chỉ phần tử của chính khung là chrome — tab / ô tìm kiếm ứng dụng tự đặt lên thanh tiêu đề (Explorer, Edge) vẫn là nội dung. */
+    static bool IsChromeNode(Dictionary<string, object> n) {
+      if (IsChromeRoot(n)) return true;
+      string role = Convert.ToString(n["role"]);
+      string aid = n.ContainsKey("automation_id") ? Convert.ToString(n["automation_id"]) : "";
+      return role == "menubar" || role == "menuitem" || IsCaptionButton(n);
+    }
+
+    /**
+     * Nút thu nhỏ / phóng to / đóng của khung (ứng dụng Store có thêm một bộ ngoài thanh tiêu đề). Theo AutomationId (tên đổi theo ngôn ngữ:
+     * "Thu nhỏ", "Đóng"). Nút "Close" riêng của ứng dụng có cùng AutomationId cũng bị tính là khung — vô hại: nói "đóng / close" là vẫn chọn được.
+     */
+    static bool IsCaptionButton(Dictionary<string, object> n) {
+      if (Convert.ToString(n["role"]) != "button" || !n.ContainsKey("automation_id")) return false;
+      string aid = Convert.ToString(n["automation_id"]);
+      return aid == "Minimize" || aid == "Maximize" || aid == "Restore" || aid == "Close";
+    }
 
     static Dictionary<string, object> Describe(AutomationElement e, string nodeId, int depth, System.Windows.Rect win) {
       var n = new Dictionary<string, object>();
@@ -698,9 +771,23 @@ namespace AivinGui {
       return kids;
     }
 
+    /**
+     * Cửa sổ đang bị một hộp thoại modal của chính nó khoá (MessageBox "Xoá phiếu?", "Lưu thay đổi?", hộp Lưu thành): hộp thoại là cửa sổ riêng
+     * nên không có trong cây của cửa sổ chính — tìm "Không" / "No" trong cửa sổ chính không bao giờ thấy, mà cửa sổ chính thì không nhận thao
+     * tác nào. Trả hộp thoại đó (GW_ENABLEDPOPUP) để observe / find / gui.do làm việc thẳng trên nó; không có → IntPtr.Zero.
+     */
+    static IntPtr ModalPopupOf(IntPtr h) {
+      if (h == IntPtr.Zero || Native.IsWindowEnabled(h)) return IntPtr.Zero;
+      IntPtr p = Native.GetWindow(h, 6);
+      return p != IntPtr.Zero && p != h && Native.IsWindowVisible(p) ? p : IntPtr.Zero;
+    }
+
     static object Observe(Dictionary<string, object> a) {
       IntPtr h = ResolveWindow(a);
       if (h == IntPtr.Zero) throw new GuiError("NOT_FOUND", "No window is focused");
+      IntPtr blockedOwner = IntPtr.Zero;
+      IntPtr modal = ModalPopupOf(h);
+      if (modal != IntPtr.Zero) { blockedOwner = h; h = modal; }
       int maxNodes = Math.Max(20, Math.Min(Int(a, "max_nodes", 300), 1500));
       int maxDepth = Math.Max(2, Math.Min(Int(a, "max_depth", 25), 60));
       int budgetMs = Math.Max(500, Math.Min(Int(a, "budget_ms", OBSERVE_BUDGET_MS), 30000));
@@ -724,11 +811,11 @@ namespace AivinGui {
       var winRect = new System.Windows.Rect(wr.Left, wr.Top, Math.Max(1, wr.Right - wr.Left), Math.Max(1, wr.Bottom - wr.Top));
       int named = 0, interactive = 0;
       bool truncated = false;
-      var queue = new Queue<KeyValuePair<AutomationElement, int>>();
+      var queue = new Queue<ObsItem>();
       using (cache.Activate()) {
         root = root.GetUpdatedCache(cache);
       }
-      queue.Enqueue(new KeyValuePair<AutomationElement, int>(root, 0));
+      queue.Enqueue(new ObsItem { E = root, Depth = 0 });
       var walker = new TreeWalker(Automation.ControlViewCondition);
       bool timedOut = false, listCut = false;
       var unreached = new List<AutomationElement>();
@@ -736,23 +823,28 @@ namespace AivinGui {
         if (nodes.Count >= maxNodes) { truncated = true; break; }
         if (sw.ElapsedMilliseconds >= budgetMs) { truncated = true; timedOut = true; break; }
         var item = queue.Dequeue();
-        AutomationElement e = item.Key;
+        AutomationElement e = item.E;
         int idx = nodes.Count;
-        var n = Describe(e, snap + "." + idx, item.Value, winRect);
+        var n = Describe(e, snap + "." + idx, item.Depth, winRect);
+        bool inChrome = item.InChrome || IsChromeRoot(n);
+        bool chrome = (inChrome && IsChromeNode(n)) || IsCaptionButton(n);
+        if (chrome) n["chrome"] = true;
         // Ngoài màn hình và không có chữ → bỏ (danh sách dài cuộn ẩn), vẫn đi vào con nếu là khung chứa.
-        bool skip = n.ContainsKey("offscreen") && !n.ContainsKey("name") && item.Value > 0;
+        bool skip = n.ContainsKey("offscreen") && !n.ContainsKey("name") && item.Depth > 0;
         if (!skip) {
           map[idx] = e;
           nodes.Add(n);
-          if (n.ContainsKey("name")) named++;
-          if (IsInteractive(n)) interactive++;
+          // Khung cửa sổ (thanh tiêu đề, menu hệ thống, nút thu nhỏ / đóng) không tính: cửa sổ vẽ tay hoàn toàn vẫn có đủ chừng ấy phần tử,
+          // tính vào là chấm "good" và không bao giờ tự đọc chữ trên ảnh (gui-bench 13/11/2026).
+          if (!chrome && n.ContainsKey("name")) named++;
+          if (!chrome && IsInteractive(n)) interactive++;
         }
-        if (item.Value >= maxDepth) continue;
+        if (item.Depth >= maxDepth) continue;
         bool thisCut = false;
         int visibleKids = 0;
         foreach (AutomationElement k in ChildrenOf(e, Convert.ToString(n["role"]), cache, walker, sw, budgetMs, ref thisCut)) {
           if (!true.Equals(Cached(k, AutomationElement.IsOffscreenProperty))) visibleKids++;
-          queue.Enqueue(new KeyValuePair<AutomationElement, int>(k, item.Value + 1));
+          queue.Enqueue(new ObsItem { E = k, Depth = item.Depth + 1, InChrome = inChrome });
         }
         if (thisCut) {
           listCut = true;
@@ -782,6 +874,7 @@ namespace AivinGui {
         { "dpi", (long)SafeDpi(h) },
       };
       if (frameOnly) res["content_unavailable"] = true;
+      if (blockedOwner != IntPtr.Zero) res["modal_dialog_of"] = WindowInfo(blockedOwner, Native.GetForegroundWindow());
       bool wantImage = Bool(a, "include_image", false) || (quality == "poor" && Bool(a, "image_when_poor", true));
       // Cây nghèo → đọc chữ trên ảnh (OCR của Windows, chạy trên máy): mỗi cụm chữ thành một node "text" có toạ độ, thang quyết định đích
       // ở BE tìm được "nút Lưu" theo chữ như với phần tử thật thay vì đoán toạ độ trên ảnh.
@@ -926,6 +1019,108 @@ namespace AivinGui {
      * Đọc cả bảng dưới nền: cuộn lên đầu, đọc dòng đang hiện, lăn một nấc, lặp tới khi hết dòng mới, rồi cuộn về chỗ cũ. Mỗi lần một nấc để các trang gối nhau;
      * hai trang liền nhau không có dòng chung (ứng dụng cuộn quá nhanh) thì báo gaps, không âm thầm bỏ sót.
      */
+    const int ROLE_SYSTEM_ROW = 0x1C, ROLE_SYSTEM_LISTITEM = 0x22, ROLE_SYSTEM_OUTLINEITEM = 0x24;
+
+    /**
+     * Bảng MSAA (DataGridView, ListView Win32…) liệt kê được MỌI dòng — cả dòng đã cuộn khuất — qua AccessibleChildren, mỗi dòng một lần hỏi
+     * tên + giá trị (giá trị = các ô nối bằng ";"). Không cuộn, không lấy mẫu theo toạ độ. gui-bench 13/11/2026: bảng 800 dòng cách cuộn +
+     * accHitTest đọc được 104 dòng trong 20 s; cách này đọc hết. Control không liệt kê dòng kiểu đó (UIA thuần, ảo hoá) → null, đi đường cũ.
+     */
+    static Dictionary<string, object> ReadRowsByChildren(Accessibility.IAccessible client, System.Windows.Rect box, int maxRows, Stopwatch sw) {
+      try {
+        int count = client.accChildCount;
+        if (count < 2 || count > 500000) return null;
+        int take = Math.Min(count, maxRows + 2);
+        var kids = new object[take];
+        int got;
+        if (Native.AccessibleChildren(client, 0, take, kids, out got) != 0 || got < 2) return null;
+        var rows = new List<object>();
+        List<object> columns = null;
+        int rowish = 0;
+        for (int i = 0; i < got && rows.Count < maxRows; i++) {
+          if (sw.ElapsedMilliseconds >= READ_TABLE_BUDGET_MS) break;
+          Accessibility.IAccessible acc = kids[i] as Accessibility.IAccessible;
+          object child = 0;
+          if (acc == null) { if (!(kids[i] is int)) continue; acc = client; child = kids[i]; }
+          int role;
+          try { role = Convert.ToInt32(acc.get_accRole(child)); } catch (COMException) { continue; } catch (ArgumentException) { continue; }
+          if (role != ROLE_SYSTEM_ROW && role != ROLE_SYSTEM_LISTITEM && role != ROLE_SYSTEM_OUTLINEITEM) continue;
+          rowish++;
+          string name = null, value = null;
+          try { name = acc.get_accName(child); } catch (COMException) { }
+          try { value = acc.get_accValue(child); } catch (COMException) { } catch (NotImplementedException) { }
+          if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(value)) continue;
+          // Dòng tiêu đề (DataGridView "Top Row"): giá trị trùng tên như ở đường lấy mẫu — đọc tên cột từ đó.
+          if (value == name && rowish == 1) {
+            if (columns == null) {
+              int left, top, w, h;
+              try { acc.accLocation(out left, out top, out w, out h, child); columns = ReadColumns(client, box, new AccRow { Name = name, Value = value, Left = left, Top = top, Width = w, Height = h }); } catch (COMException) { }
+            }
+            continue;
+          }
+          rows.Add(Clip(string.IsNullOrEmpty(value) ? name : value, 800));
+        }
+        if (rows.Count < 1) return null;
+        bool all = rowish >= count - 1 || rows.Count >= maxRows;
+        return new Dictionary<string, object> {
+          { "columns", columns ?? new List<object>() }, { "rows", rows }, { "row_count", rows.Count }, { "complete", rows.Count < maxRows && got >= count && all },
+          { "reason", rows.Count >= maxRows ? "max_rows reached" : got < count ? "time limit reached" : null }, { "gaps", false }, { "ms", sw.ElapsedMilliseconds }, { "source", "children" },
+        };
+      } catch (COMException) { return null; } catch (InvalidCastException) { return null; } catch (NotImplementedException) { return null; }
+    }
+
+    /** Chọn dòng của bảng MSAA có một ô đúng bằng "text" (hoặc tên dòng trùng): chọn + nhận focus, control tự cuộn tới. */
+    static bool SelectRowByValue(AutomationElement table, string text) {
+      try {
+        Accessibility.IAccessible client = AccessibleClient(OwnHandle(table));
+        if (client == null) return false;
+        int count = client.accChildCount;
+        if (count < 1 || count > 500000) return false;
+        var kids = new object[count];
+        int got;
+        if (Native.AccessibleChildren(client, 0, count, kids, out got) != 0) return false;
+        string want = text.Trim();
+        for (int i = 0; i < got; i++) {
+          Accessibility.IAccessible acc = kids[i] as Accessibility.IAccessible;
+          object child = 0;
+          if (acc == null) { if (!(kids[i] is int)) continue; acc = client; child = kids[i]; }
+          string name = null, value = null;
+          try { name = acc.get_accName(child); } catch (COMException) { }
+          try { value = acc.get_accValue(child); } catch (COMException) { } catch (NotImplementedException) { }
+          bool hit = string.Equals(name, want, StringComparison.OrdinalIgnoreCase);
+          if (!hit && !string.IsNullOrEmpty(value)) foreach (string cell in value.Split(';')) if (string.Equals(cell.Trim(), want, StringComparison.OrdinalIgnoreCase)) { hit = true; break; }
+          if (!hit) continue;
+          // Chọn ô đầu của dòng như người bấm vào dòng: DataGridView mới đổi dòng hiện hành (CurrentRow) — chọn cả dòng chỉ tô dòng,
+          // dòng hiện hành vẫn là dòng cũ (gui-bench 13/11/2026). Dòng không có ô con → chọn dòng.
+          if (child is int && (int)child == 0 && SelectFirstCell(acc)) return true;
+          acc.accSelect(SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION, child);
+          return true;
+        }
+      } catch (COMException) { } catch (InvalidCastException) { } catch (NotImplementedException) { } catch (ArgumentException) { }
+      return false;
+    }
+
+    static bool SelectFirstCell(Accessibility.IAccessible row) {
+      try {
+        int n = row.accChildCount;
+        if (n < 1) return false;
+        var cells = new object[Math.Min(n, 4)];
+        int got;
+        if (Native.AccessibleChildren(row, 0, cells.Length, cells, out got) != 0) return false;
+        for (int i = 0; i < got; i++) {
+          var cell = cells[i] as Accessibility.IAccessible;
+          if (cell == null || Convert.ToInt32(cell.get_accRole(0)) != ROLE_SYSTEM_CELL) continue;
+          cell.accSelect(SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION, 0);
+          // Lệnh mặc định của ô (DataGridView: đặt ô hiện hành) — accSelect chỉ tô chọn, chưa chắc đổi dòng hiện hành.
+          string def = null;
+          try { def = cell.get_accDefaultAction(0); } catch (COMException) { }
+          if (!string.IsNullOrEmpty(def) && def.IndexOf("edit", StringComparison.OrdinalIgnoreCase) < 0) { try { cell.accDoDefaultAction(0); } catch (COMException) { } }
+          return true;
+        }
+      } catch (COMException) { } catch (InvalidCastException) { } catch (NotImplementedException) { } catch (ArgumentException) { }
+      return false;
+    }
+
     static object ReadTable(Dictionary<string, object> a) {
       IntPtr window;
       AutomationElement el = NodeOf(Str(a, "node_id"), out window);
@@ -935,8 +1130,10 @@ namespace AivinGui {
       Accessibility.IAccessible client = AccessibleClient(control);
       System.Windows.Rect box = el.Current.BoundingRectangle;
       if (client == null || box.IsEmpty) throw new GuiError("GUI_NO_PATTERN", "This table cannot be read directly — use gui.observe / gui.find and scroll");
-      bool canScroll = AcceptsPostedInput(control);
       var sw = Stopwatch.StartNew();
+      var direct = ReadRowsByChildren(client, box, maxRows, sw);
+      if (direct != null) return direct;
+      bool canScroll = AcceptsPostedInput(control);
       var seen = new HashSet<string>();
       var rows = new List<object>();
       List<object> columns = null;
@@ -1048,6 +1245,26 @@ namespace AivinGui {
           return new Dictionary<string, object> { { "mime", "image/jpeg" }, { "base64", Convert.ToBase64String(ms.ToArray()) }, { "width", ow }, { "height", oh }, { "scale", scale } };
         }
       }
+    }
+
+    /**
+     * Đọc chữ trên ảnh cho một lần observe đã có (cùng snapshot, node chữ nối tiếp id "<snap>.t<k>") — không đi lại cây trợ năng. gui.do
+     * cần OCR sau khi tìm trong cây không thấy: trước đây observe lại cả cửa sổ (form WinForms có bảng: ~2 s mỗi lần).
+     */
+    static object OcrSnapshot(Dictionary<string, object> a) {
+      int snap = Int(a, "snapshot", -1);
+      IntPtr h;
+      lock (StateLock) { if (!SnapshotWindow.TryGetValue(snap, out h)) throw new GuiError("GUI_STALE_NODE", "Snapshot " + snap + " is gone — observe again"); }
+      if (!Native.IsWindow(h)) throw new GuiError("GUI_WINDOW_GONE", "The window of snapshot " + snap + " is closed");
+      AssertWindowResponsive(h);
+      var res = new Dictionary<string, object> { { "snapshot", snap } };
+      var nodes = new List<object>();
+      string imageError;
+      var bmp = GrabWindow(h, out imageError);
+      if (bmp == null) res["ocr"] = new Dictionary<string, object> { { "error", "no usable screenshot: " + imageError } };
+      else using (bmp) AddOcrNodes(res, nodes, snap, bmp, Str(a, "ocr_lang"), Int(a, "ocr_max_nodes", 200));
+      res["nodes"] = nodes;
+      return res;
     }
 
     static void AddOcrNodes(Dictionary<string, object> res, List<object> nodes, int snap, Bitmap bmp, string lang, int max) {
@@ -1260,6 +1477,10 @@ namespace AivinGui {
             var ip = Pattern(el, InvokePattern.Pattern) as InvokePattern;
             string role = el.Current.ControlType.ProgrammaticName;
             bool invokeRole = role.EndsWith("Button") || role.EndsWith("MenuItem") || role.EndsWith("Hyperlink") || role.EndsWith("SplitButton");
+            // Nút Win32 / WinForms có handle riêng: gửi BM_CLICK (bất đồng bộ). Invoke qua MSAA là lời gọi đồng bộ — nút mở hộp modal
+            // ("Xoá phiếu?") thì ứng dụng chạy MessageBox ngay trong lời gọi đó, host chờ tới hết hạn và cửa sổ bị coi là treo tới khi hộp
+            // đóng (gui-bench 13/11/2026: 5 s rồi GUI_WINDOW_HUNG cho mọi bước sau).
+            if (invokeRole && role.EndsWith(".Button") && PostButtonClick(el)) return "posted";
             if (ip != null && invokeRole) { ip.Invoke(); return "invoke"; }
             if (role.EndsWith("ListItem") || role.EndsWith("TabItem") || role.EndsWith("TreeItem") || role.EndsWith("RadioButton")) {
               var sp = Pattern(el, SelectionItemPattern.Pattern) as SelectionItemPattern;
@@ -1272,6 +1493,12 @@ namespace AivinGui {
             if (method == "pattern") {
               if (ip != null) { ip.Invoke(); return "invoke"; }
               throw new GuiError("GUI_NO_PATTERN", "Element has no click pattern — retry with method mouse");
+            }
+            // Mục nằm dưới vùng cuộn (trang Settings dài, danh sách): chưa có toạ độ để bấm → cuộn tới trước; vẫn không có điểm mà phần tử
+            // tự bấm được (Invoke) thì gọi thẳng (gui-bench 13/11/2026: "About" của Settings báo "no position on screen").
+            if (!HasClickablePoint(el)) {
+              ScrollIntoView(el);
+              if (!HasClickablePoint(el) && ip != null) { ip.Invoke(); return "invoke"; }
             }
           }
           if (method == "auto" || method == "background") {
@@ -1342,11 +1569,16 @@ namespace AivinGui {
           if (!string.IsNullOrEmpty(option)) {
             // Mục của danh sách thường có sẵn trong cây khi đang đóng → chọn thẳng, không thả danh sách xuống (thả xuống kéo cửa sổ lên
             // trên cùng, giật focus của người dùng). Chỉ mở khi mục chưa có trong cây.
+            // Bảng / danh sách: chọn theo giá trị ô qua danh sách con MSAA TRƯỚC — FindFirst theo tên trên bảng dài qua cầu MSAA đi từng ô
+            // (800 dòng: hơn 60 s, gui-bench 13/11/2026) và tên ô không phải giá trị ô nên vẫn không thấy.
+            string elRole = el.Current.ControlType.ProgrammaticName;
+            bool tabular = elRole.EndsWith(".Table") || elRole.EndsWith(".DataGrid") || elRole.EndsWith(".List") || elRole.EndsWith(".Tree");
+            if (tabular && SelectRowByValue(el, option)) return "select";
             var ep = Pattern(el, ExpandCollapsePattern.Pattern) as ExpandCollapsePattern;
-            var match = el.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.NameProperty, option, PropertyConditionFlags.IgnoreCase));
+            var match = tabular ? null : el.FindFirst(TreeScope.Descendants, new PropertyCondition(AutomationElement.NameProperty, option, PropertyConditionFlags.IgnoreCase));
             bool expanded = false;
             if (match == null && ep != null) { try { ep.Expand(); expanded = true; Thread.Sleep(200); } catch { } }
-            if (match == null) match = FindByName(el, option);
+            if (match == null && !tabular) match = FindByName(el, option);
             if (match == null) throw new GuiError("NOT_FOUND", "No option named: " + option);
             var sip = Pattern(match, SelectionItemPattern.Pattern) as SelectionItemPattern;
             if (sip != null) sip.Select(); else { var ip = Pattern(match, InvokePattern.Pattern) as InvokePattern; if (ip != null) ip.Invoke(); else throw new GuiError("GUI_NO_PATTERN", "Option cannot be selected"); }
@@ -1387,17 +1619,36 @@ namespace AivinGui {
           AssertPointOnWindow((int)start.X, (int)start.Y, window);
           AssertPointOnWindow((int)to.X, (int)to.Y, window);
           lastMousePoint = new Dictionary<string, object> { { "x", (int)start.X }, { "y", (int)start.Y } };
-          MoveCursor((int)start.X, (int)start.Y);
+          MoveCursorInput((int)start.X, (int)start.Y);
+          Thread.Sleep(30);
           Send(new[] { MouseInput(MOUSEEVENTF_LEFTDOWN, 0, 0, 0) });
-          for (int i = 1; i <= 10; i++) {
-            MoveCursor((int)(start.X + (to.X - start.X) * i / 10), (int)(start.Y + (to.Y - start.Y) * i / 10));
-            Thread.Sleep(15);
+          Thread.Sleep(30);
+          for (int i = 1; i <= 20; i++) {
+            MoveCursorInput((int)(start.X + (to.X - start.X) * i / 20), (int)(start.Y + (to.Y - start.Y) * i / 20));
+            Thread.Sleep(12);
           }
+          Thread.Sleep(30);
           Send(new[] { MouseInput(MOUSEEVENTF_LEFTUP, 0, 0, 0) });
           return "mouse";
         }
         default: throw new GuiError("INVALID_ARGS", "Unknown action: " + action);
       }
+    }
+
+    /** Phần tử đang có chỗ trên màn hình để bấm (không khuất trong vùng cuộn, khung không rỗng). */
+    static bool HasClickablePoint(AutomationElement el) {
+      try {
+        if (el.Current.IsOffscreen) return false;
+        var r = el.Current.BoundingRectangle;
+        return !r.IsEmpty && r.Width > 0 && r.Height > 0;
+      } catch (ElementNotAvailableException) { return false; }
+    }
+
+    /** Cuộn vùng chứa tới phần tử (ScrollItemPattern) — chạy bằng pattern, không cần cửa sổ ở trên cùng. Trả false nếu phần tử không hỗ trợ. */
+    static bool ScrollIntoView(AutomationElement el) {
+      var sip = Pattern(el, ScrollItemPattern.Pattern) as ScrollItemPattern;
+      if (sip == null) return false;
+      try { sip.ScrollIntoView(); Thread.Sleep(120); return true; } catch (InvalidOperationException) { return false; } catch (ElementNotAvailableException) { return false; }
     }
 
     static AutomationElement FindByName(AutomationElement root, string name) {
@@ -1420,7 +1671,9 @@ namespace AivinGui {
     static void AssertWindowResponsive(IntPtr h) {
       if (h == IntPtr.Zero) return;
       if (!Native.IsWindow(h)) throw new GuiError("GUI_WINDOW_GONE", "The target window has closed");
-      if (!IsWindowResponsive(h, 500)) {
+      // 1,5 s: ứng dụng WinForms / ERP nặng vừa trả lời một loạt câu hỏi UIA (bảng dài qua cầu MSAA) có thể bận vài trăm ms — ngưỡng 500 ms
+      // báo treo nhầm (gui-bench 13/11/2026). Windows chỉ coi là "Not Responding" sau 5 s.
+      if (!IsWindowResponsive(h, 1500)) {
         if (!Native.IsWindow(h)) throw new GuiError("GUI_WINDOW_GONE", "The target window has closed");
         throw new GuiError("GUI_WINDOW_HUNG", "The target window is not responding (frozen UI thread)");
       }
@@ -1437,9 +1690,27 @@ namespace AivinGui {
      * WM_CHAR thẳng vào handle — không đưa cửa sổ lên, không đụng bàn phím thật. Ô không có handle (WPF, UWP, trình duyệt) → false, nơi
      * gọi mới dùng bàn phím thật.
      */
+    const uint BM_CLICK = 0x00F5;
+
+    /** Nút Win32 thật (lớp "Button" hoặc nút WinForms) → PostMessage(BM_CLICK). Ô tích / nút chọn cùng lớp Button thì không (đi đường toggle). */
+    static bool PostButtonClick(AutomationElement el) {
+      IntPtr h = OwnHandle(el);
+      if (h == IntPtr.Zero || !Native.IsWindowEnabled(h)) return false;
+      string cls = ClassOf(h);
+      bool button = string.Equals(cls, "Button", StringComparison.OrdinalIgnoreCase) || cls.IndexOf(".BUTTON.", StringComparison.OrdinalIgnoreCase) >= 0;
+      if (!button) return false;
+      int style = Native.GetWindowLong(h, GWL_STYLE) & 0xF;
+      // BS_PUSHBUTTON 0, BS_DEFPUSHBUTTON 1, BS_COMMANDLINK 0xE / 0xF; ô tích / radio / groupbox là các kiểu khác.
+      if (style != 0 && style != 1 && style != 0xE && style != 0xF) return false;
+      return Native.PostMessage(h, BM_CLICK, IntPtr.Zero, IntPtr.Zero);
+    }
+
     static bool TryBackgroundSetText(AutomationElement el, string text) {
       IntPtr h = OwnHandle(el);
       if (h == IntPtr.Zero) return false;
+      // Chỉ ô nhập: WM_SETTEXT vào nhãn tĩnh / nút cũng "thành công" — đổi luôn chữ của nhãn mà không điền gì (gui-bench 13/11/2026: điền
+      // "Họ tên" vào chính nhãn "Họ tên" báo background ok, ô nhập vẫn trống).
+      if (!IsTextControl(h)) return false;
       IntPtr r;
       return Native.SendMessageTimeout(h, WM_SETTEXT, IntPtr.Zero, text, SMTO_ABORTIFHUNG, 2000, out r) != IntPtr.Zero;
     }
@@ -2070,7 +2341,27 @@ namespace AivinGui {
       }
     }
 
+    /**
+     * OCR của Windows chỉnh cho dòng chữ cỡ đọc sách: chữ trên nút nhỏ và ký tự đơn ("C", "7", "+") ở cỡ giao diện 100% hay bị bỏ qua hẳn
+     * (gui-bench 13/11/2026: cả bàn phím Máy tính chỉ đọc được "CE"). Phóng ảnh 2 lần (nội suy bicubic) trước khi đọc rồi chia toạ độ lại;
+     * ảnh đã lớn (màn hình 4K, cửa sổ phóng to) thì đọc nguyên cỡ để không vượt MaxImageDimension và không tốn thời gian.
+     */
+    const int OCR_UPSCALE_MAX_SIDE = 1400;
+
     static List<OcrSegment> ReadInner(Bitmap bmp, string lang, out string used) {
+      double scale = Math.Max(bmp.Width, bmp.Height) <= OCR_UPSCALE_MAX_SIDE ? 2.0 : 1.0;
+      if (scale == 1.0) return ReadAt(bmp, lang, 1.0, out used);
+      using (var big = new Bitmap((int)(bmp.Width * scale), (int)(bmp.Height * scale), PixelFormat.Format32bppArgb)) {
+        using (var g = Graphics.FromImage(big)) {
+          g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+          g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+          g.DrawImage(bmp, 0, 0, big.Width, big.Height);
+        }
+        return ReadAt(big, lang, scale, out used);
+      }
+    }
+
+    static List<OcrSegment> ReadAt(Bitmap bmp, string lang, double scale, out string used) {
       object engine = Engine(lang, out used);
       var engineT = engine.GetType();
       byte[] png;
@@ -2088,7 +2379,7 @@ namespace AivinGui {
         double lastRight = 0;
         foreach (var w in (System.Collections.IEnumerable)line.GetType().GetProperty("Words").GetValue(line, null)) {
           var r = w.GetType().GetProperty("BoundingRect").GetValue(w, null);
-          var rect = new System.Windows.Rect(D(r, "X"), D(r, "Y"), D(r, "Width"), D(r, "Height"));
+          var rect = new System.Windows.Rect(D(r, "X") / scale, D(r, "Y") / scale, D(r, "Width") / scale, D(r, "Height") / scale);
           string text = Convert.ToString(w.GetType().GetProperty("Text").GetValue(w, null));
           if (cur != null && rect.X - lastRight > Math.Max(8, Math.Max(rect.Height, cur.Rect.Height))) { segments.Add(cur); cur = null; }
           if (cur == null) cur = new OcrSegment { Text = text, Rect = rect };
