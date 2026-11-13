@@ -1,4 +1,5 @@
 import net from 'net';
+import os from 'os';
 import readline from 'readline';
 import { spawn } from 'child_process';
 import { createDesktopWebRtc } from './desktopWebRtc.mjs';
@@ -24,6 +25,9 @@ export const DESKTOP_WEBRTC_WORKER_ARG = '__desktop-webrtc-worker';
 const VIDEO_LIVE_MS = 3000;
 
 export async function runDesktopWebRtcWorker({ input = process.stdin, output = process.stdout } = {}) {
+  // Bộ mã hoá hình chạy bằng CPU: máy bận mà ở mức thường thì có lượt đứng hình vài giây (đo 13/11/2026, 24 luồng đốt CPU: trung vị
+  // 104 ms, lượt tệ nhất 3 s; trên mức thường: 94 ms, tệ nhất 106 ms). Không lên High để không giành ứng dụng người dùng đang dùng.
+  try { os.setPriority(process.pid, os.constants.priority.PRIORITY_ABOVE_NORMAL); } catch { /* không đổi được thì chạy mức thường */ }
   const send = (msg) => { try { output.write(JSON.stringify(msg) + '\n'); } catch { /* daemon đã đóng */ } };
   let lastRawAt = 0;
   let lastState = '';

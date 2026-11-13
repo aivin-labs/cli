@@ -258,3 +258,26 @@ test('LocalPointerGuard: người ở máy dời chuột thì thao tác chuột 
     fs.rmSync(tmp, { force: true });
   }
 });
+
+test('vẽ con trỏ vào khung tại chỗ: không chép nguyên khung, gửi xong trả đúng ảnh cũ', { skip: process.platform !== 'win32', timeout: 120_000 }, () => {
+  assert.ok(!DESKTOP_CAST_CSHARP.includes('WithCursor('), 'không còn bản sao nguyên khung để vẽ con trỏ');
+  assert.match(DESKTOP_CAST_CSHARP, /finally \{\s*if \(drawn\) CastScreen\.RestoreCursorPatch\(frame\);/);
+  const tmp = path.join(os.tmpdir(), `aivin-cast-cursor-${process.pid}.cs`);
+  fs.writeFileSync(tmp, DESKTOP_CAST_CSHARP);
+  try {
+    const script = [
+      `Add-Type -Path '${tmp}' -ReferencedAssemblies 'UIAutomationClient','UIAutomationTypes','WindowsBase','System.Drawing','System.Windows.Forms','System.Web.Extensions','System.Core'`,
+      `$bmp = New-Object System.Drawing.Bitmap(640, 360, [System.Drawing.Imaging.PixelFormat]::Format32bppRgb)`,
+      `$g = [System.Drawing.Graphics]::FromImage($bmp); $g.Clear([System.Drawing.Color]::FromArgb(40, 120, 200)); $g.Dispose()`,
+      `function Get-FrameHash($b) { $ms = New-Object IO.MemoryStream; $b.Save($ms, [Drawing.Imaging.ImageFormat]::Bmp); $h = [BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash($ms.ToArray())); $ms.Dispose(); $h }`,
+      `$before = Get-FrameHash $bmp`,
+      `[void][AivinDesktopCast.CastScreen]::DrawCursorInPlace($bmp, (New-Object System.Drawing.Rectangle(0, 0, 640, 360)))`,
+      `[AivinDesktopCast.CastScreen]::RestoreCursorPatch($bmp)`,
+      `(Get-FrameHash $bmp) -eq $before`,
+    ].join('; ');
+    const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' }).trim().split(/\r?\n/).pop();
+    assert.equal(out, 'True');
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+});

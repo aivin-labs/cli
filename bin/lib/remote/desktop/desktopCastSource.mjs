@@ -478,7 +478,6 @@ namespace AivinDesktopCast {
     static byte[] scaleRaw;
     static byte[] scaleOut;
     static byte[] i420Out;
-    static Bitmap cursorBuffer;
     static Bitmap scaleBuffer;
     static Bitmap thumbBmp;
     static byte[] thumbRaw;
@@ -591,35 +590,71 @@ namespace AivinDesktopCast {
       }
     }
 
-    /** Bản sao của khung có lồng con trỏ thật của Windows (tái sử dụng cursorBuffer để tránh cấp phát mới mỗi khung). */
-    public static Bitmap WithCursor(Bitmap src, Rectangle r) {
-      if (cursorBuffer == null || cursorBuffer.Width != src.Width || cursorBuffer.Height != src.Height) {
-        if (cursorBuffer != null) cursorBuffer.Dispose();
-        cursorBuffer = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppRgb);
-      }
-      using (var g = Graphics.FromImage(cursorBuffer)) {
-        g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
-        g.DrawImageUnscaled(src, 0, 0);
-        try {
-          Native.CURSORINFO pci;
-          pci.cbSize = Marshal.SizeOf(typeof(Native.CURSORINFO));
-          if (Native.GetCursorInfo(out pci) && (pci.flags & Native.CURSOR_SHOWING) != 0) {
-            IntPtr shape = SystemCursorHider.ShapeOf(pci.hCursor);
-            var hot = CursorTracker.Hotspot(shape);
-            int cursorX = pci.ptScreenPos.x - hot.X - r.Left;
-            int cursorY = pci.ptScreenPos.y - hot.Y - r.Top;
-            if (cursorX >= -32 && cursorX < r.Width && cursorY >= -32 && cursorY < r.Height) {
-              IntPtr hdc = g.GetHdc();
-              try {
-                Native.DrawIcon(hdc, cursorX, cursorY, shape);
-              } finally {
-                g.ReleaseHdc(hdc);
-              }
-            }
+    const int CURSOR_PATCH = 128;
+    static Bitmap cursorPatch;
+    static byte[] cursorSaved;
+    static Rectangle cursorSavedRect = Rectangle.Empty;
+
+    /**
+     * Vẽ con trỏ thật của Windows thẳng lên khung, chỉ đụng vùng CURSOR_PATCH quanh con trỏ; RestoreCursorPatch trả vùng đó về như cũ sau khi
+     * khung đã gửi (khung còn dùng để so thay đổi và lần sau chỉ con trỏ đổi thì không chụp lại). Trước đây chép nguyên khung sang bản sao rồi vẽ:
+     * đo 13/11/2026 tốn 19,4 ms mỗi khung 1920×1080, là khâu đắt nhất của bộ quay. Trả về false khi không vẽ gì.
+     */
+    public static bool DrawCursorInPlace(Bitmap frame, Rectangle r) {
+      cursorSavedRect = Rectangle.Empty;
+      try {
+        Native.CURSORINFO pci;
+        pci.cbSize = Marshal.SizeOf(typeof(Native.CURSORINFO));
+        if (!Native.GetCursorInfo(out pci) || (pci.flags & Native.CURSOR_SHOWING) == 0) return false;
+        IntPtr shape = SystemCursorHider.ShapeOf(pci.hCursor);
+        var hot = CursorTracker.Hotspot(shape);
+        int cursorX = pci.ptScreenPos.x - hot.X - r.Left;
+        int cursorY = pci.ptScreenPos.y - hot.Y - r.Top;
+        var area = Rectangle.Intersect(new Rectangle(cursorX, cursorY, CURSOR_PATCH, CURSOR_PATCH), new Rectangle(0, 0, frame.Width, frame.Height));
+        if (area.Width <= 0 || area.Height <= 0) return false;
+        if (cursorPatch == null) cursorPatch = new Bitmap(CURSOR_PATCH, CURSOR_PATCH, PixelFormat.Format32bppRgb);
+        int rowBytes = area.Width * 4;
+        if (cursorSaved == null) cursorSaved = new byte[CURSOR_PATCH * CURSOR_PATCH * 4];
+        CopyRegion(frame, area, cursorSaved, true);
+        CopyRegion(cursorPatch, new Rectangle(0, 0, area.Width, area.Height), cursorSaved, false);
+        using (var g = Graphics.FromImage(cursorPatch)) {
+          IntPtr hdc = g.GetHdc();
+          try {
+            Native.DrawIcon(hdc, cursorX - area.X, cursorY - area.Y, shape);
+          } finally {
+            g.ReleaseHdc(hdc);
           }
-        } catch {}
+        }
+        var drawn = new byte[area.Height * rowBytes];
+        CopyRegion(cursorPatch, new Rectangle(0, 0, area.Width, area.Height), drawn, true);
+        CopyRegion(frame, area, drawn, false);
+        cursorSavedRect = area;
+        return true;
+      } catch {
+        return false;
       }
-      return cursorBuffer;
+    }
+
+    /** Trả vùng dưới con trỏ về ảnh màn hình thật (xem DrawCursorInPlace). */
+    public static void RestoreCursorPatch(Bitmap frame) {
+      if (cursorSavedRect.IsEmpty) return;
+      try { CopyRegion(frame, cursorSavedRect, cursorSaved, false); } catch { }
+      cursorSavedRect = Rectangle.Empty;
+    }
+
+    /** Chép từng hàng giữa một vùng của bitmap 32bpp và mảng liền (hàng nối tiếp, mỗi hàng area.Width * 4 byte). */
+    static void CopyRegion(Bitmap bmp, Rectangle area, byte[] buffer, bool toBuffer) {
+      var data = bmp.LockBits(area, toBuffer ? ImageLockMode.ReadOnly : ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+      try {
+        int rowBytes = area.Width * 4;
+        for (int y = 0; y < area.Height; y++) {
+          var row = new IntPtr(data.Scan0.ToInt64() + (long)y * data.Stride);
+          if (toBuffer) Marshal.Copy(row, buffer, y * rowBytes, rowBytes);
+          else Marshal.Copy(buffer, y * rowBytes, row, rowBytes);
+        }
+      } finally {
+        bmp.UnlockBits(data);
+      }
     }
 
     /** Song tuyến tính chia theo hàng trên nhiều nhân: GDI+ DrawImage chỉ chạy một nhân, đo 14 ms mỗi khung từ 1080p xuống 1280, là khâu đắt nhất của bộ quay. */
@@ -923,6 +958,10 @@ namespace AivinDesktopCast {
 
     public static void Run(string argsJson) {
       Native.UsePerMonitorDpi();
+      // Máy bận (đo 13/11/2026: CPU 50–95 %) thì luồng quay mức thường bị giành CPU, khung tới chậm từng đợt; trên mức thường vẫn nhường ứng dụng
+      // người dùng đang dùng (không lên High / Realtime).
+      try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.AboveNormal; } catch { }
+      try { Thread.CurrentThread.Priority = ThreadPriority.AboveNormal; } catch { }
       SystemCursorHider.Init();
       Native.timeBeginPeriod(1);
       var a = Out.Parse(argsJson);
@@ -1050,10 +1089,17 @@ namespace AivinDesktopCast {
     static int frameEchoSeq = 0;
 
     static void SendFrame(Bitmap frame, bool cursorInFrame, bool jpegMode, long nowMs, HostStats hostStats) {
-      Bitmap encodeBmp = frame;
-      if (cursorInFrame) {
-        encodeBmp = CastScreen.WithCursor(frame, currentBounds);
+      // Con trỏ vẽ thẳng lên khung rồi trả lại vùng đó ngay sau khi gửi (CastScreen.DrawCursorInPlace).
+      bool drawn = cursorInFrame && CastScreen.DrawCursorInPlace(frame, currentBounds);
+      try {
+        SendFrameCore(frame, jpegMode, nowMs, hostStats);
+      } finally {
+        if (drawn) CastScreen.RestoreCursorPatch(frame);
       }
+    }
+
+    static void SendFrameCore(Bitmap frame, bool jpegMode, long nowMs, HostStats hostStats) {
+      Bitmap encodeBmp = frame;
       if (leadInWidth > 0) SendLeadIn(encodeBmp, nowMs);
       if (encodeBmp.Width > targetMaxWidth) {
         encodeBmp = CastScreen.Scale(encodeBmp, targetMaxWidth);
