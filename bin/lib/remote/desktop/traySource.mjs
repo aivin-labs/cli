@@ -830,6 +830,9 @@ namespace AivinDesktop {
             Match mDev = Regex.Match(castTxt, "\"viewer_device\"\\s*:\\s*\"([^\"]+)\"");
             if (mDev.Success && !string.IsNullOrEmpty(mDev.Groups[1].Value)) {
               castDevice = mDev.Groups[1].Value;
+              // Nơi theo IP: chủ máy biết ai đang điều khiển, không chỉ tên máy (tên do trình duyệt tự khai).
+              string place = JsonText(castTxt, "viewer_place");
+              if (place.Length > 0) castDevice += " · " + place.Split(',')[0].Trim();
             } else {
               Match mId = Regex.Match(castTxt, "\"viewer_id\"\\s*:\\s*\"([^\"]+)\"");
               castDevice = mId.Success ? mId.Groups[1].Value : "Remote device";
@@ -851,40 +854,111 @@ namespace AivinDesktop {
     }
 
     /** Danh sách chỉ để hiện và gỡ — daemon mới là bên kiểm chữ ký và cho vào. Rỗng / daemon không chạy thì ẩn cả mục, menu giữ gọn. */
+    static string JsonText(string obj, string field) {
+      Match m = Regex.Match(obj, "\"" + field + "\"\\s*:\\s*\"([^\"]*)\"");
+      return m.Success ? m.Groups[1].Value : "";
+    }
+
+    static double JsonNumber(string obj, string field) {
+      Match m = Regex.Match(obj, "\"" + field + "\"\\s*:\\s*([0-9]+)");
+      double v;
+      return m.Success && double.TryParse(m.Groups[1].Value, out v) ? v : 0;
+    }
+
+    /** "2 giờ trước" — chủ máy nhận ra thiết bị theo lần dùng gần nhất dễ hơn ngày được tin. */
+    string Ago(double nowMs, double atMs) {
+      double min = Math.Max(0, (nowMs - atMs) / 60000);
+      if (min < 1) return cfg.T("agoNow");
+      if (min < 60) return cfg.T("agoMin").Replace("{n}", ((int)min).ToString());
+      if (min < 1440) return cfg.T("agoHour").Replace("{n}", ((int)(min / 60)).ToString());
+      return cfg.T("agoDay").Replace("{n}", ((int)(min / 1440)).ToString());
+    }
+
+    ToolStripMenuItem InfoItem(string text) {
+      ToolStripMenuItem item = Item(text, delegate { });
+      item.Enabled = false;
+      return item;
+    }
+
+    static void StyleDropDown(ToolStripMenuItem item) {
+      ToolStripDropDownMenu drop = item.DropDown as ToolStripDropDownMenu;
+      if (drop != null) { drop.ShowImageMargin = false; drop.ShowCheckMargin = false; }
+      item.DropDown.BackColor = Color.White;
+      item.DropDown.Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+      item.DropDown.Padding = new Padding(2, 6, 2, 6);
+    }
+
+    /**
+     * Danh sách chỉ để hiện và gỡ — daemon mới là bên kiểm chữ ký và cho vào. Rỗng / daemon không chạy thì ẩn cả mục, menu giữ gọn.
+     * Mỗi thiết bị là một menu con: dòng chính "tên · nơi · lần dùng cuối", bên trong là tài khoản / IP / ngày được tin và nút gỡ.
+     * Chỉ tài khoản chủ máy xem được (BE chặn), nên tài khoản hiện một lần ở đầu: thấy thiết bị lạ nghĩa là tài khoản đã lộ.
+     */
     void RefreshTrustedDevices(bool running) {
+      // key, name, place, ip, account, lastUsed(ms), added date
       var rows = new List<string[]>();
+      var lastUsed = new List<double>();
+      double nowMs = (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
       try {
         if (running && File.Exists(TrustedDevicesFile)) {
-          double nowMs = (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
           foreach (Match row in Regex.Matches(File.ReadAllText(TrustedDevicesFile), "\\{[^{}]*\\}")) {
-            Match key = Regex.Match(row.Value, "\"key\"\\s*:\\s*\"([A-Za-z0-9+/=]+)\"");
-            Match name = Regex.Match(row.Value, "\"name\"\\s*:\\s*\"([^\"]*)\"");
-            Match added = Regex.Match(row.Value, "\"added_at\"\\s*:\\s*\"([^\"]*)\"");
-            Match expires = Regex.Match(row.Value, "\"expires_at\"\\s*:\\s*([0-9]+)");
-            if (!key.Success || !expires.Success || double.Parse(expires.Groups[1].Value) < nowMs) continue;
+            string obj = row.Value;
+            Match key = Regex.Match(obj, "\"key\"\\s*:\\s*\"([A-Za-z0-9+/=]+)\"");
+            double expires = JsonNumber(obj, "expires_at");
+            if (!key.Success || expires < nowMs) continue;
             DateTime when;
-            string date = DateTime.TryParse(added.Groups[1].Value, out when) ? when.ToString("dd/MM/yyyy") : "";
-            rows.Add(new string[] { key.Groups[1].Value, name.Groups[1].Value, date });
+            string date = DateTime.TryParse(JsonText(obj, "added_at"), out when) ? when.ToString("dd/MM/yyyy") : "";
+            double used = JsonNumber(obj, "last_used_at");
+            int at = 0;
+            while (at < lastUsed.Count && lastUsed[at] >= used) at++;
+            lastUsed.Insert(at, used);
+            rows.Insert(at, new string[] { key.Groups[1].Value, JsonText(obj, "name"), JsonText(obj, "place"), JsonText(obj, "ip"), JsonText(obj, "account"), date });
           }
         }
       } catch { }
 
       trustedMenu.Visible = rows.Count > 0;
-      var shown = new StringBuilder();
-      foreach (string[] row in rows) shown.Append(row[0]).Append('|');
+      // Chữ "x phút trước" đổi theo thời gian: dựng lại khi chữ hiện ra đổi, không chỉ khi danh sách đổi.
+      var texts = new List<string>();
+      for (int i = 0; i < rows.Count; i++) {
+        string[] row = rows[i];
+        string where = row[2].Length > 0 ? row[2].Split(',')[0].Trim() : "";
+        texts.Add(row[1] + (where.Length > 0 ? " · " + where : "") + (lastUsed[i] > 0 ? " · " + Ago(nowMs, lastUsed[i]) : ""));
+      }
+      string account = "";
+      foreach (string[] row in rows) { if (row[4].Length > 0) { account = row[4]; break; } }
+      var shown = new StringBuilder(account);
+      for (int i = 0; i < rows.Count; i++) shown.Append('|').Append(rows[i][0]).Append('|').Append(texts[i]).Append('|').Append(rows[i][2]).Append('|').Append(rows[i][3]);
       if (shown.ToString() == trustedShown) return;
       trustedShown = shown.ToString();
 
       trustedMenu.DropDownItems.Clear();
-      foreach (string[] row in rows) {
-        string key = row[0];
-        trustedMenu.DropDownItems.Add(Item(cfg.T("trustedRemove").Replace("{device}", row[1]).Replace("{date}", row[2]),
-          delegate { SendTrustAction("{\"action\":\"untrust\",\"key\":\"" + key + "\"}"); }));
-      }
-      if (rows.Count > 1) {
+      if (account.Length > 0) {
+        trustedMenu.DropDownItems.Add(InfoItem(cfg.T("trustedAccount").Replace("{account}", account)));
         trustedMenu.DropDownItems.Add(new ToolStripSeparator());
+      }
+      for (int i = 0; i < rows.Count; i++) {
+        string[] row = rows[i];
+        string key = row[0];
+        SubmenuItem device = new SubmenuItem(texts[i]);
+        device.Padding = new Padding(16, 6, 24, 6);
+        StyleDropDown(device);
+        if (lastUsed[i] > 0) device.DropDownItems.Add(InfoItem(cfg.T("trustedLastUsed").Replace("{when}", Ago(nowMs, lastUsed[i]))));
+        if (row[2].Length > 0) device.DropDownItems.Add(InfoItem(cfg.T("trustedPlace").Replace("{place}", row[2])));
+        if (row[3].Length > 0) device.DropDownItems.Add(InfoItem(cfg.T("trustedIp").Replace("{ip}", row[3])));
+        if (row[5].Length > 0) device.DropDownItems.Add(InfoItem(cfg.T("trustedSince").Replace("{date}", row[5])));
+        device.DropDownItems.Add(new ToolStripSeparator());
+        ToolStripMenuItem remove = Item(cfg.T("trustedRemove"), delegate { SendTrustAction("{\"action\":\"untrust\",\"key\":\"" + key + "\"}"); });
+        remove.ForeColor = Color.FromArgb(210, 45, 45);
+        device.DropDownItems.Add(remove);
+        trustedMenu.DropDownItems.Add(device);
+      }
+      trustedMenu.DropDownItems.Add(new ToolStripSeparator());
+      if (rows.Count > 1) {
         trustedMenu.DropDownItems.Add(Item(cfg.T("trustedRemoveAll"), delegate { SendTrustAction("{\"action\":\"untrust_all\"}"); }));
       }
+      ToolStripMenuItem hint = InfoItem(cfg.T("trustedHint"));
+      hint.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular);
+      trustedMenu.DropDownItems.Add(hint);
     }
 
     void SendTrustAction(string json) {
@@ -1238,7 +1312,7 @@ namespace AivinDesktop {
       Refresh();
       Balloon(cfg.T("connectBrowserHint"), ToolTipIcon.Info);
       ThreadPool.QueueUserWorkItem(delegate {
-        int loginResult = RunCliAndWait("login");
+        int loginResult = RunCliAndWait("login --app desktop");
         if (quitting) return;
         if (loginResult != 0) {
           UI(delegate {

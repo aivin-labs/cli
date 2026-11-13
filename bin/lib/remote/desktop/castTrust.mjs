@@ -39,6 +39,42 @@ function parseDeviceKey(deviceKey) {
 /** Tên do trình duyệt tự khai, chỉ để hiện: bỏ ký tự lạ để khay đọc tệp không vỡ. */
 const safeName = (name) => String(name ?? '').replace(/[^\p{L}\p{N} ._·-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, MAX_NAME_CHARS) || 'Thiết bị';
 
+/** Nơi / IP / tài khoản máy chủ gửi kèm, chỉ để hiện: lọc như tên (khay đọc tệp bằng regex, không được có `"` hay `\`). */
+const safePlace = (text) => String(text ?? '').replace(/[^\p{L}\p{N} .,'’&-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 80);
+export const safeViewerIp = (ip) => (typeof ip === 'string' && /^[0-9A-Fa-f:.]{2,45}$/.test(ip) ? ip : '');
+export const safeViewerAccount = (account) => (typeof account === 'string' ? account.replace(/[^A-Za-z0-9._@•+-]/g, '').slice(0, 80) : '');
+
+/**
+ * Vị trí gần đúng theo IP (BE tra từ Cloudflare / bộ dữ liệu quốc gia), ví dụ `{ city: 'Hanoi', country: 'VN' }` → "Hanoi, Việt Nam".
+ * Chỉ để chủ máy nhận ra thiết bị lạ; không bao giờ dùng để quyết định cho vào.
+ */
+export function castViewerPlace(location, lang = 'vi') {
+  if (!location || typeof location !== 'object') return '';
+  const local = safePlace(location.city) || safePlace(location.region);
+  const code = String(location.country || '').toUpperCase();
+  let country = '';
+  if (/^[A-Z]{2}$/.test(code)) {
+    try { country = new Intl.DisplayNames([lang, 'en'], { type: 'region' }).of(code) || code; } catch { country = code; }
+  }
+  return safePlace([local, country].filter(Boolean).join(', '));
+}
+
+/** Thông tin người xem để hiện cho chủ máy, đã lọc: `{ place, ip, account }` (trường rỗng = không biết). */
+export function castViewerInfo(payload, lang = 'vi') {
+  return {
+    place: castViewerPlace(payload?.viewer_location, lang),
+    ip: safeViewerIp(payload?.viewer_ip),
+    account: safeViewerAccount(payload?.viewer_account),
+  };
+}
+
+/** Thông tin người xem chỉ lưu khi có giá trị — bản ghi cũ / máy chủ đời cũ không có thì giữ nguyên trường cũ. */
+const infoFields = ({ place, ip, account } = {}) => ({
+  ...(safePlace(place) ? { place: safePlace(place) } : {}),
+  ...(safeViewerIp(ip) ? { ip: safeViewerIp(ip) } : {}),
+  ...(safeViewerAccount(account) ? { account: safeViewerAccount(account) } : {}),
+});
+
 const VIEWER_CODE_CHARS = 6;
 /** Chừa chỗ cho " - <mã>" để cắt theo `MAX_NAME_CHARS` khi lưu không làm mất mã. */
 const VIEWER_NAME_CHARS = MAX_NAME_CHARS - VIEWER_CODE_CHARS - 3;
@@ -116,18 +152,19 @@ export function createCastTrust({ file = CAST_TRUST_FILE, keyFile = CAST_TRUST_K
     /** Khoá này đủ điều kiện để lưu (trình duyệt cũ / khoá hỏng thì hộp hỏi không hiện nút "Luôn cho phép"). */
     accepts: (deviceKey) => parseDeviceKey(deviceKey) !== null,
     has: (deviceKey) => list().some((d) => d.key === deviceKey),
-    add({ key, name }) {
+    /** `info`: `{ place, ip, account }` lúc bấm "Luôn cho phép" — khay hiện để chủ máy nhận ra thiết bị (và tài khoản bị lộ nếu thấy lạ). */
+    add({ key, name, info }) {
       if (!parseDeviceKey(key)) return false;
       const t = now();
       const others = list().filter((d) => d.key !== key).sort((a, b) => b.last_used_at - a.last_used_at).slice(0, MAX_DEVICES - 1);
-      save([{ key, name: safeName(name), added_at: new Date(t).toISOString(), last_used_at: t, expires_at: t + CAST_TRUST_TTL_MS }, ...others]);
+      save([{ key, name: safeName(name), ...infoFields(info), added_at: new Date(t).toISOString(), last_used_at: t, expires_at: t + CAST_TRUST_TTL_MS }, ...others]);
       return true;
     },
-    /** Vừa vào bằng quyền tin: tính lại hạn từ lần dùng này. */
-    touch(key) {
+    /** Vừa vào bằng quyền tin: tính lại hạn từ lần dùng này, ghi lại nơi / IP lần dùng này. */
+    touch(key, info) {
       const t = now();
       const devices = list();
-      if (devices.some((d) => d.key === key)) save(devices.map((d) => (d.key === key ? { ...d, last_used_at: t, expires_at: t + CAST_TRUST_TTL_MS } : d)));
+      if (devices.some((d) => d.key === key)) save(devices.map((d) => (d.key === key ? { ...d, ...infoFields(info), last_used_at: t, expires_at: t + CAST_TRUST_TTL_MS } : d)));
     },
     remove(key) {
       const devices = list();

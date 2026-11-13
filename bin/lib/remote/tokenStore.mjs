@@ -1,5 +1,6 @@
 import { execFileSync } from 'child_process';
 import fs from 'fs';
+import { DpapiMode, dpapiHelper, runDpapiHelper } from './dpapiHelper.mjs';
 
 /**
  * Token thiết bị cất trong kho bí mật của hệ điều hành (29/10/2026). Trước đây `~/.aivin/device-credentials.json` giữ token dạng chữ thường
@@ -23,6 +24,22 @@ const DPAPI_UNPROTECT = `Add-Type -AssemblyName System.Security; $e = [Text.Enco
 
 const run = (cmd, args, input) => execFileSync(cmd, args, { input, encoding: 'utf8', timeout: 20_000, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 
+/**
+ * DPAPI: ưu tiên exe biên dịch sẵn (dpapiHelper.mjs, ~0,1 s), không có / không chạy được thì PowerShell (~1–4 s). Exe chạy được mà báo lỗi
+ * (bản mã của máy / tài khoản khác) thì ném luôn — PowerShell cũng sẽ hỏng y vậy, chỉ tốn thêm vài giây.
+ */
+function dpapi(mode, input) {
+  const exe = dpapiHelper();
+  if (exe) {
+    try {
+      return runDpapiHelper(exe, mode, input, DPAPI_ENTROPY);
+    } catch (e) {
+      if (typeof e?.status === 'number') throw e;
+    }
+  }
+  return run('powershell.exe', [...PS, mode === DpapiMode.PROTECT ? DPAPI_PROTECT : DPAPI_UNPROTECT], input);
+}
+
 /** Kho dùng trên máy này. `AIVIN_TOKEN_STORE=file` ép tệp thường (máy không có kho / gỡ lỗi). */
 export function preferredTokenStore({ platform = process.platform, env = process.env, exists = fs.existsSync } = {}) {
   const forced = String(env.AIVIN_TOKEN_STORE || '').toLowerCase();
@@ -41,7 +58,7 @@ const quote = (s) => `"${String(s).replace(/["\\]/g, '\\$&')}"`;
  */
 export function sealToken(token, { account, store = preferredTokenStore() } = {}) {
   try {
-    if (store === TokenStoreKind.DPAPI) return { token_store: store, token_enc: run('powershell.exe', [...PS, DPAPI_PROTECT], token) };
+    if (store === TokenStoreKind.DPAPI) return { token_store: store, token_enc: dpapi(DpapiMode.PROTECT, token) };
     if (store === TokenStoreKind.KEYCHAIN) {
       run('/usr/bin/security', ['-i'], `add-generic-password -U -a ${quote(account)} -s ${SERVICE} -l "Aivin device token" -w ${quote(token)}\n`);
       return { token_store: store };
@@ -61,7 +78,7 @@ export function openToken(record) {
   if (!record) return null;
   if (record.device_token) return record.device_token;
   try {
-    if (record.token_store === TokenStoreKind.DPAPI && record.token_enc) return run('powershell.exe', [...PS, DPAPI_UNPROTECT], record.token_enc) || null;
+    if (record.token_store === TokenStoreKind.DPAPI && record.token_enc) return dpapi(DpapiMode.UNPROTECT, record.token_enc) || null;
     if (record.token_store === TokenStoreKind.KEYCHAIN) return run('/usr/bin/security', ['find-generic-password', '-a', record.token_account || record.device_id, '-s', SERVICE, '-w']) || null;
     if (record.token_store === TokenStoreKind.LIBSECRET) return run('secret-tool', ['lookup', 'service', SERVICE, 'account', record.token_account || record.device_id]) || null;
   } catch { /* không giải được */ }

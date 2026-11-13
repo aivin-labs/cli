@@ -53,7 +53,7 @@ import {
   CAST_ACTION_FILE, askCastConsent, checkCastAction, clearCastSession, isCastLocked, lockCast, recordCastSession, unlockCast,
 } from './desktop/castAuth.mjs';
 import { CastConsentDecision, createCastConsent } from './desktop/castConsent.mjs';
-import { castViewerLabel, createCastTrust, createDeviceProver } from './desktop/castTrust.mjs';
+import { castViewerInfo, castViewerLabel, createCastTrust, createDeviceProver } from './desktop/castTrust.mjs';
 import { createCastTouchViewers, shouldDrawCursorInFrame } from './desktop/castTouchViewers.mjs';
 import { createConfirmBarrier } from './confirmBarrier.mjs';
 import { newInputTag } from './humanInput.mjs';
@@ -502,7 +502,7 @@ export async function startRemoteClient(options = {}) {
   const castProver = createDeviceProver({ send: emitCastStatus });
   const castConsent = createCastConsent({
     trust: castTrust,
-    ask: ({ viewerDevice, locked, canTrust, signal }) => askCastConsent({ viewerDevice: viewerDevice || 'Thiết bị từ xa', repeatedAfterBlock: locked, canTrust, signal }),
+    ask: ({ viewerDevice, viewerInfo, locked, canTrust, signal }) => askCastConsent({ viewerDevice: viewerDevice || 'Thiết bị từ xa', viewerInfo, repeatedAfterBlock: locked, canTrust, signal }),
     getMode: () => policyGuard.read().cast_consent,
     isLocked: isCastLocked,
     unlock: unlockCast,
@@ -610,7 +610,7 @@ export async function startRemoteClient(options = {}) {
   let castInputTag = null;
   const castTrustTag = () => (castInputTag && desktopCast.isActive() ? castInputTag : null);
   /** Mở tiến trình quay cho một phiên (lần đầu, hoặc mở lại khi tiến trình sập). `false` khi máy không quay được. */
-  function startCapture({ sessionId, viewerId, viewerDevice, castConfig }) {
+  function startCapture({ sessionId, viewerId, viewerDevice, viewerPlace = '', castConfig }) {
     return !!desktopCast.start({
       sessionId,
       inputTag: castInputTag,
@@ -656,7 +656,7 @@ export async function startRemoteClient(options = {}) {
         say(chalk.cyan(`  🖥️  Đang có người xem + điều khiển màn hình máy này từ web (${meta.bounds?.width}x${meta.bounds?.height})`));
         mascot.remoteView(true, { device: viewerDevice });
         holdCastAwake(true);
-        recordCastSession({ active: true, sessionId, viewerId, viewerDevice });
+        recordCastSession({ active: true, sessionId, viewerId, viewerDevice, viewerPlace });
         emitCastStatus({ session_id: sessionId, state: CastState.READY, bounds: meta.bounds });
       },
       onError: (err) => {
@@ -681,7 +681,7 @@ export async function startRemoteClient(options = {}) {
           say(chalk.yellow('  ⚠️  Tiến trình xem màn hình dừng bất ngờ — mở lại'));
           // Tiến trình cũ chết không kịp nhả nút chuột đang giữ: nhả trên tiến trình mới.
           const hadHeld = castGate.takeHeldInput();
-          if (startCapture({ sessionId, viewerId, viewerDevice, castConfig })) {
+          if (startCapture({ sessionId, viewerId, viewerDevice, viewerPlace, castConfig })) {
             desktopWebRtc.attachPipe(desktopCast.pipeName());
             if (hadHeld) for (const button of [0, 1, 2]) desktopCast.sendInput({ action: 'mouseup', button });
             return;
@@ -1307,6 +1307,8 @@ export async function startRemoteClient(options = {}) {
     const deviceKey = typeof payload?.device_key === 'string' ? payload.device_key : '';
     // `viewer_name` (loại máy + model + trình duyệt) chỉ để hiện; máy chủ đời cũ không gửi thì dùng loại máy.
     const viewerDevice = castViewerLabel(payload?.viewer_name || viewerType, deviceKey, payload?.viewer_key);
+    // Tài khoản / nơi / IP do máy chủ thấy (trình duyệt không tự khai được): chủ máy nhờ đó biết ai đang xin vào, không chỉ tên máy.
+    const viewerInfo = castViewerInfo(payload, mascotLang());
     if (!sessionId || !viewerId) return;
     // Chủ máy đã tạm dừng điều khiển từ xa → từ chối cả xem màn hình.
     if (isRemotePaused()) {
@@ -1315,7 +1317,7 @@ export async function startRemoteClient(options = {}) {
     }
     // Quyết định trước khi chụp bất cứ thứ gì; chỉ máy này trả lời được, máy chủ không trả lời thay.
     const decision = await castConsent.decide({
-      sessionId, viewerId, viewerDevice, viewerKey: payload?.viewer_key, deviceKey,
+      sessionId, viewerId, viewerDevice, viewerKey: payload?.viewer_key, deviceKey, viewerInfo,
       prove: async () => {
         const proven = await castProver.prove({ sessionId, viewerId, deviceKey });
         if (proven === true) say(chalk.cyan(`  🔑 Thiết bị tin cậy "${viewerDevice || viewerId}" vào xem màn hình`));
@@ -1323,7 +1325,7 @@ export async function startRemoteClient(options = {}) {
       },
     });
     if (decision !== CastConsentDecision.ALLOW) {
-      logActivity({ type: 'desktop_cast_consent', id: sessionId, viewer: viewerDevice || viewerId, result: decision });
+      logActivity({ type: 'desktop_cast_consent', id: sessionId, viewer: viewerDevice || viewerId, ...viewerInfo, result: decision });
       if (decision === CastConsentDecision.CANCELLED) return;
       say(chalk.red(`  ✕  Không cho xem màn hình (${decision}): ${viewerDevice || viewerId}`));
       emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.REFUSED, reason: decision });
@@ -1334,7 +1336,7 @@ export async function startRemoteClient(options = {}) {
       emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.REFUSED, reason: 'paused' });
       return;
     }
-    logActivity({ type: 'desktop_cast_consent', id: sessionId, viewer: viewerDevice || viewerId, result: decision });
+    logActivity({ type: 'desktop_cast_consent', id: sessionId, viewer: viewerDevice || viewerId, ...viewerInfo, result: decision });
     const castConfig = {
       max_fps: payload?.max_fps || 15,
       max_width: payload?.max_width || 1366,
@@ -1350,7 +1352,7 @@ export async function startRemoteClient(options = {}) {
     if (!desktopCast.isActive()) {
       castInputTag = newInputTag();
       castRestarts.length = 0;
-      if (!startCapture({ sessionId, viewerId, viewerDevice, castConfig })) return;
+      if (!startCapture({ sessionId, viewerId, viewerDevice, viewerPlace: viewerInfo.place, castConfig })) return;
     } else {
       desktopCast.config(castConfig);
       // Màn hình đứng yên thì ảnh thưa: người mới vào cần một ảnh ngay.

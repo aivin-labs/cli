@@ -52,7 +52,7 @@ export function unlockCast() {
 /**
  * Ghi nhận thông tin phiên cast đang chạy để khay hệ thống (tray) đọc và hiển thị.
  */
-export function recordCastSession({ active = true, sessionId = '', viewerId = '', viewerDevice = '' } = {}) {
+export function recordCastSession({ active = true, sessionId = '', viewerId = '', viewerDevice = '', viewerPlace = '' } = {}) {
   try {
     fs.mkdirSync(path.dirname(CAST_SESSION_FILE), { recursive: true });
     const payload = {
@@ -62,6 +62,8 @@ export function recordCastSession({ active = true, sessionId = '', viewerId = ''
       session_id: sessionId,
       viewer_id: viewerId,
       viewer_device: viewerDevice,
+      // Nơi người xem theo IP (đã lọc như tên thiết bị): khay ghép vào dòng "Ngưng kết nối" để chủ máy biết ai đang điều khiển.
+      ...(viewerPlace ? { viewer_place: viewerPlace } : {}),
       updated_at: new Date().toISOString(),
     };
     fs.writeFileSync(CAST_SESSION_FILE, JSON.stringify(payload, null, 2), 'utf8');
@@ -155,7 +157,8 @@ export const CONSENT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/2
    <Border Margin="0,14,0,0" CornerRadius="10" Background="#F4F6FA" BorderBrush="#E8ECF3" BorderThickness="1" Padding="14,12">
     <StackPanel>
       <TextBlock x:Name="DeviceText" FontSize="14" FontWeight="SemiBold" Foreground="#111827" TextWrapping="Wrap"/>
-      <TextBlock Text="Thiết bị này đang gửi yêu cầu xem màn hình và thao tác chuột, bàn phím trên máy tính của bạn." Margin="0,6,0,0" FontSize="12.5" Foreground="#4B5563" TextWrapping="Wrap"/>
+      <TextBlock x:Name="OriginText" Margin="0,4,0,0" FontSize="12.5" Foreground="#374151" TextWrapping="Wrap"/>
+      <TextBlock x:Name="AboutText" Margin="0,6,0,0" FontSize="12.5" Foreground="#4B5563" TextWrapping="Wrap"/>
     </StackPanel>
    </Border>
    <DockPanel Margin="0,22,0,0" LastChildFill="True">
@@ -178,6 +181,8 @@ const CONSENT_SCRIPT = [
   "$w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml](D 'AIVIN_CAST_XAML'))))",
   "$w.Title = D 'AIVIN_CAST_TITLE'",
   "$w.FindName('DeviceText').Text = D 'AIVIN_CAST_DEVICE'",
+  "$origin = if ($env:AIVIN_CAST_ORIGIN) { D 'AIVIN_CAST_ORIGIN' } else { '' }; if ($origin) { $w.FindName('OriginText').Text = $origin } else { $w.FindName('OriginText').Visibility = 'Collapsed' }",
+  "$w.FindName('AboutText').Text = D 'AIVIN_CAST_ABOUT'",
   "if ($env:AIVIN_CAST_WARN -ne '1') { $w.FindName('Warn').Visibility = 'Collapsed' }",
   "$ms = New-Object IO.MemoryStream(, [Convert]::FromBase64String($env:AIVIN_CAST_LOGO)); $img = New-Object Windows.Media.Imaging.BitmapImage",
   "$img.BeginInit(); $img.StreamSource = $ms; $img.CacheOption = 'OnLoad'; $img.EndInit(); $w.FindName('Logo').Source = $img",
@@ -199,12 +204,18 @@ const CONSENT_SCRIPT = [
   '[void]$w.ShowDialog(); Remove-Guard; $tm.Stop(); $script:result',
 ].join('\n');
 
+/** Dòng "Tài khoản … · Hà Nội, Việt Nam · IP …" dưới tên thiết bị; máy chủ đời cũ không gửi gì thì rỗng (ẩn dòng). */
+export function castConsentOrigin(info) {
+  const where = [info?.place, info?.ip ? `IP ${info.ip}` : ''].filter(Boolean).join(' · ');
+  return [info?.account ? `Tài khoản ${info.account}` : '', where].filter(Boolean).join('\n');
+}
+
 /**
  * Hỏi người ở máy trên chính màn hình Windows. Mặc định là từ chối: Enter, Esc, nút X, hết giờ đều không cho xem.
  * `repeatedAfterBlock`: hiện thêm dòng cảnh báo thiết bị từng bị ngắt. `canTrust`: hiện thêm nút "Luôn cho phép".
  * Trả về một giá trị của `CastConsentDecision`.
  */
-export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutSec = 45, repeatedAfterBlock = false, canTrust = false, signal } = {}) {
+export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', viewerInfo = null, timeoutSec = 45, repeatedAfterBlock = false, canTrust = false, signal } = {}) {
   if (process.platform !== 'win32') return Promise.resolve(CastConsentDecision.UNAVAILABLE);
   return new Promise((resolve) => {
     let out = '';
@@ -224,6 +235,10 @@ export function askCastConsent({ viewerDevice = 'Thiết bị từ xa', timeoutS
       AIVIN_CAST_LOGO: AIVIN_LOGO_PNG_BASE64,
       AIVIN_CAST_TITLE: b64(CAST_CONSENT_WINDOW_TITLE),
       AIVIN_CAST_DEVICE: b64(`Thiết bị yêu cầu: ${viewerDevice}`),
+      AIVIN_CAST_ORIGIN: b64(castConsentOrigin(viewerInfo)),
+      AIVIN_CAST_ABOUT: b64(viewerInfo?.account
+        ? 'Chỉ tài khoản của bạn mới gửi được yêu cầu này. Không nhận ra thiết bị hay vị trí này: bấm ✕ rồi đổi mật khẩu tài khoản.'
+        : 'Thiết bị này đang gửi yêu cầu xem màn hình và thao tác chuột, bàn phím trên máy tính của bạn.'),
       AIVIN_CAST_COUNTDOWN: b64('Tự từ chối sau {0}s'),
       AIVIN_CAST_SECONDS: String(timeoutSec),
       AIVIN_CAST_WARN: repeatedAfterBlock ? '1' : '0',

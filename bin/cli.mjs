@@ -879,6 +879,7 @@ program
   .option('--basic', 'Log in with email/password directly in the terminal instead of a browser')
   .option('--google', 'Alias of the default browser flow - pick Google once the page opens')
   .option('--client <client>', 'Client/org id to use with --basic (default: "aivin.cloud")')
+  .option('--app <app>', 'App asking to log in, shown on the browser consent screen: cli (default) | desktop (used by the AIVIN Bot tray)')
   .action(async (baseUrl, options) => {
     try {
       // Bare hostname (no scheme) is the common case for a quick `aivin login api.aivin.vn` -
@@ -914,7 +915,7 @@ program
         }
       }
 
-      const apiKey = options.basic ? await basicLogin(options) : await browserLogin();
+      const apiKey = options.basic ? await basicLogin(options) : await browserLogin({ app: options.app, serverUrl: resolvedBaseUrl });
 
       console.log(chalk.green('✅ Login successful!'));
       const identity = await tryFetchWhoami(resolvedBaseUrl, apiKey);

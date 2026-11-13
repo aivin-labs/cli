@@ -6,6 +6,11 @@ import { randomBytes } from 'crypto';
 import inquirer from 'inquirer';
 import axios from 'axios';
 import { DEFAULT_AIVIN_BASE_URL, saveActiveContext } from './context.mjs';
+import {
+  LoginApp, LoginOutcome, buildLoginUrl, createPkcePair, normalizeLoginApp, parseCallback, resultLang, resultPageHtml,
+} from './loginHandoff.mjs';
+
+export { LoginApp };
 
 // ── Login - get an API key saved once, machine-wide ─────────────────────────
 
@@ -42,82 +47,124 @@ export function openBrowser(url) {
     console.log(chalk.yellow('Could not open a browser automatically - open this URL manually:'));
     console.log(chalk.cyan(`   ${url}`));
   };
-  const command = browserCommand(url);
+  // `AIVIN_NO_BROWSER=1`: máy không có trình duyệt / test — chỉ in URL.
+  const command = process.env.AIVIN_NO_BROWSER === '1' ? null : browserCommand(url);
   if (!command) return showManually();
   execFile(command.file, command.args, (error) => { if (error) showManually(); });
 }
 
-/**
- * Default `aivin login` flow: opens the platform's actual web app (not the API) so the user logs
- * in exactly the way they normally would - custom-domain org, password, Google, OTP, whatever
- * applies to their account - none of that multi-tenant login logic is reimplemented here. A tiny
- * local HTTP server waits for the browser to hand back a freshly-minted API key. The web app side
- * of this handoff lives in ApiKeysTab.jsx (mint + redirect) and ProfileHook.jsx (auto-open the tab) -
- * see docs/CLI.md#aivin-login.
- */
-export async function browserLogin() {
-  // Defaults to the production web app - override with AIVIN_WEB_URL only if you're pointing at a
-  // local/dev/staging frontend instead.
-  const webBaseUrl = process.env.AIVIN_WEB_URL || 'https://app.aivin.cloud';
+const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+const EXCHANGE_PATH = '/apikey/cli-login/exchange';
+const CODE_PATH = '/apikey/cli-login/code';
+/** Gợi ý quyền truy cập khi máy chưa ghép (chưa có tệp ghép máy). */
+const ACCESS_NOT_PAIRED = 'none';
 
+/** Mã máy (để máy chủ thay đúng khoá cũ của máy này khi đăng nhập lại) + chính sách hiện tại trên máy (chỉ để màn cấp quyền nói đúng). */
+async function machineLoginContext(serverUrl) {
+  const [{ getOrCreateDeviceId, pairedAccess }, { loadLocalPolicy }] = await Promise.all([
+    import('./remote/credentials.mjs'),
+    import('./remote/localPolicy.mjs'),
+  ]);
+  let deviceId;
+  try { deviceId = getOrCreateDeviceId(); } catch { /* không ghi được ~/.aivin: vẫn đăng nhập, chỉ không thay được khoá cũ */ }
+  let hints = {};
+  try {
+    const policy = loadLocalPolicy();
+    hints = { access: pairedAccess(serverUrl) || ACCESS_NOT_PAIRED, confirm: policy.confirm, cast: policy.cast_consent };
+  } catch { /* thiếu gợi ý thì web nói chung chung */ }
+  return { deviceId, hints };
+}
+
+/** Đổi mã một lần + verifier lấy khoá qua máy chủ. */
+async function exchangeLoginCode({ serverUrl, code, verifier, deviceId }) {
+  try {
+    const body = { code, code_verifier: verifier, ...(deviceId ? { device_id: deviceId } : {}) };
+    const res = await axios.post(`${serverUrl}${EXCHANGE_PATH}`, body, { timeout: 30_000 });
+    const data = res.data?.data ?? res.data;
+    if (!data?.api_key) throw new Error('Server did not return an API key');
+    return data.api_key;
+  } catch (error) {
+    const message = error.response?.data?.message || error.response?.data?.i18n || error.message;
+    throw new Error(`Could not finish login: ${message}`, { cause: error });
+  }
+}
+
+/**
+ * Trình duyệt quay về `/callback`: trả trang kết quả đúng ngôn ngữ / đúng app và báo kết quả cho `browserLogin`. Lời gọi sai `state` chỉ
+ * nhận trang báo lỗi, KHÔNG huỷ lần đăng nhập đang chờ.
+ */
+function createCallbackHandler({ state, app, serverUrl, verifier, deviceId, settle }) {
+  let finished = false;
+  return async (req, res) => {
+    let url;
+    try { url = new URL(req.url, 'http://127.0.0.1'); } catch { res.writeHead(400).end(); return; }
+    if (url.pathname !== '/callback') { res.writeHead(404).end(); return; }
+    const lang = resultLang(url.searchParams.get('lang'));
+    const reply = (outcome, status = 200) => {
+      res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+      res.end(resultPageHtml({ outcome, app, lang }));
+    };
+    const parsed = parseCallback(url.searchParams, state);
+    if (parsed.kind === LoginOutcome.BAD_REQUEST || finished) return reply(LoginOutcome.BAD_REQUEST, 400);
+    finished = true;
+    if (parsed.kind === LoginOutcome.CANCELLED) {
+      reply(LoginOutcome.CANCELLED);
+      return settle(new Error('Login was cancelled in the browser'));
+    }
+    if (parsed.kind === 'key') {
+      reply(LoginOutcome.OK);
+      return settle(null, parsed.key);
+    }
+    if (parsed.kind !== 'code') {
+      reply(LoginOutcome.FAILED);
+      return settle(new Error('Login callback carried no code'));
+    }
+    try {
+      const key = await exchangeLoginCode({ serverUrl, code: parsed.code, verifier, deviceId });
+      reply(LoginOutcome.OK);
+      settle(null, key);
+    } catch (error) {
+      reply(LoginOutcome.FAILED);
+      settle(error);
+    }
+  };
+}
+
+/**
+ * Default `aivin login` flow: opens the platform's actual web app (not the API) so the user logs in exactly the way they normally would
+ * (custom-domain org, password, Google, OTP…). A tiny local HTTP server waits for the browser to come back with a ONE-TIME CODE, which
+ * this process exchanges (with a PKCE verifier only it holds) for the API key — the key itself never travels through the browser, so it
+ * never lands in browser history. Web side: fe ProfileHook.jsx + CliAuthPrompt.jsx; server side: be CliLoginService.
+ * `app`: which app is asking (shown on the consent screen). `serverUrl`: the API host the code is exchanged at.
+ */
+export async function browserLogin({ app = LoginApp.CLI, serverUrl = process.env.AIVIN_BASE_URL || DEFAULT_AIVIN_BASE_URL } = {}) {
+  // Defaults to the production web app - override with AIVIN_WEB_URL only if you're pointing at a local/dev/staging frontend instead.
+  const webBaseUrl = process.env.AIVIN_WEB_URL || 'https://app.aivin.cloud';
+  const loginApp = normalizeLoginApp(app);
   const state = randomBytes(16).toString('hex');
-  let resolveKey, rejectKey;
-  const keyPromise = new Promise((resolve, reject) => {
-    resolveKey = resolve;
-    rejectKey = reject;
-  });
-  // If `server.listen()` itself errors below, this promise gets rejected via rejectKey() but the
-  // function throws from the port-await first (before `return keyPromise` is ever reached) - leaving
-  // it as an unobserved rejection. This passive handler only silences that warning; it doesn't
-  // consume keyPromise's rejection for the normal caller, who awaits the promise returned below.
-  keyPromise.catch(() => {});
+  const { verifier, challenge } = createPkcePair();
+  const { deviceId, hints } = await machineLoginContext(serverUrl);
 
   let timeout;
-  const server = http.createServer((req, res) => {
-    let url;
-    try {
-      url = new URL(req.url, 'http://127.0.0.1');
-    } catch {
-      res.writeHead(400).end();
-      return;
-    }
-    if (url.pathname !== '/callback') {
-      res.writeHead(404).end();
-      return;
-    }
-
-    const key = url.searchParams.get('key');
-    const receivedState = url.searchParams.get('state');
-    const ok = !!key && receivedState === state;
-
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(
-      '<html><body style="font-family:sans-serif;text-align:center;padding-top:4rem">' +
-        (ok
-          ? '<h2>Login successful</h2><p>You can close this window and return to your terminal.</p>'
-          : '<h2>Login failed</h2><p>Close this window and retry <code>aivin login</code>.</p>') +
-        // Only works on tabs opened via script (window.open), not a typed/clicked URL - harmless
-        // no-op otherwise, hence the fallback "you can close this" text above regardless.
-        '<script>window.close();</script>' +
-        '</body></html>',
-    );
-
-    clearTimeout(timeout);
-    server.close();
-    if (ok) resolveKey(key);
-    else rejectKey(new Error('Login callback was missing a key or had a state mismatch'));
+  let settle;
+  const keyPromise = new Promise((resolve, reject) => {
+    settle = (error, key) => {
+      clearTimeout(timeout);
+      server.close();
+      if (error) reject(error); else resolve(key);
+    };
   });
-  server.on('error', (err) => rejectKey(err));
+  // If `server.listen()` itself errors below, keyPromise is rejected but this function throws from the port-await first — this passive
+  // handler only silences the unobserved-rejection warning; the normal caller still awaits keyPromise below.
+  keyPromise.catch(() => {});
+  const server = http.createServer(createCallbackHandler({ state, app: loginApp, serverUrl, verifier, deviceId, settle: (e, k) => settle(e, k) }));
+  server.on('error', (err) => settle(err));
 
   const port = await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', () => resolve(server.address().port));
   });
-
-  const authUrl = new URL('/', webBaseUrl);
-  authUrl.searchParams.set('cli_redirect', `http://127.0.0.1:${port}/callback`);
-  authUrl.searchParams.set('cli_state', state);
-  authUrl.searchParams.set('cli_name', os.hostname());
+  const authUrl = buildLoginUrl({ webBaseUrl, port, state, name: os.hostname(), app: loginApp, challenge, hints });
 
   console.log(chalk.blue('🌐 Opening your browser to log in...'));
   console.log(chalk.gray(`   ${authUrl.toString()}`));
@@ -125,11 +172,7 @@ export async function browserLogin() {
   console.log(chalk.gray('   Waiting for you to confirm in the browser (5 min timeout)...'));
   openBrowser(authUrl.toString());
 
-  timeout = setTimeout(() => {
-    server.close();
-    rejectKey(new Error('Timed out waiting for browser login (5 minutes)'));
-  }, 5 * 60 * 1000);
-
+  timeout = setTimeout(() => settle(new Error('Timed out waiting for browser login (5 minutes)')), LOGIN_TIMEOUT_MS);
   return keyPromise;
 }
 
@@ -194,37 +237,25 @@ export async function obtainAccessToken(options) {
 }
 
 /**
- * `aivin login --basic`: the login-specific half of the flow above - exchange credentials for a
- * JWT, then mint (replacing any previous same-named key) the one API key that gets saved to
- * `~/.aivin/credentials`.
+ * `aivin login --basic`: exchange credentials for a session JWT, then go through the same one-time code + PKCE issuance as the browser
+ * flow (be CliLoginService) — the key is bound to this machine's device id, expires when unused, and replaces ONLY this machine's
+ * previous login key. (Before: listed the whole organization's keys and revoked whichever one had this hostname as its name.)
  */
 export async function basicLogin(options) {
   const { serverUrl, accessToken } = await obtainAccessToken(options);
-  const authHeaders = { headers: { Authorization: `Bearer ${accessToken}` } };
-  const deviceName = os.hostname();
-
-  // Replace (not accumulate) a previous key from this same device - `aivin login` re-run on the
-  // same machine used to create yet another "Aivin CLI - <host>" entry every time, cluttering the
-  // key list with duplicates. Best-effort: if listing/revoking fails for any reason, still proceed
-  // to mint a new key rather than blocking login on it.
+  const authHeaders = { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 30_000 };
+  const { verifier, challenge } = createPkcePair();
+  const { deviceId } = await machineLoginContext(serverUrl);
+  let code;
   try {
-    const listRes = await axios.get(`${serverUrl}/apikey`, authHeaders);
-    const existing = (listRes.data?.items || []).find((k) => k.name === deviceName);
-    if (existing) {
-      await axios.delete(`${serverUrl}/apikey/${existing.id || existing._id}`, authHeaders);
-    }
-  } catch (error) {
-    console.log(chalk.gray(`   (couldn't check for an existing key to replace: ${error.message})`));
-  }
-
-  try {
-    const keyRes = await axios.post(`${serverUrl}/apikey`, { name: deviceName }, authHeaders);
-    if (!keyRes.data?.plainKey) throw new Error('Response did not include an API key');
-    return keyRes.data.plainKey;
+    const res = await axios.post(`${serverUrl}${CODE_PATH}`, { name: os.hostname(), code_challenge: challenge, app: LoginApp.CLI }, authHeaders);
+    code = (res.data?.data ?? res.data)?.code;
+    if (!code) throw new Error('Response did not include a login code');
   } catch (error) {
     const message = error.response?.data?.message || error.message;
     throw new Error(`Failed to create API key: ${message}`, { cause: error });
   }
+  return exchangeLoginCode({ serverUrl, code, verifier, deviceId });
 }
 
 // ── API key management - named keys for your account, separate from `aivin login`'s one ───────

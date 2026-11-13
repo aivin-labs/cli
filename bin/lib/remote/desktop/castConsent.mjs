@@ -51,7 +51,7 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
   /** Khoá thiết bị này đã được cho vào phiên và đồng ý của phiên còn hiệu lực (phiên gián đoạn quá `CONSENT_RESUME_MS` thì thôi). */
   const allowedInSession = (sessionId, deviceKey) => Boolean(sessionDevices.get(sessionId)?.has(deviceKey)) && keysOf(sessionId).some(valid);
 
-  function request({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked }) {
+  function request({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, viewerInfo, locked }) {
     const k = key(sessionId, viewerKey, viewerDevice);
     const open = pending.get(k);
     if (open) {
@@ -62,7 +62,7 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
     const controller = new AbortController();
     onWaiting({ sessionId, viewerId, viewerDevice });
     const canTrust = Boolean(deviceKey && trust?.accepts(deviceKey));
-    const promise = new Promise((resolve) => resolve(ask({ viewerDevice, locked, canTrust, signal: controller.signal })))
+    const promise = new Promise((resolve) => resolve(ask({ viewerDevice, viewerInfo, locked, canTrust, signal: controller.signal })))
       .catch(() => CastConsentDecision.UNAVAILABLE)
       .then((answer) => {
         pending.delete(k);
@@ -70,7 +70,7 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
         approve(k, sessionId, deviceKey);
         if (locked) unlock();
         if (answer === CastConsentDecision.ALLOW_ALWAYS && canTrust) {
-          try { trust.add({ key: deviceKey, name: viewerDevice }); } catch { /* không lưu được: vẫn cho phiên này */ }
+          try { trust.add({ key: deviceKey, name: viewerDevice, info: viewerInfo }); } catch { /* không lưu được: vẫn cho phiên này */ }
         }
         return CastConsentDecision.ALLOW;
       });
@@ -89,7 +89,8 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
   };
 
   return {
-    async decide({ sessionId, viewerId, viewerDevice = '', viewerKey = '', deviceKey = '', prove = null }) {
+    /** `viewerInfo`: `{ place, ip, account }` chỉ để hiện cho chủ máy (hộp hỏi, danh sách thiết bị tin cậy). */
+    async decide({ sessionId, viewerId, viewerDevice = '', viewerKey = '', deviceKey = '', viewerInfo = null, prove = null }) {
       awayViewers.delete(String(viewerId));
       const mode = getMode();
       if (mode === CastConsentMode.OFF) return CastConsentDecision.DISABLED;
@@ -108,12 +109,12 @@ export function createCastConsent({ ask, getMode, isLocked = () => false, unlock
         if (getMode() === CastConsentMode.OFF) return CastConsentDecision.DISABLED;
         if (proven === true && !isLocked()) {
           approve(k, sessionId, deviceKey);
-          try { trust?.touch(deviceKey); } catch { /* chỉ là gia hạn */ }
+          try { trust?.touch(deviceKey, viewerInfo); } catch { /* chỉ là gia hạn */ }
           return CastConsentDecision.ALLOW;
         }
-        return requestForViewer({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked: isLocked() });
+        return requestForViewer({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, viewerInfo, locked: isLocked() });
       }
-      return requestForViewer({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, locked });
+      return requestForViewer({ sessionId, viewerId, viewerDevice, viewerKey, deviceKey, viewerInfo, locked });
     },
     /**
      * Người xem rời / huỷ trong lúc đang hỏi: đóng hộp, không bắt đầu chụp. `away`: chỉ rời tạm (điện thoại tắt màn hình khi chủ máy quay sang

@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import axios from 'axios';
 import { randomUUID } from 'crypto';
-import { DEVICE_API_PREFIX, DEVICE_CREDENTIALS_FILE, DEVICE_ID_FILE, REMOTE_CONFIG_DIR } from './constants.mjs';
+import { DEVICE_API_PREFIX, DEVICE_CREDENTIALS_FILE, DEVICE_ID_FILE, DeviceAccess, REMOTE_CONFIG_DIR } from './constants.mjs';
 import { parseApiKeyClient } from '../auth.mjs';
 import { TokenStoreKind, forgetToken, openToken, preferredTokenStore, sealToken } from './tokenStore.mjs';
 import { writeFileAtomic } from './atomicFile.mjs';
@@ -198,6 +198,12 @@ export function notePolicySealed(serverUrl) {
   } catch { /* daemon still remembers it in memory */ }
 }
 export function policySealedNoted(serverUrl) { return !!readRecord(serverUrl)?.data?.policy_sealed_at; }
+/** Chế độ quyền của máy đã ghép với máy chủ này (`DeviceAccess`), không giải token; chưa ghép → `null`. Chỉ để hiển thị. */
+export function pairedAccess(serverUrl) {
+  const data = readRecord(serverUrl)?.data;
+  if (!data) return null;
+  return data.access === DeviceAccess.FULL ? DeviceAccess.FULL : DeviceAccess.FOLDERS;
+}
 export function readStoredTokenFresh(serverUrl) {
   const data = readRecord(serverUrl)?.data;
   return data ? openToken({ ...data, token_account: data.token_account || data.device_id }) : null;

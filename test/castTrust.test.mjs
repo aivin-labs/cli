@@ -4,8 +4,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { castConsentOrigin } from '../bin/lib/remote/desktop/castAuth.mjs';
 import { CastConsentDecision as D, createCastConsent } from '../bin/lib/remote/desktop/castConsent.mjs';
-import { CAST_TRUST_TTL_MS, castViewerLabel, createCastTrust, createDeviceProver, verifyDeviceProof } from '../bin/lib/remote/desktop/castTrust.mjs';
+import { CAST_TRUST_TTL_MS, castViewerInfo, castViewerLabel, castViewerPlace, createCastTrust, createDeviceProver, verifyDeviceProof } from '../bin/lib/remote/desktop/castTrust.mjs';
 import { CastConsentMode as M } from '../bin/lib/remote/localPolicy.mjs';
 
 const { subtle } = crypto.webcrypto;
@@ -78,6 +79,54 @@ test('kho: thêm, gỡ, gỡ tất cả', async () => {
   assert.equal(trust.has(b.publicKey), true);
   trust.removeAll();
   assert.deepEqual(trust.list(), []);
+});
+
+test('người xem: tài khoản / nơi / IP máy chủ gửi được lọc; quốc gia hiện theo tên, không có thì rỗng', () => {
+  assert.deepEqual(
+    castViewerInfo({ viewer_location: { city: 'Hà Nội', country: 'vn' }, viewer_ip: '1.2.3.4', viewer_account: 'th•••@gmail.com' }, 'vi'),
+    { place: 'Hà Nội, Việt Nam', ip: '1.2.3.4', account: 'th•••@gmail.com' },
+  );
+  assert.equal(castViewerPlace({ country: 'US' }, 'en'), 'United States');
+  assert.equal(castViewerPlace({ region: 'Bad"},{"x' }, 'vi'), 'Bad,x');
+  assert.deepEqual(castViewerInfo({ viewer_ip: '1.2.3.4"', viewer_account: 'a"b@c' }), { place: '', ip: '', account: 'ab@c' });
+  assert.deepEqual(castViewerInfo({}), { place: '', ip: '', account: '' });
+});
+
+test('hộp hỏi: dòng tài khoản / nơi / IP; máy chủ đời cũ không gửi gì thì rỗng', () => {
+  assert.equal(castConsentOrigin({ place: 'Hà Nội, Việt Nam', ip: '1.2.3.4', account: 'th•••@gmail.com' }), 'Tài khoản th•••@gmail.com\nHà Nội, Việt Nam · IP 1.2.3.4');
+  assert.equal(castConsentOrigin({ place: '', ip: '1.2.3.4', account: '' }), 'IP 1.2.3.4');
+  assert.equal(castConsentOrigin(null), '');
+});
+
+test('kho: lưu nơi / IP / tài khoản lúc tin; dùng lại thì cập nhật nơi mới, thiếu thì giữ cũ', async () => {
+  let t = 1_000_000;
+  const { trust } = store(() => t);
+  const device = await browserDevice();
+  trust.add({ key: device.publicKey, name: 'iPhone', info: { place: 'Hà Nội, Việt Nam', ip: '1.2.3.4', account: 'th•••@gmail.com' } });
+  assert.deepEqual(
+    (({ place, ip, account }) => ({ place, ip, account }))(trust.list()[0]),
+    { place: 'Hà Nội, Việt Nam', ip: '1.2.3.4', account: 'th•••@gmail.com' },
+  );
+  t += 1000;
+  trust.touch(device.publicKey, { place: 'Đà Nẵng, Việt Nam', ip: '5.6.7.8', account: '' });
+  const [d] = trust.list();
+  assert.equal(d.place, 'Đà Nẵng, Việt Nam');
+  assert.equal(d.ip, '5.6.7.8');
+  assert.equal(d.account, 'th•••@gmail.com');
+  assert.equal(d.last_used_at, t);
+  trust.touch(device.publicKey);
+  assert.equal(trust.list()[0].place, 'Đà Nẵng, Việt Nam');
+});
+
+test('hộp hỏi và kho nhận thông tin người xem: tin rồi vào thẳng thì ghi lại nơi lần này', async () => {
+  const info = { place: 'Hà Nội, Việt Nam', ip: '1.2.3.4', account: 'th•••@gmail.com' };
+  const always = setupConsent({ trusted: false, answer: D.ALLOW_ALWAYS });
+  await always.consent.decide(req({ viewerInfo: info }));
+  assert.equal(always.asks[0].viewerInfo, info);
+  assert.deepEqual(always.added, [{ key: 'k1', name: 'iPhone', info }]);
+  const back = setupConsent();
+  assert.equal(await back.consent.decide(req({ viewerInfo: info, prove: async () => true })), D.ALLOW);
+  assert.deepEqual(back.touchedInfo, [info]);
 });
 
 test('kho: chỉ nhận khoá P-256, tên lạ bị lọc', async () => {
@@ -164,12 +213,13 @@ function setupConsent({ trusted = true, answer = D.ALLOW, mode = M.ASK, locked =
   const added = [];
   const removed = [];
   const touched = [];
+  const touchedInfo = [];
   const state = { mode, locked };
   const trust = {
     accepts: (k) => k === 'k1',
     has: () => trusted,
     add: (d) => added.push(d),
-    touch: (k) => touched.push(k),
+    touch: (k, info) => { touched.push(k); touchedInfo.push(info); },
     remove: (k) => removed.push(k),
   };
   const consent = createCastConsent({
@@ -178,7 +228,7 @@ function setupConsent({ trusted = true, answer = D.ALLOW, mode = M.ASK, locked =
     getMode: () => state.mode,
     isLocked: () => state.locked,
   });
-  return { consent, asks, added, removed, touched, state };
+  return { consent, asks, added, removed, touched, touchedInfo, state };
 }
 const req = (extra = {}) => ({ sessionId: 's1', viewerId: 'v1', viewerDevice: 'iPhone', viewerKey: 'vk', deviceKey: 'k1', ...extra });
 
@@ -230,7 +280,7 @@ test('hộp hỏi: chỉ hiện "Luôn cho phép" khi có khoá hợp lệ; ch�
   const always = setupConsent({ trusted: false, answer: D.ALLOW_ALWAYS });
   assert.equal(await always.consent.decide(req()), D.ALLOW);
   assert.equal(always.asks[0].canTrust, true);
-  assert.deepEqual(always.added, [{ key: 'k1', name: 'iPhone' }]);
+  assert.deepEqual(always.added, [{ key: 'k1', name: 'iPhone', info: null }]);
 
   const once = setupConsent({ trusted: false, answer: D.ALLOW });
   assert.equal(await once.consent.decide(req()), D.ALLOW);

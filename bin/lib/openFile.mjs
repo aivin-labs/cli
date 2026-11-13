@@ -8,7 +8,7 @@ import { defaultWebUrl } from './servers.mjs';
 import { startPreviewServer } from './localPreview.mjs';
 import { missionAuthHeaders, missionServerUrl, resolveWorkspace } from './workspace.mjs';
 import { spawn } from 'child_process';
-import { browserLogin, openBrowser, saveGlobalApiKey, tryFetchWhoami } from './auth.mjs';
+import { LoginApp, browserLogin, openBrowser, saveGlobalApiKey, tryFetchWhoami } from './auth.mjs';
 import { LOCAL_BROWSERS, detectDefaultBrowserId, resolveBrowserInstall } from './localBrowser.mjs';
 import { mascotLang } from './remote/mascot/strings.mjs';
 
@@ -211,7 +211,8 @@ const isAuthRejected = (error) => (error?.cause?.response?.status ?? error?.resp
 async function loginAndUpload(filePath, workspace) {
   const serverUrl = missionServerUrl();
   if (!process.env.AIVIN_WEB_URL) process.env.AIVIN_WEB_URL = await resolveWebUrl(serverUrl);
-  const apiKey = await browserLogin();
+  // Trang xem mở từ "Mở bằng AIVIN Bot": người dùng đang ở app desktop, không phải terminal.
+  const apiKey = await browserLogin({ app: LoginApp.DESKTOP, serverUrl });
   saveGlobalApiKey(apiKey, serverUrl, await tryFetchWhoami(serverUrl, apiKey));
   process.env.API_KEY = apiKey;
   const { url } = await openLocalFile(filePath, { workspace, display: OpenDisplay.NONE });
