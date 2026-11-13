@@ -263,14 +263,16 @@ test('mục 8: xoay token — giữ token cũ tới khi chốt; bị từ chối
   assert.equal(credentials.loadDeviceCredentials().device_token, 'tok-3');
 });
 
-test('mục 9: bộ gom sự kiện theo dõi tệp có trần chờ (sự kiện liên tục vẫn chạy lô) và trần cỡ tập chờ (quá → quét lại)', async () => {
+test('mục 9: bộ gom sự kiện theo dõi tệp có trần chờ (sự kiện liên tục vẫn chạy lô) và trần cỡ tập chờ (quá → quét lại)', async (t) => {
+  // Đồng hồ giả: trước dùng sleep thật 20 ms → máy CI (macOS) chậm/khựng làm vòng lặp chỉ chạy vài lượt → lỗi chập chờn.
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const batches = [];
   let overflows = 0;
-  const b = createWatchBatcher({ debounceMs: 60, maxWaitMs: 150, maxPending: 10, onBatch: (paths) => batches.push(paths), onOverflow: () => { overflows++; } });
-  const started = Date.now();
-  while (Date.now() - started < 500) {
+  const b = createWatchBatcher({ debounceMs: 60, maxWaitMs: 150, maxPending: 10, onBatch: (paths) => batches.push(paths), onOverflow: () => { overflows++; }, now: () => Date.now() });
+  for (let elapsed = 0; elapsed < 500; elapsed += 20) {
     b.add('/r/app.log');
-    await new Promise((r) => setTimeout(r, 20));
+    t.mock.timers.tick(20);
+    for (let i = 0; i < 5; i++) await Promise.resolve(); // onBatch chạy qua chuỗi promise
   }
   b.close();
   assert.ok(batches.length >= 2, `sự kiện mỗi 20 ms suốt 500 ms vẫn phải chạy lô (đã chạy ${batches.length})`);
