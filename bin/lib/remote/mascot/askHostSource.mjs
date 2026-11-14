@@ -29,6 +29,11 @@ import { lucidePath } from './lucideIcons.mjs';
 
 /** Ô hỏi rảnh chừng này thì tự thu lại. */
 export const ASK_IDLE_MS = 10000;
+/**
+ * Aivin dang cho tra loi (HIL) ma khong ai dong vao: o hoi tu cat di sau chung nay. Truoc 14/11/2026 cau hoi ghim o hoi mo MAI
+ * (user: "linh vat hoi mot luc tam 5s ko thay phan hoi thi tu dong box chu") - cau hoi van con, huy hieu tren bot va re vao bot la mo lai.
+ */
+export const ASK_PINNED_IDLE_MS = 5000;
 /** Câu trả lời có bảng / thẻ / ảnh: cần thời gian đọc hơn một câu chữ. */
 const ASK_RICH_IDLE_MS = 30000;
 
@@ -96,6 +101,33 @@ namespace AivinMascotAsk {
 }
 '@
 (E 'AskHint').Text = $T.ask_hint; (E 'MicBtn').ToolTip = $T.ask_mic
+(E 'AttachBtn').ToolTip = $T.ask_attach; (E 'AskClose').ToolTip = $T.ask_close
+# Dau x goc phai tren: mo han, dam len khi re chuot; bam = cat o hoi di ngay (ke ca khi dang co cau hoi cho).
+(E 'AskClose').Add_MouseEnter({ (E 'AskClose').Opacity = 0.85 })
+(E 'AskClose').Add_MouseLeave({ (E 'AskClose').Opacity = 0.3 })
+(E 'AskClose').Add_Click({ $script:askHideTimer.Stop(); CloseAsk })
+(E 'AttachBtn').Add_Click({ PickFiles })
+# Hop chon tep cua he dieu hanh ngay trong o hoi (14/11/2026): cung duong voi keo tha tep vao bot - daemon nhan 'drop' roi tra ve chip.
+$script:picking = $false
+function PickFiles {
+  if ($script:picking) { return }
+  if (TrayFull) { PeekAsk; DropHint ($T.drop_full.Replace('{n}', [string]$cfg.max_files)); return }
+  $script:picking = $true
+  try {
+    OpenAsk
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Multiselect = $true
+    $dlg.Title = $T.ask_pick_title
+    if ($dlg.ShowDialog($w) -ne $true) { return }
+    $picked = @(@($dlg.FileNames) | Where-Object { $_ })
+    if (-not $picked.Count) { return }
+    Send @{ t = 'drop'; files = $picked }
+    # Dem tam cho toi khi daemon xac nhan (ask_files: trung / qua gioi han bi bo) - giong het duong keo tha.
+    $script:files = [Math]::Min($script:files + $picked.Count, [int]$cfg.max_files)
+    $script:rig.Tray('hold', $script:files); PlayFace 'gulp' 'hello' 1.4; SyncAction
+  } catch { Dbg "pick files failed: $_" }
+  finally { $script:picking = $false; if ($script:askOpen) { HideAskLater ${ASK_IDLE_MS} } }
+}
 # "New chat" on the activity panel: the daemon opens a new chat on the server and sends chat_clear; the ask box opens for the first line.
 (E 'NewChatText').Text = $T.new_chat; (E 'NewChatBtn').ToolTip = $T.new_chat_tip
 (E 'NewChatBtn').Add_Click({ Send @{ t = 'new_chat' }; OpenAsk })
@@ -180,9 +212,10 @@ $script:askHideTimer.Add_Tick({
   $held = $script:askFocused; CloseAsk
   if ($held -and $script:askTarget) { try { [void][AivinMascotAsk.Native]::GiveFocusBack($script:hwnd, [string]$script:askTarget.window) } catch { } }
 })
-# In use = keep the box out: mouse over it, talking, dragging, a pinned question, or holding the keyboard with unsent text / files or a running turn.
+# In use = keep the box out: mouse over it, talking, dragging, picking a file, or holding the keyboard with unsent text / files or a running turn.
+# A pending question no longer counts (14/11/2026): the box slips away after ASK_PINNED_IDLE_MS and the question waits on the bot's badge.
 function AskInUse {
-  $w.IsMouseOver -or $script:voiceLive -or $script:drag -or $script:askPinned -or ($script:askFocused -and ($script:chatBusy -or $script:files -or (E 'AskBox').Text.Trim()))
+  $w.IsMouseOver -or $script:voiceLive -or $script:drag -or $script:picking -or ($script:askFocused -and ($script:chatBusy -or $script:files -or (E 'AskBox').Text.Trim()))
 }
 # Aivin is waiting for an answer (HIL): the box stays out with the question + option buttons until it is answered (no focus taken).
 $script:askPinned = $false
@@ -195,7 +228,7 @@ $w.Add_MouseLeave({ if ($script:askOpen) { HideAskLater $(if ($script:askFocused
 # Clicked somewhere else: release keyboard focus and close the box.
 $w.Add_Deactivated({
   $script:askFocused = $false; SetActivatable $false
-  if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag -and -not $script:askPinned) { CloseAsk }
+  if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag -and -not $script:picking) { CloseAsk }
   if ((E 'Panel').Visibility -eq 'Visible') { ClosePanel }
 })
 # Click outside detection: transparent window region or anywhere on other windows
@@ -206,7 +239,7 @@ $w.Add_PreviewMouseLeftButtonDown({ param($s, $e)
   $inAsk = $askBox.Visibility -eq 'Visible' -and (New-Object Windows.Rect ($askBox.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $askBox.RenderSize).Contains($pt)
   $inMascot = (New-Object Windows.Rect ($mascot.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $mascot.RenderSize).Contains($pt)
   $inPanel = $panel.Visibility -eq 'Visible' -and (New-Object Windows.Rect ($panel.TranslatePoint((New-Object Windows.Point 0, 0), $w)), $panel.RenderSize).Contains($pt)
-  if (-not $inAsk -and -not $inMascot -and -not $inPanel -and -not $script:askPinned) {
+  if (-not $inAsk -and -not $inMascot -and -not $inPanel -and -not $script:picking) {
     CloseAsk
   }
   if (-not $inPanel -and (E 'Panel').Visibility -eq 'Visible' -and -not $inMascot) {
@@ -216,7 +249,7 @@ $w.Add_PreviewMouseLeftButtonDown({ param($s, $e)
 $script:clickCheckTimer = New-Object Windows.Threading.DispatcherTimer
 $script:clickCheckTimer.Interval = [TimeSpan]::FromMilliseconds(50)
 $script:clickCheckTimer.Add_Tick({
-  if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag -and -not $script:askPinned) {
+  if ($script:askOpen -and -not $script:voiceLive -and -not $script:drag -and -not $script:picking) {
     if (-not $w.IsMouseOver -and [AivinMascotAsk.Native]::ClickOutside()) {
       CloseAsk
     }
@@ -601,7 +634,11 @@ function Handle($m) {
     'ask_files' { $chips = @($m.files | Where-Object { $_ }); $more = @($chips | Where-Object { -not $_.pinned }).Count -gt @((E 'AttachBar').Children | Where-Object { $_.Tag -ne 'pinned' }).Count; $script:files = [int]$m.n; AttachChips $chips; SyncAction; if ($more) { PeekAsk; HideAskLater ${ASK_IDLE_MS} } }
     'ask_pin' {
       $script:askPinned = [bool]$m.on
-      if ($script:askPinned) { $script:userHidden = $false; ApplyVisibility; AskHide 'Panel'; PeekAsk; (E 'ChatScroll').ScrollToEnd() }
+      if ($script:askPinned) {
+        $script:userHidden = $false; ApplyVisibility; AskHide 'Panel'; PeekAsk; (E 'ChatScroll').ScrollToEnd()
+        # Khong ai dong vao trong ASK_PINNED_IDLE_MS -> cat o hoi, cau hoi van cho (huy hieu tren bot); dang go thi cho nhu thuong.
+        HideAskLater $(if ($script:askFocused) { ${ASK_IDLE_MS} } else { ${ASK_PINNED_IDLE_MS} })
+      }
       elseif ($script:askOpen) { HideAskLater $(if ($script:askFocused) { ${ASK_IDLE_MS} } else { 4000 }) }
       return
     }

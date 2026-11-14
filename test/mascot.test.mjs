@@ -513,3 +513,14 @@ test('mất kết nối thoáng qua (< offlineGraceMs) rồi nối lại → gi�
   assert.ok(child.sent.some((c) => c.t === HostCommand.STATE && c.state === MascotState.IDLE));
   m.close();
 });
+
+test('ô hỏi: nút chọn tệp trên máy + dấu x mờ góc phải trên; câu hỏi chờ không còn giữ ô mở mãi (14/11/2026)', async () => {
+  const { MASCOT_XAML: xaml } = await import('../bin/lib/remote/mascot/hostSource.mjs');
+  const { ASK_PS1, ASK_PINNED_IDLE_MS, ASK_IDLE_MS } = await import('../bin/lib/remote/mascot/askHostSource.mjs');
+  assert.ok(xaml.includes('x:Name="AttachBtn"') && xaml.includes('x:Name="AskClose"'), 'hai nút có trong khung');
+  assert.ok(ASK_PS1.includes('function PickFiles') && ASK_PS1.includes('Microsoft.Win32.OpenFileDialog'), 'hộp chọn tệp của hệ điều hành');
+  assert.ok(ASK_PS1.includes("(E 'AttachBtn').Add_Click({ PickFiles })") && ASK_PS1.includes("(E 'AskClose').Add_Click("), 'nút nối đúng việc');
+  // Câu hỏi đang chờ không còn nằm trong AskInUse → ô hỏi tự cất sau ASK_PINNED_IDLE_MS (ngắn hơn lúc rảnh thường).
+  assert.ok(!/function AskInUse[\s\S]{0,240}askPinned/.test(ASK_PS1), 'câu hỏi chờ không giữ ô mở mãi');
+  assert.ok(ASK_PINNED_IDLE_MS < ASK_IDLE_MS && ASK_PS1.includes(`else { ${ASK_PINNED_IDLE_MS} }`));
+});

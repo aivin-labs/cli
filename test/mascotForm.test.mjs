@@ -120,3 +120,32 @@ test('biểu mẫu đang gửi (chờ ack): gõ / bấm thêm → báo bận, kh
   await chat.reply('binh@aivin.vn');
   assert.deepEqual(socket.emitted.at(-1).payload.fields, { to: 'binh@aivin.vn' });
 });
+
+test('chọn tệp trên máy (hoặc kéo thả) lúc biểu mẫu đang hỏi một trường: đường dẫn thành giá trị của trường đó, không thành câu chat rời', async () => {
+  const { chat, sent, socket } = setup();
+  notify(chat, { reply_id: 'f6', kind: 'form', question: 'Tệp nguồn nằm ở đâu?', fields: [{ name: 'answer', label: 'Phương án xử lý', required: true }] });
+  chat.attach(['C:\\Users\\thang\\Downloads\\TND_Profile draft (1).pptx']);
+  await chat.reply('');
+  assert.equal(socket.emitted.length, 1, 'gửi đúng một lượt');
+  assert.deepEqual(socket.emitted[0].payload.fields, { answer: 'C:\\Users\\thang\\Downloads\\TND_Profile draft (1).pptx' });
+  assert.equal(socket.emitted[0].payload.reply_id, 'f6');
+  // Dòng chat hiện tên tệp cho chủ máy, không hiện nguyên đường dẫn dài.
+  assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text === 'TND_Profile draft (1).pptx'));
+  // Thùng tệp đã rỗng lại (không gửi kèm lần sau nữa).
+  assert.equal(sent.filter((c) => c.t === AskCommand.FILES).at(-1).n, 0);
+  assert.equal(chat.hasPending(), false);
+});
+
+test('tệp kèm chữ gõ thêm: cả hai vào giá trị của trường; không có biểu mẫu thì vẫn gửi như câu chat kèm đường dẫn', async () => {
+  const { chat, socket } = setup();
+  notify(chat, { reply_id: 'f7', kind: 'form', question: 'Q', fields: [{ name: 'answer', label: 'Tệp', required: true }] });
+  chat.attach(['D:\\bao-cao.xlsx']);
+  await chat.reply('dùng sheet 2');
+  assert.deepEqual(socket.emitted[0].payload.fields, { answer: 'D:\\bao-cao.xlsx\ndùng sheet 2' });
+
+  const plain = setup();
+  plain.chat.attach(['D:\\anh.png']);
+  await plain.chat.reply('xem giúp');
+  assert.ok(plain.socket.emitted[0].payload.text.includes('D:\\anh.png'));
+  assert.equal(plain.socket.emitted[0].payload.fields, undefined);
+});

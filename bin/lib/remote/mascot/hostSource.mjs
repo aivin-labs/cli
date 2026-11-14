@@ -95,6 +95,10 @@ const SHADOW = '<DropShadowEffect BlurRadius="24" ShadowDepth="6" Direction="270
 const ICON_MIC = 'M12,3 A3,3 0 0 1 15,6 L15,12 A3,3 0 0 1 9,12 L9,6 A3,3 0 0 1 12,3 Z M5,11 A7,7 0 0 0 19,11 M12,18 L12,21';
 /** Gửi: mũi tên lên (nét). */
 const ICON_SEND_UP = 'M12,20 L12,5 M5,11 L12,4 L19,11';
+/** Kep giay: nut chon tep tren may ngay trong o hoi (14/11/2026) - Lucide `paperclip`. */
+const ICON_CLIP = 'M13.234 20.252 21 12.3M16 6l-8.414 8.586a2 2 0 0 0 0 2.828 2 2 0 0 0 2.828 0l8.414-8.586a4 4 0 0 0 0-5.656 4 4 0 0 0-5.656 0l-8.415 8.585a6 6 0 1 0 8.486 8.486';
+/** Dau x nho, mo, goc phai tren o hoi (14/11/2026). */
+const ICON_CLOSE_X = 'M1,1 L9,9 M9,1 L1,9';
 /** Chat mới (nút trên bảng): bong bóng chat có dấu cộng (nét). */
 /** Tắt (nút tắt linh vật): vòng nguồn hở trên + vạch. */
 const ICON_POWER = 'M12,3 L12,11 M7.05,6.05 A7,7 0 1 0 16.95,6.05';
@@ -254,6 +258,7 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
    </Border.BorderBrush>
    <Border.RenderTransform><ScaleTransform ScaleX="0.96" ScaleY="0.96"/></Border.RenderTransform>
    <Border.Effect><DropShadowEffect BlurRadius="12" ShadowDepth="1" Direction="270" Opacity="0.10" Color="#6B5CE7"/></Border.Effect>
+   <Grid>
    <StackPanel Margin="12,8,7,7">
     <ScrollViewer x:Name="ChatScroll" MaxHeight="220" VerticalScrollBarVisibility="Auto" Visibility="Collapsed" Margin="0,3,-4,5">
      <StackPanel Margin="0,0,10,0">
@@ -275,6 +280,12 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
        <Rectangle x:Name="StopIcon" Width="9" Height="9" RadiusX="2" RadiusY="2" Fill="${ASK_BTN.icon}" Visibility="Collapsed"/>
       </Grid>
      </Button>
+     <!-- Chon tep tren may ngay trong o hoi (hop chon tep cua he dieu hanh) - cung duong voi keo tha tep vao bot. -->
+     <Button x:Name="AttachBtn" DockPanel.Dock="Left" Style="{StaticResource IconBtn}" Width="24" Height="24" Margin="-4,0,4,0" VerticalAlignment="Bottom"
+             Background="Transparent" BorderThickness="0" Tag="#F2F3F5">
+      <Path Data="${ICON_CLIP}" Stroke="#A9AEB8" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            Width="13" Height="13" Stretch="Uniform"/>
+     </Button>
      <Grid MinHeight="40">
       <TextBox x:Name="AskBox" BorderThickness="0" Background="Transparent" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap"
                MaxHeight="60" VerticalScrollBarVisibility="Hidden" CaretBrush="#8B7CF6" MaxLength="2000" Padding="0,1,0,1"/>
@@ -283,6 +294,13 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
     </DockPanel>
     <TextBlock x:Name="AskStatus" Visibility="Collapsed" FontSize="13" Foreground="${B.muted}" Margin="0,2,4,1" TextTrimming="CharacterEllipsis"/>
    </StackPanel>
+   <!-- Dau x mo o goc phai tren: cat o hoi di ngay, ke ca khi Aivin dang cho tra loi (cau hoi van con, mo lai bang cach re vao bot). -->
+   <Button x:Name="AskClose" Style="{StaticResource IconBtn}" Width="18" Height="18" Padding="0" Margin="0,3,3,0" Opacity="0.3"
+           HorizontalAlignment="Right" VerticalAlignment="Top" Background="#E8FFFFFF" BorderThickness="0" Tag="#F2F3F5">
+    <Path Data="${ICON_CLOSE_X}" Stroke="${B.muted}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+          Width="9" Height="9" Stretch="Uniform"/>
+   </Button>
+   </Grid>
   </Border>
   <Grid x:Name="Bubble" Visibility="Collapsed" Opacity="0" RenderTransformOrigin="0.5,1">
    <Grid.RenderTransform><ScaleTransform ScaleX="0.94" ScaleY="0.94"/></Grid.RenderTransform>

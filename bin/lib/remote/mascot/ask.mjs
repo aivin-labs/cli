@@ -507,6 +507,16 @@ export function createMascotChat({
   async function reply(text, window = null) {
     const answer = String(text || '').trim();
     const pending = head();
+    // Biểu mẫu đang hỏi một trường mà chủ máy vừa chọn / thả tệp: ĐƯỜNG DẪN chính là câu trả lời của trường đó (14/11/2026 — câu hỏi
+    // "tệp nguồn nằm ở đâu" trước đây chỉ có ô gõ chữ, chọn tệp xong lại thành một câu chat rời, biểu mẫu vẫn đứng chờ).
+    if (files.length && pending?.fields && pending.step < pending.fields.length) {
+      if (refuseBusy()) return;
+      const sent = files.splice(0);
+      syncFiles();
+      const value = [sent.join('\n'), answer].filter(Boolean).join('\n');
+      const shown = [...sent.map((f) => fileChip(f).name || f), answer].filter(Boolean).join(' · ');
+      return fillField(pending, value, shown);
+    }
     if (files.length) {
       if (refuseBusy()) return;
       const sent = files.splice(0);
