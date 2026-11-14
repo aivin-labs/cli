@@ -212,10 +212,12 @@ $script:askHideTimer.Add_Tick({
   $held = $script:askFocused; CloseAsk
   if ($held -and $script:askTarget) { try { [void][AivinMascotAsk.Native]::GiveFocusBack($script:hwnd, [string]$script:askTarget.window) } catch { } }
 })
-# In use = keep the box out: mouse over it, talking, dragging, picking a file, or holding the keyboard with unsent text / files or a running turn.
+# In use = keep the box out: the mouse over THE BOX or THE BOT, talking, dragging, picking a file, or holding the keyboard with unsent
+# text / files or a running turn. 14/11/2026: this used to be the whole window, which is a large transparent rectangle - a cursor
+# merely resting anywhere near the bot kept the box out for ever (seen in the live run of the 5 s auto-fold).
 # A pending question no longer counts (14/11/2026): the box slips away after ASK_PINNED_IDLE_MS and the question waits on the bot's badge.
 function AskInUse {
-  $w.IsMouseOver -or $script:voiceLive -or $script:drag -or $script:picking -or ($script:askFocused -and ($script:chatBusy -or $script:files -or (E 'AskBox').Text.Trim()))
+  (E 'Ask').IsMouseOver -or (E 'Mascot').IsMouseOver -or $script:voiceLive -or $script:drag -or $script:picking -or ($script:askFocused -and ($script:chatBusy -or $script:files -or (E 'AskBox').Text.Trim()))
 }
 # Aivin is waiting for an answer (HIL): the box stays out with the question + option buttons until it is answered (no focus taken).
 $script:askPinned = $false
