@@ -427,8 +427,8 @@ namespace AivinDesktopCast {
   public static class CursorTracker {
     const int POLL_MS = 15;
     const int MAX_SHAPE_SIDE = 128;
-    /** Vẽ con trỏ vào khung hình (mặc định, đường JPEG / FE cũ) thay vì gửi riêng. */
-    public static volatile bool DrawInFrame = true;
+    /** Không vẽ con trỏ vào khung hình (mặc định tắt để tránh hiện 2 con trỏ lệch nhịp giữa máy và trình duyệt). */
+    public static volatile bool DrawInFrame = false;
     /** Tăng mỗi khi con trỏ đổi — vòng quay dùng để gửi khung khi con trỏ nằm trong hình. */
     public static volatile int Seq = 0;
     static volatile bool forceEmit = false;

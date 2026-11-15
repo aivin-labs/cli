@@ -343,8 +343,8 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       config({ jpeg: on });
     }
 
-    /** Con trỏ lồng vào khung hình (mặc định) hay gửi riêng để FE tự vẽ. */
-    let cursorInFrame = true;
+    /** Con trỏ không lồng vào khung hình mặc định (tránh hiện 2 con trỏ lệch nhau trên giao diện). */
+    let cursorInFrame = false;
     function setCursorInFrame(on) {
       if (cursorInFrame === on) return;
       cursorInFrame = on;

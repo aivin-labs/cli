@@ -238,16 +238,6 @@ namespace AivinDesktopCast {
       var list = new System.Collections.Specialized.StringCollection();
       list.Add(filePath);
       data.SetFileDropList(list);
-      string ext = Path.GetExtension(filePath).ToLowerInvariant();
-      if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".gif" || ext == ".webp") {
-        try {
-          using (var src = Image.FromFile(filePath)) {
-            var bmp = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppArgb);
-            using (var g = Graphics.FromImage(bmp)) g.DrawImage(src, 0, 0, src.Width, src.Height);
-            data.SetImage(bmp);
-          }
-        } catch { }
-      }
       return data;
     }
 

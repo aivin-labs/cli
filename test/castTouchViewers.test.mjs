@@ -23,12 +23,9 @@ test('có một máy dùng chuột thì chưa phải toàn cảm ứng, máy đ�
   assert.equal(viewers.allTouch(), false);
 });
 
-test('JPEG: điện thoại không thấy con trỏ trong ảnh, còn máy dùng chuột thì vẫn thấy', () => {
+test('không vẽ con trỏ vào khung hình ở cả đường JPEG lẫn video để tránh 2 chuột lệch nhau', () => {
   assert.equal(shouldDrawCursorInFrame({ jpeg: true, localCursor: false, allTouch: true }), false);
-  assert.equal(shouldDrawCursorInFrame({ jpeg: true, localCursor: true, allTouch: false }), true);
-});
-
-test('video: giữ nguyên theo báo tự vẽ của người xem, kể cả điện thoại đang ghi hình', () => {
+  assert.equal(shouldDrawCursorInFrame({ jpeg: true, localCursor: true, allTouch: false }), false);
   assert.equal(shouldDrawCursorInFrame({ jpeg: false, localCursor: true, allTouch: true }), false);
-  assert.equal(shouldDrawCursorInFrame({ jpeg: false, localCursor: false, allTouch: true }), true);
+  assert.equal(shouldDrawCursorInFrame({ jpeg: false, localCursor: false, allTouch: false }), false);
 });

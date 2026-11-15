@@ -25,9 +25,14 @@ test('không ghi được clipboard thì không bấm Ctrl + V', () => {
 test('dán ảnh không để lại tệp tạm, không kèm dạng tệp', () => {
   assert.equal(DESKTOP_CAST_CSHARP.includes('aivin_paste_'), false);
   const start = DESKTOP_CAST_CSHARP.indexOf('public static System.Windows.Forms.DataObject ImageData');
-  const body = DESKTOP_CAST_CSHARP.slice(start, DESKTOP_CAST_CSHARP.indexOf('public static System.Windows.Forms.DataObject FileData'));
+  const fileStart = DESKTOP_CAST_CSHARP.indexOf('public static System.Windows.Forms.DataObject FileData');
+  const htmlStart = DESKTOP_CAST_CSHARP.indexOf('public static System.Windows.Forms.DataObject HtmlData');
+  const body = DESKTOP_CAST_CSHARP.slice(start, fileStart);
+  const fileBody = DESKTOP_CAST_CSHARP.slice(fileStart, htmlStart);
   assert.doesNotMatch(body, /SetFileDropList/);
   assert.match(body, /SetData\("PNG"/);
+  assert.match(fileBody, /SetFileDropList/);
+  assert.doesNotMatch(fileBody, /SetImage/);
 });
 
 test('gom tệp thả theo lô: tệp cuối mới trả, lô mới thay lô dở, mỗi người xem một lô', async () => {

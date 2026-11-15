@@ -17,10 +17,8 @@ export function createCastTouchViewers() {
 }
 
 /**
- * Bộ quay có vẽ con trỏ vào khung hình không.
- * Đường JPEG: chỉ bỏ khi mọi người xem đều cảm ứng, còn người dùng chuột thì họ cần thấy con trỏ.
- * Đường video: theo từng người xem báo tự vẽ hay chưa, để lúc đang ghi hình con trỏ vẫn nằm trong bản ghi.
+ * Bộ quay không vẽ con trỏ vào khung hình (cả JPEG lẫn video) để tránh hiện tượng 2 con trỏ không đồng bộ với chuột của người xem.
  */
-export function shouldDrawCursorInFrame({ jpeg, localCursor, allTouch }) {
-  return jpeg ? !allTouch : !localCursor;
+export function shouldDrawCursorInFrame() {
+  return false;
 }
