@@ -281,17 +281,19 @@ function SyncAction {
   (E 'MicBtn').ToolTip = if ($typed) { $T.ask_send } elseif ($stop) { $T.ask_stop } else { $T.ask_mic }
   InputLayout
 }
-# Input row height: two lines for a fresh question; once a conversation is above it (or while talking), one line with the hint and the mic
-# button centred on the same line - the box only grows (mic back at the bottom) when the typed text wraps.
+# Input row layout: one line with attachment button, input field, and mic/send button centered on the same line.
+# Grows vertically only when the typed text wraps. Close 'x' button only shows when a chat conversation is active.
 function InputLayout {
   $box = E 'AskBox'
-  # Box hidden = the voice bar is in its place (VoiceLook hides it before the voice state is set).
-  $compact = $box.Visibility -ne 'Visible' -or [bool]$script:voiceLive -or (E 'ChatList').Children.Count -gt 0
+  $hasChat = (E 'ChatList').Children.Count -gt 0 -or (E 'Choices').Children.Count -gt 0
   $wrapped = $box.Visibility -eq 'Visible' -and $box.LineCount -gt 1
-  $box.Parent.MinHeight = if ($compact) { 26 } else { 40 }
-  $mid = if ($compact -and -not $wrapped) { 'Center' } else { 'Top' }
-  $box.VerticalAlignment = $mid; (E 'AskHint').VerticalAlignment = $mid
-  (E 'MicBtn').VerticalAlignment = if ($compact -and -not $wrapped) { 'Center' } else { 'Bottom' }
+  $box.Parent.MinHeight = 26
+  $mid = if ($wrapped) { 'Top' } else { 'Center' }
+  $box.VerticalAlignment = $mid; (E 'AskHint').VerticalAlignment = 'Center'
+  $btnAlign = if ($wrapped) { 'Bottom' } else { 'Center' }
+  (E 'MicBtn').VerticalAlignment = $btnAlign
+  (E 'AttachBtn').VerticalAlignment = $btnAlign
+  (E 'AskClose').Visibility = if ($hasChat) { 'Visible' } else { 'Collapsed' }
 }
 (E 'AskBox').Add_TextChanged({ SyncAction; AttendAsk; if ($script:askOpen) { HideAskLater ${ASK_IDLE_MS} } })
 # Typing: the bot looks at the box (above or below it) while keys come in; a little nod when a question / answer goes out.
@@ -358,7 +360,7 @@ ${ASK_BLOCKS_PS1}
 function ChatRow($m) {
   $list = E 'ChatList'; $id = [string]$m.id
   $row = $null; if ($id) { $row = $script:chatRows[$id] }
-  if ($m.remove) { if ($row) { ChatLinks $row $null; ChatBlocks $row $null; [void]$list.Children.Remove($row.box); $script:chatRows.Remove($id) }; return }
+  if ($m.remove) { if ($row) { ChatLinks $row $null; ChatBlocks $row $null; [void]$list.Children.Remove($row.box); $script:chatRows.Remove($id) }; InputLayout; return }
   (E 'ChatScroll').Visibility = 'Visible'
   if (-not $row) {
     # Segoe UI adds its own space above / below the letters: block line height + slim vertical padding so the space you see is about
@@ -474,6 +476,7 @@ function ChoiceButtons($options, $multiple) {
   }
   $panel.Visibility = if ($panel.Children.Count) { 'Visible' } else { 'Collapsed' }
   if ($panel.Children.Count) { (E 'ChatScroll').Visibility = 'Visible'; (E 'ChatScroll').ScrollToEnd() }
+  InputLayout
 }
 
 # Attached files: one chip each above the input - the file type's icon + colour (fileChips.mjs), its name (full path in the tooltip),

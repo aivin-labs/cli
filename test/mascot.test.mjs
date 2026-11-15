@@ -514,10 +514,17 @@ test('mất kết nối thoáng qua (< offlineGraceMs) rồi nối lại → gi�
   m.close();
 });
 
-test('ô hỏi: nút chọn tệp trên máy + dấu x mờ góc phải trên; câu hỏi chờ không còn giữ ô mở mãi (14/11/2026)', async () => {
+test('ô hỏi: hàng nhập 1 dòng (đính kèm, ô nhập, mic); dấu x chỉ hiện khi đang có box chat (16/11/2026)', async () => {
   const { MASCOT_XAML: xaml } = await import('../bin/lib/remote/mascot/hostSource.mjs');
   const { ASK_PS1, ASK_PINNED_IDLE_MS, ASK_IDLE_MS } = await import('../bin/lib/remote/mascot/askHostSource.mjs');
   assert.ok(xaml.includes('x:Name="AttachBtn"') && xaml.includes('x:Name="AskClose"'), 'hai nút có trong khung');
+  // Hàng nhập 1 dòng: căn giữa theo chiều dọc, chiều cao tối thiểu 26
+  assert.ok(xaml.includes('x:Name="AttachBtn"') && xaml.includes('VerticalAlignment="Center"'));
+  assert.ok(xaml.includes('x:Name="MicBtn"') && xaml.includes('VerticalAlignment="Center"'));
+  assert.ok(xaml.includes('<Grid MinHeight="26">'));
+  // Dấu x đóng mặc định ẩn, chỉ hiện khi có hội thoại (hasChat)
+  assert.ok(xaml.includes('x:Name="AskClose" Visibility="Collapsed"'));
+  assert.ok(ASK_PS1.includes("(E 'AskClose').Visibility = if ($hasChat) { 'Visible' } else { 'Collapsed' }"));
   assert.ok(ASK_PS1.includes('function PickFiles') && ASK_PS1.includes('Microsoft.Win32.OpenFileDialog'), 'hộp chọn tệp của hệ điều hành');
   assert.ok(ASK_PS1.includes("(E 'AttachBtn').Add_Click({ PickFiles })") && ASK_PS1.includes("(E 'AskClose').Add_Click("), 'nút nối đúng việc');
   // Câu hỏi đang chờ không còn nằm trong AskInUse → ô hỏi tự cất sau ASK_PINNED_IDLE_MS (ngắn hơn lúc rảnh thường).

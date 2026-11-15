@@ -270,7 +270,7 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
     <!-- Tệp thả vào bot, chờ đi kèm câu kế tiếp: chip icon + màu theo loại tệp, nút x để bỏ (askHostSource.mjs dựng theo ask_files). -->
     <WrapPanel x:Name="AttachBar" Visibility="Collapsed" Margin="-4,0,0,5"/>
     <DockPanel>
-     <Button x:Name="MicBtn" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Width="26" Height="26" Margin="6,0,0,0" VerticalAlignment="Bottom"
+     <Button x:Name="MicBtn" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Width="26" Height="26" Margin="6,0,0,0" VerticalAlignment="Center"
              Background="${ASK_BTN.bg}" BorderThickness="0" Tag="#14000000">
       <Grid>
        <Path x:Name="MicIcon" Data="${ICON_MIC}" Stroke="${ASK_BTN.icon}" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
@@ -281,21 +281,21 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
       </Grid>
      </Button>
      <!-- Chon tep tren may ngay trong o hoi (hop chon tep cua he dieu hanh) - cung duong voi keo tha tep vao bot. -->
-     <Button x:Name="AttachBtn" DockPanel.Dock="Left" Style="{StaticResource IconBtn}" Width="24" Height="24" Margin="-4,0,4,0" VerticalAlignment="Bottom"
+     <Button x:Name="AttachBtn" DockPanel.Dock="Left" Style="{StaticResource IconBtn}" Width="24" Height="24" Margin="-4,0,4,0" VerticalAlignment="Center"
              Background="Transparent" BorderThickness="0" Tag="#F2F3F5">
       <Path Data="${ICON_CLIP}" Stroke="#A9AEB8" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
             Width="13" Height="13" Stretch="Uniform"/>
      </Button>
-     <Grid MinHeight="40">
+     <Grid MinHeight="26">
       <TextBox x:Name="AskBox" BorderThickness="0" Background="Transparent" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap"
-               MaxHeight="60" VerticalScrollBarVisibility="Hidden" CaretBrush="#8B7CF6" MaxLength="2000" Padding="0,1,0,1"/>
-      <TextBlock x:Name="AskHint" IsHitTestVisible="False" FontSize="14" Foreground="#A9AEB8" Margin="2,1,0,0" TextTrimming="CharacterEllipsis"/>
+               MaxHeight="60" VerticalScrollBarVisibility="Hidden" CaretBrush="#8B7CF6" MaxLength="2000" Padding="0,1,0,1" VerticalAlignment="Center"/>
+      <TextBlock x:Name="AskHint" IsHitTestVisible="False" FontSize="14" Foreground="#A9AEB8" Margin="2,1,0,0" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
      </Grid>
     </DockPanel>
     <TextBlock x:Name="AskStatus" Visibility="Collapsed" FontSize="13" Foreground="${B.muted}" Margin="0,2,4,1" TextTrimming="CharacterEllipsis"/>
    </StackPanel>
    <!-- Dau x mo o goc phai tren: cat o hoi di ngay, ke ca khi Aivin dang cho tra loi (cau hoi van con, mo lai bang cach re vao bot). -->
-   <Button x:Name="AskClose" Style="{StaticResource IconBtn}" Width="18" Height="18" Padding="0" Margin="0,3,3,0" Opacity="0.3"
+   <Button x:Name="AskClose" Visibility="Collapsed" Style="{StaticResource IconBtn}" Width="18" Height="18" Padding="0" Margin="0,3,3,0" Opacity="0.3"
            HorizontalAlignment="Right" VerticalAlignment="Top" Background="#E8FFFFFF" BorderThickness="0" Tag="#F2F3F5">
     <Path Data="${ICON_CLOSE_X}" Stroke="${B.muted}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
           Width="9" Height="9" Stretch="Uniform"/>
