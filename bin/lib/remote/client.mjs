@@ -32,7 +32,7 @@ import { showOSNotification } from './notify.mjs';
 import { createMeetingManager, watchMeetingRequests } from './meeting/index.mjs';
 import { createMediaHost, mediaSupported } from './meeting/recorder.mjs';
 import { createClipboard } from './clipboard.mjs';
-import { activeAgentRunner, buildTools, toolMap } from './toolHandlers.mjs';
+import { activeAgentRunner, activeLocalLlm, buildTools, toolMap } from './toolHandlers.mjs';
 import { createBrowserTunnels, detectLocalBrowser } from './browserTunnel.mjs';
 import { createGuiController, detectGui } from './gui/index.mjs';
 import { createWindowsHost } from './gui/windowsHost.mjs';
@@ -398,6 +398,11 @@ export async function startRemoteClient(options = {}) {
   host?.start();
   const tools = buildTools(env);
   const byName = toolMap(tools);
+  // Mô hình trên máy (`llm.complete`, công cụ BE-only nên BE biết qua cờ này) — BE dùng cho tier nặng khi phiên chat gắn với máy này.
+  if (byName.has('llm.complete')) {
+    const agents = activeLocalLlm()?.info().agents || [];
+    if (agents.length) profile.local_llm = { provider: agents[0].id, agents: agents.map((a) => a.id) };
+  }
   // Công cụ chủ máy tắt (`aivin remote policy deny`) không vào danh mục — Planner không lập kế hoạch với nó (gọi tới vẫn bị chặn ở sàn luật).
   const deniedTools = new Set(policyGuard.read().deny_tools);
   if (deniedTools.has('gui.act')) deniedTools.add('gui.do');
@@ -783,6 +788,7 @@ export async function startRemoteClient(options = {}) {
       officeHost?.close();
       processes.stopAll();
       activeAgentRunner()?.stopAll('Remote control was paused on this device');
+      activeLocalLlm()?.stopAll();
       // Công tắc ngắt chặn cả xem / điều khiển màn hình từ web, không chỉ việc của AI.
       stopDesktopCast('paused');
     }
@@ -857,6 +863,7 @@ export async function startRemoteClient(options = {}) {
     processes.stopAll();
     // Job của agent lập trình: dừng + ghi hồ sơ (`stopped`) — lần chạy sau `agent.status` vẫn đọc được, nói tiếp bằng session_id.
     activeAgentRunner()?.stopAll();
+    activeLocalLlm()?.stopAll();
     keepAwake.close();
     castAwake.close();
     watches?.closeAll();

@@ -21,11 +21,15 @@ import { buildOfficeTools } from './office/index.mjs';
 import { measurePath } from './undoStore.mjs';
 import { buildProcessTools, shellCommand } from './processes.mjs';
 import { buildAgentTools, createAgentRunner } from './codingAgents.mjs';
+import { buildLocalLlmTools, createLocalLlm } from './localLlm.mjs';
 
 /** Một bộ chạy agent lập trình cho cả tiến trình (việc đang chạy sống qua các lần dựng lại danh mục công cụ). */
 let sharedAgents = null;
 /** Bộ chạy agent đã dựng (null khi máy chưa có danh mục agent) — daemon hỏi để biết còn job chạy không, và dừng chúng khi tắt. */
 export const activeAgentRunner = () => sharedAgents;
+/** Mô hình trên máy cho BE (`llm.complete`) — giữ tiến trình sẵn qua các lần dựng lại danh mục. */
+let sharedLlm = null;
+export const activeLocalLlm = () => sharedLlm;
 import { buildScheduleTools } from './schedule.mjs';
 import { buildWatchTools } from './deviceWatches.mjs';
 import { buildTransferTools } from './httpTransfer.mjs';
@@ -841,6 +845,9 @@ export function buildTools(env) {
   if (env.processes && env.schedules && !env.runAs) {
     sharedAgents ||= env.codingAgents || createAgentRunner();
     if (sharedAgents.installed().length) tools.push(...buildAgentTools(sharedAgents));
+    // Claude Code của người dùng làm mô hình cho BE (không công cụ, không tệp) — BE chọn khi phiên chat gắn với máy này.
+    sharedLlm ||= env.localLlm || createLocalLlm();
+    if (sharedLlm.available()) tools.push(...buildLocalLlmTools(sharedLlm));
   }
   // Lịch chạy định kỳ (Task Scheduler / crontab) — máy cá nhân; máy tính tổ chức không đặt lịch cho thành viên.
   if (env.schedules) tools.push(...buildScheduleTools(env.schedules));
