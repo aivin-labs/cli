@@ -5,8 +5,72 @@ import { randomUUID } from 'crypto';
 import { execFile, execFileSync, spawn } from 'child_process';
 import { DeviceErrorCode, REMOTE_CONFIG_DIR, ToolGroup } from './constants.mjs';
 import { DeviceToolError, agentEnv, resolveInRoots } from './sandbox.mjs';
-import { parseContract, parseTestCheck, reportTemplate, sha256 } from './agentContract.mjs';
-import { listWorktrees, measureEvidence, resolveCommit, worktreeState } from './agentEvidence.mjs';
+import { parseContract, parseReport, parseTestCheck, reportTemplate, sha256 } from './agentContract.mjs';
+
+/** Thời gian tối đa cho lượt nhắc agent ghi lại REPORT.md sai khuôn (cùng phiên). */
+const REPORT_REPAIR_MS = 5 * 60_000;
+import { commitJobWork, gitRead, gitWrite, globToRegExp, listWorktrees, measureEvidence, resolveCommit, worktreeState } from './agentEvidence.mjs';
+
+const MAX_SCOPE_RULES = 400;
+/** Mẫu kiểu gitignore → mẫu luật quyền của Claude Code, neo ở mọi tầng (`package.json` → `**\/package.json`). */
+const anyDepth = (p) => {
+  const q = String(p).replace(/\\/g, '/').replace(/^\.?\/+/, '');
+  return q.startsWith('**/') ? q : `**/${q}`;
+};
+
+/**
+ * Phạm vi của hợp đồng thành luật CẤM của agent (11/11 → 16/11/2026: trước đây chỉ phát hiện sau khi đo). `deny_paths`: cấm sửa / ghi theo
+ * đúng mẫu. `protected_paths`: không được sửa / xoá tệp ĐANG CÓ, thêm tệp mới thì được — mẫu có ký tự đại diện ở tên tệp (`**\/*.test.*`)
+ * nên chỉ cấm từng tệp đang có khớp mẫu; mẫu chỉ đích danh (`package.json`, `.github/**`) cấm thẳng. Bước đo vẫn kiểm lại.
+ */
+export async function scopeDenyRules(contract, cwd, { gitOpts } = {}) {
+  const rules = [];
+  const add = (pattern) => { for (const t of ['Edit', 'Write']) rules.push(`${t}(${pattern})`); };
+  for (const p of contract.scope?.deny_paths || []) add(anyDepth(p));
+  // Ký tự đại diện ở TÊN TỆP (`*.test.*`) → chỉ tệp đang có; cả thư mục (`.github/**`) → cấm luôn tệp mới (CI chạy mọi tệp trong đó).
+  const wildcardName = (p) => { const last = String(p).replace(/\\/g, '/').split('/').filter(Boolean).pop() || ''; return last !== '**' && /[*?[]/.test(last); };
+  const direct = (contract.scope?.protected_paths || []).filter((p) => !wildcardName(p));
+  const globbed = (contract.scope?.protected_paths || []).filter(wildcardName);
+  for (const p of direct) add(anyDepth(p));
+  if (globbed.length) {
+    let tracked = [];
+    try { tracked = (await gitRead(cwd, ['ls-files', '-z'], gitOpts)).toString('utf8').split('\0').filter(Boolean); } catch { /* không phải kho */ }
+    const res = globbed.map((g) => globToRegExp(g));
+    for (const f of tracked) if (res.some((re) => re.test(f))) add(anyDepth(f));
+  }
+  return [...new Set(rules)].slice(0, MAX_SCOPE_RULES);
+}
+
+/** Tệp của thư mục job mà BE được đọc (agent.job_file) — để đưa bằng chứng, diff, log lên kho file của Aivin. */
+const JOB_FILE_RE = /^(CONTRACT\.md|TEST_CHECK\.md|REPORT\.md|evidence\.json|diff\.patch|logs\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\.log)$/;
+const MAX_JOB_FILE_CHUNK = 1024 * 1024;
+const MAX_LINK_SCAN = 200_000;
+
+/** Thư mục có liên kết (symlink / junction) bên trong không — xoá cưỡng bức đi theo liên kết là xoá cả dữ liệu thật ở nơi khác. */
+function hasLinks(dir) {
+  const stack = [dir];
+  let seen = 0;
+  while (stack.length) {
+    const d = stack.pop();
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (++seen > MAX_LINK_SCAN) return true;
+      if (e.isSymbolicLink()) return true;
+      if (e.isDirectory()) stack.push(path.join(d, e.name));
+    }
+  }
+  return false;
+}
+
+/** Cắt `buf` ở biên ký tự UTF-8 (không tách đôi một ký tự nhiều byte); trả số byte giữ lại. */
+function utf8Boundary(buf, eof) {
+  if (eof) return buf.length;
+  let end = buf.length;
+  for (let back = 0; back < 4 && end > 0 && (buf[end - 1] & 0xc0) === 0x80; back++) end--;
+  if (end > 0 && buf[end - 1] >= 0xc0) end--;
+  return end;
+}
 
 /**
  * Giao việc cho agent lập trình trên máy (30/10/2026) — Claude Code trước, Codex / Gemini / Aider… sau — bằng chế độ không giao diện của
@@ -249,7 +313,9 @@ function contractPrompt({ jobId, jobDir, contract, hasTestCheck, note }) {
     '- Stay inside the current folder for code changes. Do not touch paths the contract denies or protects (you may add new files).',
     '- Name every automated test you write or run for a check so its name contains the check id (for example "CK-031 order at 23:30 keeps its day"). The device re-runs the tests and matches results by that id.',
     '- Do not skip, disable or delete existing tests to make things pass.',
-    `When you finish (or stop), write ${report} exactly in this format — frontmatter holds short values only, sentences go in the sections; delete the example check under "Ca kiểm mới" if you propose none:`,
+    '- If you propose a new check under "Ca kiểm mới" with id NEW-n and method auto, write its test too and put NEW-n in the test name — the device measures it like the others.',
+    contract.setup?.length ? `- Before running tests, run the setup commands of the contract (setup) in the current folder: ${contract.setup.map((s) => s.argv.join(' ')).join(' ; ')}.` : '',
+    `When you finish (or stop), write ${report} exactly in this format — frontmatter holds short values only, sentences go in the sections; keep EVERY section heading even when it has nothing (an empty "# Phần chưa làm" or "# Ca kiểm mới" is fine), and delete only the example check under "Ca kiểm mới" if you propose none:`,
     '',
     reportTemplate({ jobId, contractId: contract.contract_id }),
     note ? `\nNote from Aivin: ${note}` : '',
@@ -286,7 +352,7 @@ export function createAgentRunner({
 
   // --- Hồ sơ job trên đĩa: `<jobsDir>/<job>/job.json` (+ CONTRACT.md, TEST_CHECK.md, REPORT.md, evidence.json, logs/ của job có hợp đồng).
   const dirOf = (id) => path.join(jobsDir, id);
-  const RECORD_KEYS = ['id', 'agent', 'status', 'cwd', 'cwdShown', 'mode', 'model', 'session_id', 'worktree', 'baseCommit', 'contractId', 'contractSha', 'continuedFrom', 'startedAt', 'endedAt', 'result', 'error'];
+  const RECORD_KEYS = ['id', 'agent', 'status', 'cwd', 'cwdShown', 'mode', 'model', 'session_id', 'worktree', 'baseCommit', 'contractId', 'contractSha', 'continuedFrom', 'delivery', 'worktreeRemoved', 'reportRepaired', 'startedAt', 'endedAt', 'result', 'error'];
   function persist(j) {
     try {
       fs.mkdirSync(dirOf(j.id), { recursive: true });
@@ -334,7 +400,10 @@ export function createAgentRunner({
       next_text: j.texts.length, next_tool: j.tools.length,
     };
     if (j.contractId) {
-      Object.assign(out, { contract_id: j.contractId, contract_sha256: j.contractSha, job_dir: dirOf(j.id), worktree: j.worktree || undefined });
+      Object.assign(out, {
+        contract_id: j.contractId, contract_sha256: j.contractSha, job_dir: dirOf(j.id), worktree: j.worktree || undefined,
+        ...(j.delivery ? { delivery: j.delivery } : {}), ...(j.worktreeRemoved ? { worktree_removed: true } : {}), ...(j.reportRepaired ? { report_repaired: true } : {}),
+      });
       if (!RUNNING.has(j.status)) {
         const evidence = readJobFile(j, 'evidence.json', 4 * 1024 * 1024);
         try { if (evidence) out.evidence = JSON.parse(evidence); } catch { /* hỏng → không gửi */ }
@@ -399,7 +468,11 @@ export function createAgentRunner({
     writeLocked('CONTRACT.md', text);
     if (testCheckText !== null) writeLocked('TEST_CHECK.md', testCheckText);
     // Agent chỉ được ghi REPORT.md trong thư mục job; hợp đồng, bộ check và bằng chứng là của Aivin / daemon.
-    const deny = ['CONTRACT.md', 'TEST_CHECK.md', 'evidence.json', 'job.json', 'logs/**'].flatMap((n) => ['Edit', 'Write'].map((t) => `${t}(${claudeAbsPath(path.join(jobDir, n))})`));
+    const deny = [
+      ...['CONTRACT.md', 'TEST_CHECK.md', 'evidence.json', 'job.json', 'logs/**'].flatMap((n) => ['Edit', 'Write'].map((t) => `${t}(${claudeAbsPath(path.join(jobDir, n))})`)),
+      // Phạm vi chặn TRƯỚC (không chỉ phát hiện sau): `npm test` được phép + sửa được package.json = chạy được mọi lệnh.
+      ...(await scopeDenyRules(contract, cwd)),
+    ];
     return {
       job: {
         contract, contractId: contract.contract_id, contractSha: parsed.sha256, hasTestCheck: testCheckText !== null, testCheckText,
@@ -426,12 +499,50 @@ export function createAgentRunner({
   }
 
   /** Agent xong → daemon đo. Lỗi đo không làm mất kết quả của agent. */
+  /**
+   * REPORT.md sai khuôn (hoặc chưa ghi) → nhắc agent ghi lại MỘT lần trong cùng phiên, trước khi đo (thiết kế: "sai thì yêu cầu ghi lại trong
+   * cùng phiên, vẫn sai thì coi là chưa giao đủ"). Rẻ hơn cả một vòng sửa (đo lại + agent đọc lại hợp đồng) chỉ vì thiếu một tiêu đề mục.
+   */
+  async function repairReport(j) {
+    if (!j.respawn || !j.session_id || j.abort.signal.aborted) return;
+    const file = path.join(dirOf(j.id), 'REPORT.md');
+    let text = null;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { /* chưa ghi */ }
+    const parsed = text === null ? { ok: false, errors: ['REPORT.md was not written'] } : parseReport(text, { contractId: j.contractId });
+    if (parsed.ok) return;
+    const { adapter, opts, flags, env, bin } = j.respawn;
+    let argv;
+    try { argv = agentArgs(adapter, { ...opts, worktree: undefined, resume: j.session_id }, flags); } catch { return; }
+    const prompt = `${file} is not in the agreed format: ${parsed.errors.slice(0, 8).join('; ')}. Rewrite only REPORT.md, exactly in the format given at the start (keep every section heading, even when empty). Do not change any other file.`;
+    await new Promise((resolve) => {
+      let child;
+      try { child = spawnImpl(bin, argv, { cwd: j.worktree || j.respawn.cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); } catch { resolve(); return; }
+      const timer = setTimeout(() => { try { child.kill(); } catch { /* đã thoát */ } }, REPORT_REPAIR_MS);
+      const done = () => { clearTimeout(timer); resolve(); };
+      child.stdout?.on?.('data', () => undefined);
+      child.stderr?.on?.('data', () => undefined);
+      child.stdin?.on?.('error', () => undefined);
+      child.on('close', done);
+      child.on('error', done);
+      child.stdin.end(prompt);
+    });
+    j.reportRepaired = true;
+  }
+
   async function finishContractJob(j) {
     if (j.isolate && !j.fixedWorktree) j.worktree = await findJobWorktree(j).catch(() => null);
+    // Sau khi biết worktree: phiên của agent nằm ở đó, nói tiếp phải đúng thư mục ấy.
+    await repairReport(j).catch(() => undefined);
+    // Đầu ra `git_branch`: commit thay đổi của worktree lên nhánh của job TRƯỚC khi đo — bằng chứng gắn đúng một commit.
+    if (j.worktree && j.contract?.outputs?.some((o) => o.kind === 'git_branch')) {
+      try {
+        j.delivery = await commitJobWork(j.worktree, `aivin: ${j.contractId} v${j.contract.version} (job ${j.id})`, { jobId: j.id });
+      } catch (e) { j.delivery = { error: e.message.slice(0, 300) }; }
+    }
     persist(j);
     try {
       const evidence = await measure({
-        job: { id: j.id, contractSha: j.contractSha, worktree: j.worktree, cwd: j.cwd, baseCommit: j.baseCommit, mainStateBefore: j.mainStateBefore },
+        job: { id: j.id, contractSha: j.contractSha, worktree: j.worktree, cwd: j.cwd, baseCommit: j.baseCommit, mainStateBefore: j.mainStateBefore, delivery: j.delivery },
         contract: j.contract, testCheck: j.hasTestCheck ? parseTestCheck(j.testCheckText) : null, jobDir: dirOf(j.id), signal: j.abort.signal,
       });
       if (j.isolate && !j.worktree) {
@@ -510,6 +621,8 @@ export function createAgentRunner({
     const childEnv = accountDir ? { ...agentEnv(process.env), [adapter.profileEnv]: accountDir } : agentEnv(process.env);
     const child = spawnImpl(binaryOf(adapter).bin, argv, { cwd: spawnCwd || cwd, env: childEnv, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     j.child = child;
+    // Gọi lại cùng phiên (nhắc ghi lại REPORT.md) cần đúng tệp chạy, cờ, môi trường của lần này.
+    if (withContract) j.respawn = { adapter, bin: binaryOf(adapter).bin, opts: { ...agentOpts, model: args.model ? String(args.model) : undefined }, flags: await flagsOf(adapter), env: childEnv, cwd: spawnCwd || cwd };
     jobs.set(j.id, j);
     persist(j);
     const wall = wallMs ? setTimeout(() => {
@@ -587,13 +700,57 @@ export function createAgentRunner({
     return view(j);
   }
 
+  const contractJob = (args) => {
+    const j = jobs.get(String(args.job || ''));
+    if (!j?.contractId) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `No contract job ${args.job}`);
+    return j;
+  };
+
+  /** Đọc một tệp của thư mục job theo khúc (BE đưa lên kho file). */
+  function jobFile(args) {
+    const j = contractJob(args);
+    const name = String(args.name || '').replace(/\\/g, '/');
+    if (!JOB_FILE_RE.test(name)) throw invalid('name must be CONTRACT.md, TEST_CHECK.md, REPORT.md, evidence.json, diff.patch or logs/<command>.log');
+    const file = path.join(dirOf(j.id), name);
+    let fd;
+    try { fd = fs.openSync(file, 'r'); } catch { throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `${name} is not in job ${j.id}`); }
+    try {
+      const size = fs.fstatSync(fd).size;
+      const offset = Math.max(0, Math.min(size, Math.trunc(Number(args.offset) || 0)));
+      const want = Math.max(1, Math.min(MAX_JOB_FILE_CHUNK, Math.trunc(Number(args.max_bytes) || 256 * 1024)));
+      const buf = Buffer.alloc(Math.min(want, size - offset));
+      const read = buf.length ? fs.readSync(fd, buf, 0, buf.length, offset) : 0;
+      const keep = utf8Boundary(buf.subarray(0, read), offset + read >= size);
+      return { job: j.id, name, size, offset, bytes: keep, next_offset: offset + keep, eof: offset + keep >= size, text: buf.subarray(0, keep).toString('utf8') };
+    } finally { fs.closeSync(fd); }
+  }
+
+  /**
+   * Gỡ worktree của job sau khi Aivin đã nhận kết quả (nhánh giao kết quả vẫn giữ). Worktree có liên kết bên trong → từ chối, để người dọn
+   * tay (xoá cưỡng bức đi theo junction là xoá dữ liệu thật ở nơi khác).
+   */
+  async function cleanup(args) {
+    const j = contractJob(args);
+    if (RUNNING.has(j.status)) throw invalid(`${j.id} is still running`);
+    if (!j.worktree || j.worktreeRemoved) return { job: j.id, removed: false, reason: 'no worktree to remove' };
+    const wt = j.worktree;
+    const known = (await listWorktrees(j.cwd)).some((t) => path.resolve(t).toLowerCase() === path.resolve(wt).toLowerCase());
+    if (!known) throw invalid(`${wt} is not a worktree of ${j.cwdShown}`);
+    if (hasLinks(wt)) throw invalid(`${wt} contains links (symlink / junction) — remove it by hand so nothing outside it is deleted`);
+    await gitWrite(j.cwd, ['worktree', 'unlock', wt]).catch(() => undefined);
+    await gitWrite(j.cwd, ['worktree', 'remove', '--force', wt]);
+    j.worktreeRemoved = true;
+    persist(j);
+    return { job: j.id, removed: true, worktree: wt, ...(j.delivery?.branch ? { branch_kept: j.delivery.branch } : {}) };
+  }
+
   function sessions(args, _ctx, env = {}) {
     const cwd = args.cwd ? resolveInRoots(env.roots || [], String(args.cwd)) : null;
     return { sessions: loadSessions().filter((s) => (!cwd || s.cwd === cwd) && (!args.agent || s.agent === args.agent)).slice(0, 20) };
   }
 
   return {
-    run, status, stop, sessions,
+    run, status, stop, sessions, jobFile, cleanup,
     profiles: () => ({ profiles: listAgentProfiles(installed(), { root: profilesRoot }) }),
     installed: () => installed().map((a) => ({ id: a.id, label: a.label, version: binaryOf(a).version })),
     /** Còn job đang chạy / đang đo — daemon không tự khởi động lại để cập nhật lúc này. */
@@ -626,6 +783,12 @@ export function buildAgentTools(runner) {
     { name: 'agent.stop', group: ToolGroup.PROC, handler: (a) => runner.stop(a),
       description: 'Stop a running coding-agent task.',
       input_schema: schema({ job: str('job from agent.run') }, ['job']) },
+    { name: 'agent.job_file', group: ToolGroup.PROC, read_only: true, internal: true, handler: (a) => runner.jobFile(a),
+      description: 'BE-only: read a file of a contract job (REPORT.md, evidence.json, diff.patch, logs/<command>.log…) in chunks from offset.',
+      input_schema: schema({ job: str('contract job'), name: str('file name'), offset: num('byte offset'), max_bytes: num('chunk size, max 1048576') }, ['job', 'name']) },
+    { name: 'agent.cleanup', group: ToolGroup.PROC, internal: true, handler: (a) => runner.cleanup(a),
+      description: "BE-only: remove a finished contract job's worktree (the delivery branch is kept).",
+      input_schema: schema({ job: str('contract job') }, ['job']) },
     { name: 'agent.profiles', group: ToolGroup.PROC, read_only: true, handler: () => runner.profiles(),
       description: 'Account profiles of each installed coding agent on this computer (each has its own sign-in and usage limits). Pass one as account to agent.run to switch account without any UI. The person creates a profile once by signing in to it.',
       input_schema: schema({}) },

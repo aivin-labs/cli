@@ -172,6 +172,15 @@ export function parseContract(text, { expectedSha } = {}) {
   for (const t of permissions.allowed_tools) if (UNBOUNDED_SHELL.has(t)) errors.push(`permissions.allowed_tools: ${t} without a command pattern allows every command — write e.g. ${t}(npm test *)`);
   if (risk === Risk.READ_ONLY && permissions.mode !== 'plan') errors.push('permissions.mode: read_only work runs in plan mode');
 
+  // Lệnh chuẩn bị (cài phụ thuộc…) — daemon chạy trong worktree TRƯỚC các lệnh verify; agent cũng được báo chạy trước khi test.
+  const setup = f.list(fm.setup, 'setup').map((v, i) => ({
+    id: f.id(v.id, `setup[${i}].id`),
+    argv: f.strList(v.argv, `setup[${i}].argv`, { dflt: undefined, what: 'command words (argv)' }),
+    timeout_ms: f.int(v.timeout_ms, `setup[${i}].timeout_ms`, { min: 1000, max: 3_600_000, dflt: 600_000 }),
+  }));
+  setup.forEach((v, i) => { if (!v.argv?.length) errors.push(`setup[${i}].argv: is required`); });
+  for (const v of setup) { if (v.id && verifyIds.has(v.id)) errors.push(`setup: id ${v.id} is also a verify id`); }
+
   const outputs = f.list(fm.outputs, 'outputs').map((o, i) => ({
     id: f.id(o.id, `outputs[${i}].id`), kind: f.oneOf(o.kind, `outputs[${i}].kind`, OUTPUT_KINDS),
     required: f.bool(o.required, `outputs[${i}].required`, true), consumer: f.id(o.consumer, `outputs[${i}].consumer`, { optional: true }),
@@ -205,7 +214,7 @@ export function parseContract(text, { expectedSha } = {}) {
     feature_group: f.id(fm.feature_group, 'feature_group', { optional: true }),
     project_id: typeof fm.project_id === 'string' ? fm.project_id : undefined, task_id: typeof fm.task_id === 'string' ? fm.task_id : undefined,
     risk, spec_refs: Array.isArray(fm.spec_refs) ? fm.spec_refs : [], depends_on: Array.isArray(fm.depends_on) ? fm.depends_on : [],
-    test_check: testCheck, workspace, scope: scope || { deny_paths: [], protected_paths: [] }, verify, acceptance, limits, permissions, outputs,
+    test_check: testCheck, workspace, scope: scope || { deny_paths: [], protected_paths: [] }, setup, verify, acceptance, limits, permissions, outputs,
   };
   return { ok: !errors.length, errors, contract, body: split.body, sha256: digest };
 }

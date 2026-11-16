@@ -18,6 +18,11 @@ import { killWindowsTree } from './winTree.mjs';
  */
 
 export const EVIDENCE_FILE = 'evidence.json';
+export const PATCH_FILE = 'diff.patch';
+/** Trần của diff.patch — đủ cho giám khảo đọc; lớn hơn thì cắt và ghi rõ. */
+const MAX_PATCH_BYTES = 4 * 1024 ** 2;
+/** Người viết commit giao kết quả (không phụ thuộc cấu hình git của máy). */
+const DELIVERY_IDENT = ['-c', 'user.name=Aivin coding job', '-c', 'user.email=noreply@aivin.cloud', '-c', 'commit.gpgsign=false'];
 const MAX_LOG_BYTES = 20 * 1024 ** 2;
 const LOG_TAIL_CHARS = 4000;
 const MAX_DIFF_BYTES = 16 * 1024 ** 2;
@@ -174,6 +179,76 @@ export function gitRead(cwd, sub, { maxBytes = MAX_DIFF_BYTES, spawnImpl = spawn
   });
 }
 
+/**
+ * Lệnh git có GHI (add / commit / worktree) — cùng lớp khoá cấu hình của gitRead (không hook, không fsmonitor, bỏ biến GIT_*). `pre` là các
+ * `-c` thêm trước lệnh con.
+ */
+export function gitWrite(cwd, sub, { pre = [], spawnImpl = spawn } = {}) {
+  return new Promise((resolve, reject) => {
+    const argv = safeGitArgv(cwd, sub);
+    const at = argv.indexOf('-C');
+    argv.splice(at, 0, ...pre);
+    const child = spawnImpl('git', argv, { cwd, env: safeGitEnv(scrubEnv()), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => child.kill(), GIT_TIMEOUT_MS);
+    child.stdout.on('data', (c) => { out = (out + c).slice(-4000); });
+    child.stderr.on('data', (c) => { err = (err + c).slice(-1000); });
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) reject(new Error(`git ${sub[0]} failed: ${err.trim() || out.trim() || `exit ${code}`}`));
+      else resolve(out);
+    });
+  });
+}
+
+/**
+ * Giao kết quả ở dạng nhánh: commit mọi thay đổi trong worktree của job lên nhánh đang đứng (nhánh `worktree-<job>` do agent tạo). Đây là
+ * cách GIAO (đầu ra `git_branch` của hợp đồng), không phải cách làm. Không có thay đổi → không commit. Trả `{ branch, commit, committed }`.
+ */
+export async function commitJobWork(tree, message, { jobId, ...opts } = {}) {
+  const status = (await gitRead(tree, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], opts)).toString('utf8');
+  let branch = null;
+  try { branch = (await gitRead(tree, ['symbolic-ref', '--quiet', '--short', 'HEAD'], opts)).toString().trim() || null; } catch { /* HEAD tách rời */ }
+  // HEAD tách rời: commit chỉ còn worktree giữ — gỡ worktree là mất. Tạo nhánh của job trước.
+  if (!branch && status.length && jobId) {
+    branch = `aivin/${jobId}`;
+    await gitWrite(tree, ['checkout', '-q', '-b', branch], opts);
+  }
+  if (status.length) {
+    await gitWrite(tree, ['add', '-A'], opts);
+    await gitWrite(tree, ['commit', '-q', '--no-verify', '-m', message], { ...opts, pre: DELIVERY_IDENT });
+  }
+  return { branch, commit: await resolveCommit(tree, 'HEAD', opts), committed: !!status.length };
+}
+
+/** Một tệp chữ mới (chưa theo dõi) dạng khối diff "new file". Tệp nhị phân / quá lớn → chỉ một dòng ghi chú. */
+function newFilePatch(tree, rel) {
+  const head = `diff --git a/${rel} b/${rel}\nnew file\n--- /dev/null\n+++ b/${rel}\n`;
+  try {
+    const abs = path.join(tree, rel);
+    if (fs.statSync(abs).size > MAX_UNTRACKED_READ) return `${head}@@ (file larger than ${MAX_UNTRACKED_READ} bytes — not shown) @@\n`;
+    const buf = fs.readFileSync(abs);
+    if (buf.includes(0)) return `${head}@@ (binary file — not shown) @@\n`;
+    const lines = buf.toString('utf8').replace(/\r?\n$/, '').split(/\r?\n/);
+    return `${head}@@ -0,0 +1,${lines.length} @@\n${lines.map((l) => `+${l}`).join('\n')}\n`;
+  } catch { return ''; }
+}
+
+/** Ghi toàn bộ thay đổi (đã theo dõi + tệp mới) ra `diff.patch` cho giám khảo / người duyệt. Trả `{ bytes, truncated }`. */
+export async function writePatch(tree, base, untracked, file, opts) {
+  let text = (await gitRead(tree, ['diff', '--no-color', '--no-renames', base, '--'], { ...opts, maxBytes: MAX_DIFF_BYTES })).toString('utf8');
+  for (const rel of untracked) {
+    if (text.length > MAX_PATCH_BYTES) break;
+    text += newFilePatch(tree, rel);
+  }
+  const truncated = Buffer.byteLength(text) > MAX_PATCH_BYTES;
+  if (truncated) text = `${Buffer.from(text).subarray(0, MAX_PATCH_BYTES).toString('utf8')}\n… (diff cut at ${MAX_PATCH_BYTES} bytes)\n`;
+  fs.writeFileSync(file, text);
+  return { bytes: Buffer.byteLength(text), truncated };
+}
+
 /** Commit của một ref (đã kiểm là commit), hoặc null. */
 export async function resolveCommit(cwd, ref = 'HEAD', opts) {
   if (!ref || String(ref).startsWith('-')) return null;
@@ -255,7 +330,7 @@ export async function diffSince(cwd, base, opts) {
       for (const text of fs.readFileSync(abs, 'utf8').replace(/\r?\n$/, '').split(/\r?\n/)) added.push({ path: f.path, text });
     } catch { /* tệp vừa bị xoá */ }
   }
-  return { files, added, removed };
+  return { files, added, removed, untracked };
 }
 
 const listed = (items) => (items.length > MAX_LISTED ? [...items.slice(0, MAX_LISTED), `… ${items.length - MAX_LISTED} more`] : items);
@@ -291,6 +366,13 @@ function coverage({ contract, testCheck, report, junitCases }) {
       }
     }
   }
+  // Ca agent tự đề xuất (mã tạm NEW-n trong REPORT.md): test đặt tên theo NEW-n được đo như ca auto — Agentic cấp mã CK khi gộp, kèm kết quả.
+  for (const n of report?.new_checks || []) {
+    if (n.method !== 'auto') continue;
+    const runs = junitCases.filter((j) => mentions(j, n.id));
+    tests.push({ check_id: n.id, flow_id: n.flow_id, rule_id: n.rule_id, method: 'auto', new: true,
+      measured: !runs.length ? 'missing' : runs.some((j) => j.status === 'fail' || j.status === 'error') ? 'fail' : runs.every((j) => j.status === 'skipped') ? 'skipped' : 'pass' });
+  }
   const mismatches = tests.filter((t) => t.mismatch).map((t) => `${t.check_id}: reported ${t.reported}, measured ${t.measured}`);
   return { result: check(CheckKind.CHECK_FILE_COVERED, problems.length ? 'fail' : 'pass', { problems: listed(problems), ...(mismatches.length ? { mismatches: listed(mismatches) } : {}) }), tests };
 }
@@ -304,7 +386,7 @@ export async function measureEvidence({ job, contract, testCheck, jobDir, signal
   const evidence = {
     job_id: job.id, contract_id: contract.contract_id, contract_version: contract.version, contract_sha256: job.contractSha,
     feature_group: contract.feature_group, mode: 'shadow', measured_at: new Date().toISOString(),
-    base_commit: job.baseCommit || null, head_commit: null, worktree: job.worktree || null,
+    base_commit: job.baseCommit || null, head_commit: null, worktree: job.worktree || null, ...(job.delivery ? { delivery: job.delivery } : {}),
     commands: [], diff: null, checks: [], acceptance: [], tests: [], report: null,
   };
   const write = () => {
@@ -334,15 +416,28 @@ export async function measureEvidence({ job, contract, testCheck, jobDir, signal
       diff = await diffSince(tree, base, gitOpts);
       evidence.head_commit = await resolveCommit(tree, 'HEAD', gitOpts);
       evidence.diff = { files: listed(diff.files.map((f) => `${f.status} ${f.path}`)), changed: diff.files.length };
+      const patch = await writePatch(tree, base, diff.untracked, path.join(jobDir, PATCH_FILE), gitOpts);
+      Object.assign(evidence.diff, { patch_file: PATCH_FILE, patch_bytes: patch.bytes, ...(patch.truncated ? { patch_truncated: true } : {}) });
     } catch (e) {
       evidence.diff = { error: e.message };
     }
   } else evidence.diff = { error: 'not a git repository (or no base commit) — diff checks cannot run' };
 
+  // Lệnh chuẩn bị (cài phụ thuộc) trước; hỏng một lệnh → không chạy verify (kết quả vô nghĩa), mọi command_passed trượt kèm lý do.
+  evidence.setup = [];
+  let setupFailed = null;
+  for (const cmd of contract.setup || []) {
+    if (signal?.aborted || setupFailed) break;
+    const res = await runCommand(cmd, { cwd: tree, logFile: path.join(jobDir, 'logs', `${cmd.id}.log`), signal });
+    evidence.setup.push({ id: cmd.id, argv: cmd.argv, ...res, log: `logs/${cmd.id}.log` });
+    if (res.error || res.timed_out || res.exit_code !== 0) setupFailed = `setup ${cmd.id} failed (${res.error || (res.timed_out ? 'timed out' : `exit code ${res.exit_code}`)})`;
+  }
+
   // Lệnh kiểm chứng, lần lượt, trong cây của job.
   const junitCases = [];
   for (const cmd of contract.verify) {
     if (signal?.aborted) break;
+    if (setupFailed) { evidence.checks.push(check(CheckKind.COMMAND_PASSED, 'fail', { command_id: cmd.id, problems: [setupFailed] })); continue; }
     const res = await runCommand(cmd, { cwd: tree, logFile: path.join(jobDir, 'logs', `${cmd.id}.log`), signal });
     const entry = { id: cmd.id, argv: cmd.argv, ...res, log: `logs/${cmd.id}.log` };
     if (cmd.report) {

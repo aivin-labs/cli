@@ -154,7 +154,7 @@ test('đầu vào sai + danh mục: không đề bài, thư mục ngoài vùng, 
   await assert.rejects(createAgentRunner({ find: () => null }).run({ prompt: 'x' }, {}, env), /No coding agent is installed/);
 
   assert.deepEqual(buildAgentTools(runner).map((t) => [t.name, !!t.read_only]),
-    [['agent.run', false], ['agent.status', true], ['agent.stop', false], ['agent.profiles', true], ['agent.sessions', true]]);
+    [['agent.run', false], ['agent.status', true], ['agent.stop', false], ['agent.job_file', true], ['agent.cleanup', false], ['agent.profiles', true], ['agent.sessions', true]]);
   const base = { roots: [root], binaries: [], projects: [], processes: { start() {} } };
   assert.equal(buildTools({ ...base, schedules: {}, runAs: { uid: 1 }, codingAgents: runner }).some((t) => t.name.startsWith('agent.')), false, 'máy tính tổ chức: không');
   assert.ok(buildTools({ ...base, schedules: {}, codingAgents: runner }).some((t) => t.name === 'agent.run'), 'máy cá nhân có agent: có');
@@ -237,6 +237,19 @@ test('job có hợp đồng: cờ từ hợp đồng, không nạp cấu hình r
   assert.equal(res.evidence.diff.changed, 1);
   assert.match(res.report_md, /# Đã đổi gì/);
   assert.ok(!runner.hasRunning());
+  // Giao kết quả: thay đổi đã commit lên nhánh của worktree, bằng chứng gắn đúng commit đó; diff đầy đủ đọc được theo khúc.
+  assert.equal(res.delivery.committed, true);
+  assert.equal(res.delivery.commit, res.evidence.head_commit);
+  assert.equal(git(wt, 'status', '--porcelain', '--untracked-files=no').trim(), '');
+  assert.match(git(wt, 'log', '-1', '--format=%s %an'), /^aivin: ctr_01 v1 \(job claude-[0-9a-f]{8}\) Aivin coding job/);
+  assert.equal(res.evidence.diff.patch_file, 'diff.patch');
+  const first = runner.jobFile({ job: res.job, name: 'diff.patch', max_bytes: 40 });
+  assert.equal(first.eof, false);
+  const rest = runner.jobFile({ job: res.job, name: 'diff.patch', offset: first.next_offset });
+  assert.match(first.text + rest.text, /-export const day = \(d\) => d;\n\+export const day = \(d\) => d \+ 1;/);
+  assert.ok(rest.eof);
+  assert.throws(() => runner.jobFile({ job: res.job, name: '../job.json' }), /name must be/);
+  assert.throws(() => runner.jobFile({ job: res.job, name: 'logs/missing.log' }), /not in job/);
 
   // Vòng sửa: nói tiếp phiên, trong đúng worktree cũ, không tạo worktree mới; diff vẫn tính từ commit gốc.
   const next = runner.run(contractArgs({ continue_job: res.job, prompt: 'tests_pass trượt ở lần trước' }), {}, env);
@@ -251,6 +264,16 @@ test('job có hợp đồng: cờ từ hợp đồng, không nạp cấu hình r
   assert.equal(fixed.status, 'done');
   assert.equal(fixed.evidence.worktree, wt);
   assert.equal(fixed.evidence.base_commit, res.evidence.base_commit);
+  assert.equal(fixed.delivery.committed, false, 'vòng sửa không đổi gì → không commit thêm');
+  assert.equal(fixed.evidence.diff.changed, 1, 'diff vẫn tính từ commit gốc của lần đầu');
+
+  // Dọn worktree khi Aivin đã nhận kết quả: worktree mất, nhánh giao kết quả còn.
+  const branch = res.delivery.branch;
+  const cleaned = await runner.cleanup({ job: res.job });
+  assert.equal(cleaned.removed, true);
+  assert.ok(!fs.existsSync(wt));
+  assert.match(git(repo, 'branch', '--list', branch), new RegExp(branch));
+  assert.equal((await runner.cleanup({ job: res.job })).removed, false);
 
   // Hồ sơ trên đĩa: daemon khởi động lại vẫn đọc được job; job đang chạy lúc tắt → interrupted.
   put(path.join(jobsDir, 'claude-deadbeef', 'job.json'), JSON.stringify({ id: 'claude-deadbeef', agent: 'claude', status: 'running', session_id: SID, contractId: 'ctr_01', startedAt: Date.now() }));
@@ -325,4 +348,49 @@ test('hồ sơ tài khoản (14/11/2026): agent chạy với thư mục cấu h�
   await assert.rejects(runner.run({ prompt: 'x', account: 'personal' }, {}, env), (e) => e.code === 'NOT_FOUND' && /CLAUDE_CONFIG_DIR=.*sign in/.test(e.message));
   await assert.rejects(runner.run({ prompt: 'x', account: '../etc' }, {}, env), /account: letters/);
   assert.throws(() => agentProfileDir({ id: 'x', label: 'X' }, 'a', { root: profilesRoot }), /no account profiles/);
+});
+
+test('phạm vi thành luật cấm: deny_paths + protected đích danh cấm thẳng; protected có ký tự đại diện chỉ cấm tệp đang có (thêm test mới vẫn được)', async () => {
+  const { scopeDenyRules } = await import('../bin/lib/remote/codingAgents.mjs');
+  const repo = shopRepo();
+  put(path.join(repo, 'test', 'order.test.js'), 'test("x", () => {});\n');
+  put(path.join(repo, '.github', 'workflows', 'ci.yml'), 'on: push\n');
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-qm', 'more');
+  const rules = await scopeDenyRules({ scope: { deny_paths: ['**/.env*'], protected_paths: ['package.json', '.github/**', '**/*.test.*'] } }, repo);
+  for (const r of ['Edit(**/.env*)', 'Write(**/.env*)', 'Edit(**/package.json)', 'Edit(**/.github/**)', 'Edit(**/test/order.test.js)', 'Write(**/test/order.test.js)']) assert.ok(rules.includes(r), r);
+  assert.ok(!rules.some((r) => r.includes('*.test.*')), 'không cấm theo mẫu — tệp test mới vẫn được thêm');
+});
+
+test('REPORT.md sai khuôn → nhắc agent ghi lại MỘT lần trong cùng phiên, trước khi đo; đúng khuôn thì không nhắc', async () => {
+  const repo = shopRepo();
+  const jobsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-jobs-'));
+  const { calls, spawnImpl } = fakeSpawn();
+  const runner = createAgentRunner({ find: findClaude(), spawnImpl, jobsDir });
+  const pending = runner.run(contractArgs({ cwd: repo }), {}, env);
+  await waitFor(() => calls.length === 1);
+  const jobDir = argAfter(calls[0].argv, '--add-dir');
+  const name = argAfter(calls[0].argv, '--worktree');
+  const wt = path.join(repo, '.claude', 'worktrees', name);
+  git(repo, 'worktree', 'add', '-q', wt, 'HEAD');
+  put(path.join(wt, 'src', 'order.js'), 'export const day = (d) => d + 1;\n');
+  // Thiếu mục "# Ca kiểm mới" (lỗi thật của lần chạy trọn luồng 16/11/2026).
+  put(path.join(jobDir, 'REPORT.md'), report({ status: 'done', left: '' }).replace(/# Ca kiểm mới[\s\S]*?(?=# Rủi ro còn lại)/, ''));
+  await calls[0].emitAll([
+    { type: 'system', subtype: 'init', session_id: SID, model: 'claude-opus-5-5', cwd: wt },
+    { type: 'result', subtype: 'success', is_error: false, result: 'Xong.', session_id: SID },
+  ]);
+  await waitFor(() => calls.length === 2);
+  assert.equal(argAfter(calls[1].argv, '--resume'), SID);
+  assert.ok(!calls[1].argv.includes('--worktree'));
+  assert.equal(calls[1].opts.cwd, wt);
+  assert.match(calls[1].stdin(), /is not in the agreed format: body: missing section "# Ca kiểm mới"/);
+  put(path.join(jobDir, 'REPORT.md'), report({ status: 'done', left: '' }));
+  calls[1].child.emit('close', 0);
+  const res = await pending;
+  assert.equal(res.status, 'done');
+  assert.equal(res.report_repaired, true);
+  assert.equal(res.evidence.report.valid, true);
+  assert.equal(res.evidence.checks.find((c) => c.check === 'outputs_complete').status, 'pass');
+  assert.equal(calls.length, 2, 'chỉ nhắc một lần');
 });

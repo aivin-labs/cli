@@ -184,3 +184,30 @@ test('so bản checkout chính: bỏ qua thư mục worktree của job, bắt m�
   assert.equal(mainCheckoutChanged(before, [' M src/a.js', '?? notes.txt'], { cwd: '/r', worktree: '/r/.claude/worktrees/j' }), true);
   assert.equal(mainCheckoutChanged(null, [' M x'], { cwd: '/r' }), false, 'không chụp được trước đó → không kết luận');
 });
+
+test('đo: lệnh setup chạy trước verify; setup hỏng → không chạy verify, command_passed trượt có lý do; ca NEW-n được đo theo tên test', async () => {
+  const repo = makeRepo();
+  const base = await resolveCommit(repo, 'HEAD');
+  const node = process.execPath.replace(/'/g, "''");
+  const withSetup = (exitCode) => contractFor().text.replace('verify:\n', `setup:\n  - { id: deps, argv: ['${node}', '-e', 'process.exit(${exitCode})'] }\nverify:\n`);
+  // setup hỏng
+  const bad = withSetup(3);
+  const badParsed = parseContract(bad);
+  assert.deepEqual(badParsed.errors, []);
+  assert.equal(badParsed.contract.setup[0].id, 'deps');
+  const ev = await measureEvidence({ job: { id: 'j', contractSha: sha256(bad), cwd: repo, baseCommit: base }, contract: badParsed.contract, testCheck: parseTestCheck(TEST_CHECK), jobDir: jobDirWith(bad, null) });
+  assert.equal(ev.setup[0].exit_code, 3);
+  assert.equal(ev.commands.length, 0, 'verify không chạy');
+  assert.match(ev.checks.find((c) => c.check === 'command_passed').problems[0], /setup deps failed \(exit code 3\)/);
+  // setup đạt + ca NEW-1 có test mang tên NEW-1
+  const good = withSetup(0);
+  const goodParsed = parseContract(good);
+  write(path.join(repo, 'scripts', 'junit.js'), "require('fs').writeFileSync('junit.xml', '<testsuite><testcase name=\"CK-031 order at 23:30 keeps its day\"/><testcase name=\"NEW-1 order at 00:00\"/></testsuite>');\n");
+  const ev2 = await measureEvidence({
+    job: { id: 'j', contractSha: sha256(good), cwd: repo, baseCommit: base }, contract: goodParsed.contract, testCheck: parseTestCheck(TEST_CHECK),
+    jobDir: jobDirWith(good, report({ status: 'done', left: '' })),
+  });
+  assert.equal(ev2.setup[0].exit_code, 0);
+  assert.equal(ev2.commands.length, 1);
+  assert.deepEqual(ev2.tests.find((t) => t.check_id === 'NEW-1'), { check_id: 'NEW-1', flow_id: 'checkout', rule_id: 'BR-07', method: 'auto', new: true, measured: 'pass' });
+});
