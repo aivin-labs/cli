@@ -98,6 +98,8 @@ test('WebRTC: thao tác đi kênh input peer-to-peer, mang mã phiên của peer
   const gotInput = new Promise((r) => { resolveInput = r; });
   let device;
   device = createDesktopWebRtc({
+    // Hai đầu WebRTC thật cùng chạy trên máy test — không để bước "người xem ngay trên máy này" đóng kết nối.
+    localViewerCheck: false,
     // Không có nguồn video: wrtc tạo RTCVideoSource rồi để tiến trình thoát tự nhiên là segfault (xem desktopWebRtc.mjs).
     loadRuntime: async () => ({ RTCPeerConnection }),
     emitSignal: async (msg) => {

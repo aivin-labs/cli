@@ -192,6 +192,8 @@ test('WebRTC: tệp đi kênh riêng tới đúng người xem, trả lời đi 
   let gotAll;
   const done = new Promise((r) => { gotAll = r; });
   device = createDesktopWebRtc({
+    // Hai đầu WebRTC thật cùng chạy trên máy test — không để bước "người xem ngay trên máy này" đóng kết nối.
+    localViewerCheck: false,
     loadRuntime: async () => ({ RTCPeerConnection }),
     emitSignal: async (msg) => {
       if (msg.type === 'offer') {

@@ -1,3 +1,4 @@
+import os from 'os';
 /**
  * Desktop Cast WebRTC transport. Có `nonstandard.RTCVideoSource` (02/11/2026): hình đi video track — libwebrtc mã hoá VP8 liên khung, tự
  * chỉnh bitrate theo mạng; âm thanh hệ thống đi `nonstandard.RTCAudioSource` (Opus 48 kHz); kênh `aivin-desktop-frames` chỉ mang gói meta
@@ -114,7 +115,33 @@ export function unpackDesktopFrame(packet) {
   }
 }
 
-export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onFile = () => {}, onFileChunk = () => {}, onPeerReady = () => {}, onCursorMode = () => {}, loadRuntime } = {}) {
+/** Địa chỉ đầu bên kia của cặp đường truyền đang dùng (từ `pc.getStats()`), hoặc null. */
+export function selectedRemoteAddress(report) {
+  if (!report) return null;
+  const all = typeof report.values === 'function' ? [...report.values()] : Object.values(report);
+  const byId = new Map(all.filter((r) => r?.id).map((r) => [r.id, r]));
+  const transport = all.find((r) => r?.type === 'transport' && r.selectedCandidatePairId);
+  const pair = (transport && byId.get(transport.selectedCandidatePairId))
+    || all.find((r) => r?.type === 'candidate-pair' && (r.selected || (r.nominated && r.state === 'succeeded')));
+  const remote = pair && byId.get(pair.remoteCandidateId);
+  const address = remote?.address || remote?.ip || null;
+  return address ? { address: String(address), type: remote.candidateType || null } : null;
+}
+
+const stripZone = (ip) => String(ip || '').trim().toLowerCase().replace(/%.*$/, '').replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, '');
+
+/**
+ * Đầu bên kia là CHÍNH máy này: loopback, hoặc trùng một địa chỉ của card mạng trên máy. Hai PC cùng mạng LAN có địa chỉ nội bộ khác nhau;
+ * cùng IP công cộng (srflx sau NAT) không tính — địa chỉ đó không thuộc card mạng nào của máy.
+ */
+export function isOwnAddress(address, interfaces = os.networkInterfaces()) {
+  const a = stripZone(address);
+  if (!a || a.endsWith('.local')) return false;
+  if (a === '::1' || /^127\./.test(a)) return true;
+  return Object.values(interfaces || {}).flat().some((i) => i?.address && stripZone(i.address) === a);
+}
+
+export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => {}, onInput = () => {}, onFile = () => {}, onFileChunk = () => {}, onPeerReady = () => {}, onCursorMode = () => {}, loadRuntime, localViewerCheck = process.env.AIVIN_CAST_LOCAL_CHECK !== '0' } = {}) {
   const peers = new Map();
   /** Hình con trỏ đã thấy trong phiên — người xem nối sau vẫn nhận đủ (bộ quay chỉ gửi mỗi hình một lần). */
   const cursorShapes = new Map();
@@ -237,6 +264,22 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
       }
       emitStatus({ session_id: sessionId, viewer_id: viewerId, state: 'connected', transport: 'webrtc', video: peer.video, audio: peer.audio });
       onPeerReady(viewerId);
+      void checkLocalViewer();
+    };
+    // Người xem đang ngồi ngay trên máy này (trình duyệt cùng máy → đường truyền đi qua loopback / card mạng của chính máy): xem tiếp là hình lặp
+    // vô tận. Báo máy chủ `local_viewer` (dừng người xem này, nhớ lại cho lần sau) và đóng kết nối — bắt được cả khi trang không gắn được mã vào
+    // tiêu đề (trình duyệt nhúng trong app khác). Cặp đường truyền đôi khi chưa chốt lúc kênh vừa mở → hỏi lại một lần.
+    const checkLocalViewer = async (retry = true) => {
+      if (!localViewerCheck || peer.localChecked || peers.get(viewerId) !== peer || typeof pc.getStats !== 'function') return;
+      const remote = selectedRemoteAddress(await Promise.resolve().then(() => pc.getStats()).catch(() => null));
+      if (!remote) {
+        if (retry) { const t = setTimeout(() => { void checkLocalViewer(false); }, 1000); t.unref?.(); }
+        return;
+      }
+      peer.localChecked = true;
+      if (!isOwnAddress(remote.address)) return;
+      emitStatus({ session_id: sessionId, viewer_id: viewerId, state: 'local_viewer', transport: 'none', candidate_type: remote.type });
+      close(viewerId);
     };
     channel.onopen = markConnected;
     // Kênh đóng trước khi peer báo `failed` (chạy thật: ~19 s): báo ngay để BE gửi JPEG, không để người xem đứng hình trong lúc đó.

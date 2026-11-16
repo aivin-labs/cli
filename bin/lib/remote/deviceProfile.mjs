@@ -5,6 +5,9 @@ import { createHash } from 'crypto';
 import { currentCliVersion } from '../update/versions.mjs';
 import { IGNORED_DIRS } from './constants.mjs';
 import { isProtectedPath } from './sandbox.mjs';
+import { humanIdleSupported } from './desktop/humanIdle.mjs';
+import { identifySupported } from './desktop/identifyOverlay.mjs';
+import { windowProbeSupported } from './desktop/windowProbe.mjs';
 
 export { REMOTE_CONFIG_DIR } from './constants.mjs';
 
@@ -123,7 +126,7 @@ export function buildDeviceProfile(roots) {
     projects: detectProjects(roots),
     desktop_cast: process.platform === 'win32',
     // Giao diện chỉ gửi lệnh mà bản CLI này hiểu; CLI cũ không khai thì giao diện đi đường cũ.
-    cast_features: ['paste_html', 'drop_files'],
+    cast_features: ['paste_html', 'drop_files', ...(humanIdleSupported() ? ['human_idle'] : []), ...(identifySupported() ? ['identify'] : []), ...(windowProbeSupported() ? ['window_probe'] : []), 'local_viewer_report'],
   };
 }
 

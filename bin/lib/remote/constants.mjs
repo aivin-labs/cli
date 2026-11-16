@@ -107,6 +107,22 @@ export const DeviceEvent = Object.freeze({
   DESKTOP_CAST_INPUT_FOCUS: 'device:desktop_cast_input_focus',
   /** BE → CLI: người xem tạm cầm lái khi AI đang chạy / trả lại — `{ session_id, active, idle_ms, max_wait_ms }`. */
   DESKTOP_CAST_TAKEOVER: 'device:desktop_cast_takeover',
+  /**
+   * BE → CLI (16/11/2026): máy rảnh tay bao lâu — ack `{ ok, idle_ms }`. Máy chủ dùng để biết trình duyệt có đang mở ngay trên máy này không
+   * (hai PC cùng mạng trùng IP công cộng). Chỉ máy khai `cast_features: ['human_idle']` mới được hỏi.
+   */
+  HUMAN_IDLE: 'device:human_idle',
+  /**
+   * BE → CLI (16/11/2026): trình duyệt xem màn hình có đang mở ngay trên máy này không — `{ nonce?, viewer_ips? }`, ack `{ ok, found, own_ip }`:
+   * có cửa sổ mang mã trang gắn vào tiêu đề tab / IP trình duyệt đang gắn trên card mạng của máy. Có ⇒ xem sẽ thành hình lặp. Chỉ máy khai
+   * `cast_features: ['window_probe']` mới được hỏi.
+   */
+  WINDOW_PROBE: 'device:window_probe',
+  /**
+   * BE → CLI (16/11/2026): hiện tên máy to giữa mọi màn hình `{ name, duration_ms }` — người dùng rê chuột lên dòng máy này trong menu chọn
+   * máy trên web. Chỉ máy khai `cast_features: ['identify']` mới nhận.
+   */
+  IDENTIFY: 'device:identify',
 });
 
 /** Trạng thái phiên xem màn hình gửi BE (`device:desktop_cast_status`) — khớp BE `DesktopCastState`. */

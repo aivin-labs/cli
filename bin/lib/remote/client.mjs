@@ -55,6 +55,10 @@ import {
 import { CastConsentDecision, createCastConsent } from './desktop/castConsent.mjs';
 import { castViewerInfo, castViewerLabel, createCastTrust, createDeviceProver } from './desktop/castTrust.mjs';
 import { createCastTouchViewers, shouldDrawCursorInFrame } from './desktop/castTouchViewers.mjs';
+import { prepareHumanIdle, readHumanIdleMs } from './desktop/humanIdle.mjs';
+import { prepareIdentify, showIdentify } from './desktop/identifyOverlay.mjs';
+import { findWindowTitle, prepareWindowProbe } from './desktop/windowProbe.mjs';
+import { isOwnAddress } from './desktop/desktopWebRtc.mjs';
 import { createConfirmBarrier } from './confirmBarrier.mjs';
 import { newInputTag } from './humanInput.mjs';
 import {
@@ -1198,6 +1202,8 @@ export async function startRemoteClient(options = {}) {
   // Chưa nối thì thôi: lần chào khi nối mang theo hồ sơ mới.
   announceProfile = () => (socket.connected ? announce() : undefined);
   socket.on('connect', guarded('connect', async () => {
+    // Dựng sẵn exe đọc thời gian rảnh tay + exe hiện tên máy (lần đầu ~1–2 s csc) để lần máy chủ hỏi đầu tiên không quá hạn.
+    void prepareHumanIdle().then(() => prepareIdentify()).then(() => prepareWindowProbe());
     confirmServerCredentialMigration(serverUrl);
     await announce();
     flushUnsent();
@@ -1406,6 +1412,27 @@ export async function startRemoteClient(options = {}) {
   socket.on(DeviceEvent.DESKTOP_CAST_TAKEOVER, guarded(DeviceEvent.DESKTOP_CAST_TAKEOVER, (payload) => {
     if (!payload?.session_id || payload.session_id !== desktopCast.sessionId()) return;
     castGate.setHumanTakeover(payload.active === true ? { idleMs: Number(payload.idle_ms), maxWaitMs: Number(payload.max_wait_ms) } : null);
+  }));
+  // Máy chủ hỏi máy rảnh tay bao lâu để biết trình duyệt có đang mở ngay trên máy này không (chỉ trả con số, không lộ gì khác).
+  socket.on(DeviceEvent.HUMAN_IDLE, guarded(DeviceEvent.HUMAN_IDLE, async (_payload, ack) => {
+    if (typeof ack !== 'function') return;
+    const idleMs = await readHumanIdleMs();
+    ack(idleMs === null ? { ok: false } : { ok: true, idle_ms: idleMs });
+  }));
+  // Máy chủ hỏi trình duyệt xem màn hình có đang mở ngay trên máy này không (chỉ trả có / không): (1) có cửa sổ mang mã trang vừa gắn vào tiêu
+  // đề tab; (2) IP trình duyệt (máy chủ thấy) đang gắn trên card mạng của máy — IPv6 công cộng là của riêng từng máy, Windows giữ cùng lúc
+  // nhiều địa chỉ tạm nên so ở đây đúng cả khi địa chỉ vừa đổi (máy chủ so với IP lúc máy nối thì trượt).
+  socket.on(DeviceEvent.WINDOW_PROBE, guarded(DeviceEvent.WINDOW_PROBE, async (payload, ack) => {
+    if (typeof ack !== 'function') return;
+    const ips = (Array.isArray(payload?.viewer_ips) ? payload.viewer_ips : []).slice(0, 8).filter((ip) => typeof ip === 'string');
+    const ownIp = ips.some((ip) => isOwnAddress(ip));
+    const found = payload?.nonce ? await findWindowTitle(payload.nonce) : null;
+    ack({ ok: true, found: found === true, own_ip: ownIp, ...(payload?.nonce && found === null ? { title_unknown: true } : {}) });
+  }));
+  // Chủ máy rê chuột lên dòng máy này trên web → hiện tên máy to trên màn hình vài giây (không lấy tiêu điểm, bấm xuyên qua được).
+  socket.on(DeviceEvent.IDENTIFY, guarded(DeviceEvent.IDENTIFY, async (payload) => {
+    if (isRemotePaused()) return;
+    await showIdentify({ name: payload?.name, durationMs: payload?.duration_ms, lang: mascotLang() });
   }));
   socket.on(DeviceEvent.DESKTOP_CAST_SIGNAL, guarded(DeviceEvent.DESKTOP_CAST_SIGNAL, (payload) => {
     if (payload?.type === 'device_proof') return castProver.answer(payload);
