@@ -32,6 +32,10 @@ const MAX_OUTPUT_CHARS = 200_000;
 const DEFAULT_TIMEOUT_MS = 180_000;
 const WARM_IDLE_MS = 10 * 60_000;
 const MAX_WARM_KEYS = 4;
+/** Tiến trình giữ sẵn cho MỖI (agent, model, effort): lượt chat gọi song song vài lời gọi cùng loại — một tiến trình thì lời gọi thứ hai khởi động
+ * nguội (~1 s). Tổng có trần (`MAX_WARM_PROCS`, mỗi tiến trình Claude Code ~200 MB). Đổi bằng `AIVIN_LLM_WARM_PER_KEY`. */
+const WARM_PER_KEY = Math.min(4, Math.max(1, Number(process.env.AIVIN_LLM_WARM_PER_KEY) || 2));
+const MAX_WARM_PROCS = 6;
 /** Mã lỗi riêng: agent định dùng công cụ — câu trả lời bị bỏ. */
 export const TOOL_USE_ERROR = 'LOCAL_LLM_TOOL_USE';
 export const QUOTA_ERROR = 'LOCAL_LLM_QUOTA';
@@ -226,6 +230,7 @@ const AGY_QUOTA_RE = /^\s*⚠?\s*(individual )?quota reached/i;
 
 export function createLocalLlm({
   adapters = DEFAULT_LLM_ADAPTERS, spawnImpl = spawn, dir = LLM_DIR, now = Date.now, idleMs = WARM_IDLE_MS, version = versionOf,
+  warmPerKey = WARM_PER_KEY, maxWarmProcs = MAX_WARM_PROCS,
 } = {}) {
   const found = new Map();
   const probes = new Map();
@@ -252,8 +257,9 @@ export function createLocalLlm({
     Promise.resolve(binOf(a).version || version(binOf(a).bin)).then((v) => versions.set(a.id, v || null)).catch(() => {});
   }
 
-  /** key → { proc, lastUsed } — tiến trình đã khởi động, chưa nhận lời gọi nào. */
+  /** key → { procs: Promise<proc>[], lastUsed } — các tiến trình đã khởi động, chưa nhận lời gọi nào. */
   const warm = new Map();
+  const warmCount = () => [...warm.values()].reduce((n, w) => n + w.procs.length, 0);
   let sweeper = null;
 
   // --- Một tiến trình. stream / stdin: chỉ là child. acp: child + phiên đã mở + model đã chọn (`ready`).
@@ -296,14 +302,27 @@ export function createLocalLlm({
 
   function keepWarm(adapter, opts) {
     const key = `${adapter.id}|${opts.model || ''}|${opts.effort || ''}`;
-    if (warm.has(key)) return;
-    while (warm.size >= MAX_WARM_KEYS) {
-      const [oldest] = [...warm.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
-      closeWarm(oldest);
+    let entry = warm.get(key);
+    if (!entry) {
+      while (warm.size >= MAX_WARM_KEYS) {
+        const [oldest] = [...warm.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+        closeWarm(oldest);
+      }
+      entry = { procs: [], lastUsed: now() };
+      warm.set(key, entry);
     }
-    const entry = { proc: startProc(adapter, opts), lastUsed: now() };
-    warm.set(key, entry);
-    entry.proc.catch(() => warm.delete(key));
+    entry.lastUsed = now();
+    // Đủ số cho loại này, tổng còn chỗ thì mới dựng thêm; loại khác ít dùng nhất nhường chỗ khi tổng đầy.
+    while (entry.procs.length < warmPerKey) {
+      if (warmCount() >= maxWarmProcs) {
+        const victim = [...warm.entries()].filter(([k, w]) => k !== key && w.procs.length).sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+        if (!victim) break;
+        victim[1].procs.pop()?.then(closeProc, () => {});
+      }
+      const p = startProc(adapter, opts);
+      entry.procs.push(p);
+      p.catch(() => { const i = entry.procs.indexOf(p); if (i >= 0) entry.procs.splice(i, 1); });
+    }
     if (!sweeper) {
       sweeper = setInterval(() => { for (const [k, w] of warm) if (now() - w.lastUsed > idleMs) closeWarm(k); if (!warm.size) { clearInterval(sweeper); sweeper = null; } }, 60_000);
       sweeper.unref?.();
@@ -313,14 +332,14 @@ export function createLocalLlm({
   function closeWarm(key) {
     const w = warm.get(key);
     warm.delete(key);
-    w?.proc.then(closeProc, () => {});
+    for (const p of w?.procs || []) p.then(closeProc, () => {});
   }
 
   async function take(adapter, opts) {
     const key = `${adapter.id}|${opts.model || ''}|${opts.effort || ''}`;
     const w = warm.get(key);
-    warm.delete(key);
-    let proc = w ? await w.proc.catch(() => null) : null;
+    const pending = w?.procs.shift();
+    let proc = pending ? await pending.catch(() => null) : null;
     const warmStart = !!proc && !proc.exited;
     if (!warmStart) { closeProc(proc); proc = await startProc(adapter, opts); }
     setImmediate(() => keepWarm(adapter, opts));
@@ -436,7 +455,7 @@ export function createLocalLlm({
   return {
     available: () => installed().length > 0,
     agents: () => installed().map((a) => ({ id: a.id, label: a.label, ...(versions.get(a.id) ? { version: versions.get(a.id) } : {}) })),
-    info: () => ({ agents: installed().map((a) => ({ id: a.id, ...(versions.get(a.id) ? { version: versions.get(a.id) } : {}) })), warm: [...warm.keys()] }),
+    info: () => ({ agents: installed().map((a) => ({ id: a.id, ...(versions.get(a.id) ? { version: versions.get(a.id) } : {}) })), warm: [...warm.keys()], warm_procs: warmCount() }),
     complete,
     /** BE báo trước agent / model sắp dùng (người dùng vừa chọn máy này) → khởi động sẵn. */
     prewarm: (args = {}) => {

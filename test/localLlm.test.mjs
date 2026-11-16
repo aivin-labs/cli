@@ -31,7 +31,7 @@ function fakeSpawn(onInput) {
 const adapter = (base, over = {}) => ({ ...base, find: () => ({ bin: base.id, version: '1.0.0' }), ...(base.probe ? { probe: async () => ({ disable: ['code_mode_host', 'shell_tool'] }) } : {}), ...over });
 const make = (adapters, onInput) => {
   const f = fakeSpawn(onInput);
-  return { ...f, llm: createLocalLlm({ adapters, spawnImpl: f.spawnImpl, dir, version: async () => '1.0.0' }) };
+  return { ...f, llm: createLocalLlm({ adapters, spawnImpl: f.spawnImpl, dir, version: async () => '1.0.0', warmPerKey: 1 }) };
 };
 
 // --- Claude Code (stream-json) -----------------------------------------------------------------------------------------------------------
@@ -268,4 +268,21 @@ test('tools are internal + read-only and list installed agents; prewarm keeps at
   llm.stopAll();
   await tick();
   assert.equal(llm.info().warm.length, 0);
+});
+
+test('warm pool: giữ 2 tiến trình mỗi loại — hai lời gọi song song đều dùng tiến trình đã khởi động; tổng có trần', async () => {
+  const f = fakeSpawn((child, d) => { if (d) claudeReply(child, 'ok'); });
+  const llm = createLocalLlm({ adapters: [adapter(CLAUDE_LLM)], spawnImpl: f.spawnImpl, dir, version: async () => '1.0.0', warmPerKey: 2, maxWarmProcs: 3 });
+  llm.prewarm({ model: 'haiku' });
+  await tick(); await tick();
+  assert.equal(llm.info().warm_procs, 2);
+  const [a, b] = await Promise.all([llm.complete({ prompt: 'x', model: 'haiku' }), llm.complete({ prompt: 'y', model: 'haiku' })]);
+  assert.deepEqual([a.warm_start, b.warm_start], [true, true]);
+  await tick(); await tick();
+  assert.equal(llm.info().warm_procs, 2, 'refilled');
+  // Loại khác: tổng trần 3 → loại cũ nhường một chỗ.
+  llm.prewarm({ model: 'sonnet' });
+  await tick(); await tick();
+  assert.equal(llm.info().warm_procs, 3);
+  llm.stopAll();
 });
