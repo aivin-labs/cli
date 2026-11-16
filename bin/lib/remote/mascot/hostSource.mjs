@@ -298,7 +298,7 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
     <TextBlock x:Name="AskStatus" Visibility="Collapsed" FontSize="13" Foreground="${B.muted}" Margin="0,2,4,1" TextTrimming="CharacterEllipsis"/>
    </StackPanel>
    <!-- Dau x mo o goc phai tren: cat o hoi di ngay, ke ca khi Aivin dang cho tra loi (cau hoi van con, mo lai bang cach re vao bot). -->
-   <Button x:Name="AskClose" Visibility="Collapsed" Style="{StaticResource IconBtn}" Width="18" Height="18" Padding="0" Margin="0,3,3,0" Opacity="0.3"
+   <Button x:Name="AskClose" Visibility="Collapsed" Style="{StaticResource IconBtn}" Width="18" Height="18" Padding="0" Margin="0,1,1,0" Opacity="0.3"
            HorizontalAlignment="Right" VerticalAlignment="Top" Background="#E8FFFFFF" BorderThickness="0" Tag="#F2F3F5">
     <Path Data="${ICON_CLOSE_X}" Stroke="${B.muted}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
           Width="9" Height="9" Stretch="Uniform"/>

@@ -36,6 +36,10 @@ const MAX_WARM_KEYS = 4;
  * nguội (~1 s). Tổng có trần (`MAX_WARM_PROCS`, mỗi tiến trình Claude Code ~200 MB). Đổi bằng `AIVIN_LLM_WARM_PER_KEY`. */
 const WARM_PER_KEY = Math.min(4, Math.max(1, Number(process.env.AIVIN_LLM_WARM_PER_KEY) || 2));
 const MAX_WARM_PROCS = 6;
+/** Antigravity (ACP): tiến trình phục vụ xong một lời gọi thì mở phiên mới trên CHÍNH nó và quay lại pool — lời gọi sau khỏi khởi động agy
+ *  (initialize + session/new + set_model, 2–4 s). Mỗi tiến trình vẫn một lời gọi một lúc; đủ số lượt này thì thay tiến trình mới (agy giữ
+ *  các phiên đã mở trong bộ nhớ). */
+const ACP_MAX_USES = 40;
 /** Mã lỗi riêng: agent định dùng công cụ — câu trả lời bị bỏ. */
 export const TOOL_USE_ERROR = 'LOCAL_LLM_TOOL_USE';
 export const QUOTA_ERROR = 'LOCAL_LLM_QUOTA';
@@ -277,15 +281,9 @@ export function createLocalLlm({
     if (adapter.kind === 'acp') {
       proc.child = launch(adapter.args());
       proc.rpc = acpClient(proc.child);
-      proc.ready = (async () => {
-        await proc.rpc.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } });
-        const sess = await proc.rpc.call('session/new', { cwd: dir, mcpServers: [] });
-        const modelId = pickAgyModel(sess?.models?.availableModels, model, effort);
-        if (model && !modelId) throw failed(`${adapter.label} has no model "${model}" here`, DeviceErrorCode.NOT_FOUND);
-        if (modelId && modelId !== sess?.models?.currentModelId) await proc.rpc.call('session/set_model', { sessionId: sess.sessionId, modelId });
-        return { sessionId: sess.sessionId, modelId: modelId || sess?.models?.currentModelId };
-      })();
-      proc.ready.catch(() => {});
+      proc.initialized = proc.rpc.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } });
+      proc.initialized.catch(() => {});
+      openAcpSession(proc);
       return Promise.resolve(proc);
     }
     return probeOf(adapter).then((probe) => {
@@ -294,14 +292,31 @@ export function createLocalLlm({
     });
   }
 
+  /** Mở một phiên ACP mới (đã initialize một lần cho cả tiến trình) với đúng model / effort của tiến trình → `proc.ready`. */
+  function openAcpSession(proc) {
+    const { adapter, model, effort } = proc;
+    proc.sessionId = null;
+    proc.modelId = null;
+    proc.ready = (async () => {
+      await proc.initialized;
+      const sess = await proc.rpc.call('session/new', { cwd: dir, mcpServers: [] });
+      const modelId = pickAgyModel(sess?.models?.availableModels, model, effort);
+      if (model && !modelId) throw failed(`${adapter.label} has no model "${model}" here`, DeviceErrorCode.NOT_FOUND);
+      if (modelId && modelId !== sess?.models?.currentModelId) await proc.rpc.call('session/set_model', { sessionId: sess.sessionId, modelId });
+      return { sessionId: sess.sessionId, modelId: modelId || sess?.models?.currentModelId };
+    })();
+    proc.ready.catch(() => {});
+  }
+
   function closeProc(proc) {
     if (!proc) return;
     try { proc.child?.stdin?.end(); } catch { /* đã đóng */ }
     try { proc.child?.kill(); } catch { /* đã thoát */ }
   }
 
-  function keepWarm(adapter, opts) {
-    const key = `${adapter.id}|${opts.model || ''}|${opts.effort || ''}`;
+  const keyOf = (adapter, opts) => `${adapter.id}|${opts.model || ''}|${opts.effort || ''}`;
+
+  function entryFor(key) {
     let entry = warm.get(key);
     if (!entry) {
       while (warm.size >= MAX_WARM_KEYS) {
@@ -312,6 +327,23 @@ export function createLocalLlm({
       warm.set(key, entry);
     }
     entry.lastUsed = now();
+    return entry;
+  }
+
+  /** ACP xong một lời gọi thành công → phiên mới trên chính tiến trình đó, đưa lên đầu pool (nóng hơn tiến trình mới dựng). */
+  function recycleAcp(proc) {
+    proc.uses = (proc.uses || 0) + 1;
+    const entry = entryFor(keyOf(proc.adapter, proc));
+    if (proc.exited || proc.uses >= ACP_MAX_USES || entry.procs.length >= warmPerKey || warmCount() >= maxWarmProcs) return closeProc(proc);
+    proc.rpc.onNotify = null;
+    proc.rpc.onRequest = null;
+    openAcpSession(proc);
+    entry.procs.unshift(Promise.resolve(proc));
+  }
+
+  function keepWarm(adapter, opts) {
+    const key = keyOf(adapter, opts);
+    const entry = entryFor(key);
     // Đủ số cho loại này, tổng còn chỗ thì mới dựng thêm; loại khác ít dùng nhất nhường chỗ khi tổng đầy.
     while (entry.procs.length < warmPerKey) {
       if (warmCount() >= maxWarmProcs) {
@@ -336,13 +368,14 @@ export function createLocalLlm({
   }
 
   async function take(adapter, opts) {
-    const key = `${adapter.id}|${opts.model || ''}|${opts.effort || ''}`;
+    const key = keyOf(adapter, opts);
     const w = warm.get(key);
     const pending = w?.procs.shift();
     let proc = pending ? await pending.catch(() => null) : null;
     const warmStart = !!proc && !proc.exited;
     if (!warmStart) { closeProc(proc); proc = await startProc(adapter, opts); }
-    setImmediate(() => keepWarm(adapter, opts));
+    // ACP: tiến trình này quay lại pool khi xong (recycleAcp) — bù chỗ lúc đó, không dựng thêm ngay (đầy pool thì nó không quay lại được).
+    if (adapter.kind !== 'acp') setImmediate(() => keepWarm(adapter, opts));
     return { proc, warmStart };
   }
 
@@ -370,12 +403,18 @@ export function createLocalLlm({
       let settled = false;
       let ttft = null;
       const meta = {};
+      let onChildError = null;
+      let onChildExit = null;
       const finish = (err, value) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         ctx.signal?.removeEventListener?.('abort', onAbort);
-        closeProc(proc);
+        if (onChildError) proc.child.off?.('error', onChildError);
+        if (onChildExit) proc.child.off?.('exit', onChildExit);
+        // ACP thành công → dùng lại tiến trình (phiên mới); lỗi / huỷ / hết giờ / định dùng công cụ → đóng (phiên có thể đang dở).
+        if (!err && adapter.kind === 'acp') recycleAcp(proc); else closeProc(proc);
+        if (adapter.kind === 'acp') setImmediate(() => keepWarm(adapter, { model, effort }));
         if (err) reject(err); else resolve(value);
       };
       const st = {
@@ -402,12 +441,16 @@ export function createLocalLlm({
       const onAbort = () => { if (proc.rpc && proc.sessionId) proc.rpc.notify('session/cancel', { sessionId: proc.sessionId }); finish(failed('Cancelled', DeviceErrorCode.CANCELLED)); };
       const timer = setTimeout(() => finish(failed(`Model did not finish in ${timeoutMs} ms`, DeviceErrorCode.CALL_TIMEOUT)), timeoutMs);
       ctx.signal?.addEventListener?.('abort', onAbort, { once: true });
-      proc.child.once('error', (e) => finish(failed(`Could not start ${adapter.label}: ${e.message}`)));
-      proc.child.once('exit', (code) => finish(failed(`${adapter.label} exited (${code}) before answering${proc.stderr ? `: ${proc.stderr.trim().slice(-400)}` : ''}`)));
+      onChildError = (e) => finish(failed(`Could not start ${adapter.label}: ${e.message}`));
+      onChildExit = (code) => finish(failed(`${adapter.label} exited (${code}) before answering${proc.stderr ? `: ${proc.stderr.trim().slice(-400)}` : ''}`));
+      proc.child.once('error', onChildError);
+      proc.child.once('exit', onChildExit);
 
       if (adapter.kind === 'acp') {
         proc.rpc.onNotify = (method, params) => {
           if (method !== 'session/update') return;
+          // Tiến trình dùng lại: thông báo trễ của phiên trước không được lẫn vào lời gọi này.
+          if (params?.sessionId && proc.sessionId && params.sessionId !== proc.sessionId) return;
           const u = params?.update || {};
           if (u.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'text') st.delta(u.content.text);
           if (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') st.tool(u.name || u.title || u.kind || 'tool');

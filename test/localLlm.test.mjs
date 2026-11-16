@@ -189,11 +189,38 @@ test('Antigravity: ACP session opened ahead, model picked by effort, chunks stre
   assert.deepEqual(out.usage, { input_tokens: 50, output_tokens: 2 });
   assert.deepEqual(spawned[0].argv, ['acp', '--disable-telemetry']);
   const first = srv.calls.filter((c) => c.child === spawned[0]);
-  assert.deepEqual(first.map((c) => c.method), ['initialize', 'session/new', 'session/set_model', 'session/prompt']);
+  // Sau lời gọi thành công tiến trình mở sẵn phiên cho lượt kế (dùng lại tiến trình) — 4 lệnh đầu là của lời gọi này.
+  assert.deepEqual(first.slice(0, 4).map((c) => c.method), ['initialize', 'session/new', 'session/set_model', 'session/prompt']);
   assert.deepEqual(first[0].params.clientCapabilities, { fs: { readTextFile: false, writeTextFile: false }, terminal: false });
   assert.deepEqual(first[1].params.mcpServers, []);
   assert.equal(first[2].params.modelId, 'gemini-3.8-flash-medium');
   assert.match(first[3].params.prompt[0].text, /^<rules>/);
+  llm.stopAll();
+});
+
+test('Antigravity: tiến trình dùng lại giữa các lời gọi — initialize một lần, phiên mới mỗi lượt; lời gọi lỗi thì đóng tiến trình', async () => {
+  let fail = false;
+  const srv = acpServer((child, m, reply) => {
+    if (fail) return child.out({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'S1', update: { sessionUpdate: 'tool_call', name: 'read_file' } } });
+    chunk(child, 'ok');
+    setImmediate(() => setImmediate(() => reply({ stopReason: 'end_turn' })));
+  });
+  const { llm, spawned } = make([adapter(ANTIGRAVITY_LLM)], srv.onInput);
+  const a = await llm.complete({ agent: 'antigravity', prompt: 'one', model: 'gemini-3.8-flash', effort: 'low' });
+  await tick(); await tick();
+  const b = await llm.complete({ agent: 'antigravity', prompt: 'two', model: 'gemini-3.8-flash', effort: 'low' });
+  assert.deepEqual([a.text, b.text, b.warm_start], ['ok', 'ok', true]);
+  assert.equal(spawned.length, 1, 'không khởi động agy lần hai');
+  const methods = srv.calls.filter((c) => c.child === spawned[0]).map((c) => c.method);
+  assert.equal(methods.filter((m) => m === 'initialize').length, 1);
+  assert.equal(methods.filter((m) => m === 'session/new').length, 3, 'phiên cho lượt 1, lượt 2 và phiên sẵn cho lượt kế');
+  assert.equal(spawned[0].killed, false);
+
+  fail = true;
+  await tick(); await tick();
+  await assert.rejects(llm.complete({ agent: 'antigravity', prompt: 'three', model: 'gemini-3.8-flash', effort: 'low' }), { code: TOOL_USE_ERROR });
+  await tick();
+  assert.equal(spawned[0].killed, true, 'lời gọi lỗi → đóng tiến trình, không dùng lại');
   llm.stopAll();
 });
 
