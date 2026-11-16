@@ -259,8 +259,9 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
    <Border.RenderTransform><ScaleTransform ScaleX="0.96" ScaleY="0.96"/></Border.RenderTransform>
    <Border.Effect><DropShadowEffect BlurRadius="12" ShadowDepth="1" Direction="270" Opacity="0.10" Color="#6B5CE7"/></Border.Effect>
    <Grid>
-   <StackPanel Margin="12,8,7,7">
-    <ScrollViewer x:Name="ChatScroll" MaxHeight="220" VerticalScrollBarVisibility="Auto" Visibility="Collapsed" Margin="0,3,-4,5">
+   <!-- Lề trên = lề dưới (7) để hàng nhập nằm đúng giữa thẻ; hội thoại bù 1px vào lề trên của ChatScroll. -->
+   <StackPanel Margin="12,7,7,7">
+    <ScrollViewer x:Name="ChatScroll" MaxHeight="220" VerticalScrollBarVisibility="Auto" Visibility="Collapsed" Margin="0,4,-4,5">
      <StackPanel Margin="0,0,10,0">
       <StackPanel x:Name="ChatList"/>
       <!-- Nút trả lời nhanh khi Aivin hỏi lại (thẻ chọn của agent) — askHostSource.mjs dựng theo lệnh ask_choices. -->
@@ -286,10 +287,12 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
       <Path Data="${ICON_CLIP}" Stroke="#A9AEB8" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
             Width="13" Height="13" Stretch="Uniform"/>
      </Button>
+     <!-- Segoe UI chừa chỗ dấu tiếng Việt phía trên dòng nên chữ trông thấp hơn tâm ~2px: đệm dưới 3 / trên 0 nhấc chữ (gõ + gợi ý) lên
+          cho khớp tâm của nút đính kèm / mic. Chữ gõ và chữ gợi ý phải cùng độ lệch dọc để chữ không nhảy khi bắt đầu gõ. -->
      <Grid MinHeight="26">
       <TextBox x:Name="AskBox" BorderThickness="0" Background="Transparent" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap"
-               MaxHeight="60" VerticalScrollBarVisibility="Hidden" CaretBrush="#8B7CF6" MaxLength="2000" Padding="0,1,0,1" VerticalAlignment="Center"/>
-      <TextBlock x:Name="AskHint" IsHitTestVisible="False" FontSize="14" Foreground="#A9AEB8" Margin="2,1,0,0" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+               MaxHeight="60" VerticalScrollBarVisibility="Hidden" CaretBrush="#8B7CF6" MaxLength="2000" Padding="0,0,0,3" VerticalAlignment="Center"/>
+      <TextBlock x:Name="AskHint" IsHitTestVisible="False" FontSize="14" Foreground="#A9AEB8" Margin="2,0,0,3" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
      </Grid>
     </DockPanel>
     <TextBlock x:Name="AskStatus" Visibility="Collapsed" FontSize="13" Foreground="${B.muted}" Margin="0,2,4,1" TextTrimming="CharacterEllipsis"/>
