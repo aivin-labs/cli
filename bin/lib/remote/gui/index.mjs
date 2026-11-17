@@ -419,6 +419,7 @@ function runPowerShellJson(script, signal) {
  */
 export function createGuiController({
   fullAccess = false, host = createWindowsHost(), notify = showOSNotification, say = () => {}, background = true, defaultWindow = () => null, realInputIdleMs = REAL_INPUT_IDLE_MS, realInputWaitMs = REAL_INPUT_WAIT_MS, fetchApps = (signal) => runPowerShellJson('Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress', signal),
+  indicator = null,
 } = {}) {
   let appsCache = null;
   let appsInflight = null;
@@ -770,7 +771,57 @@ export function createGuiController({
     return { opened: app.name, window: win, hint: win ? undefined : 'App started but no new window yet — call gui.windows in a moment' };
   }
 
-  return { windows, observe, find, waitFor, focus, act, readTable, semanticDo, openApp, prewarm: () => listApps(), close: () => host.close() };
+  /**
+   * Lớp phủ "AI đang điều khiển máy" (desktop/agentOverlay.mjs) sáng suốt lúc một công cụ gui chạy — kể cả chỉ đọc màn hình, để người ngồi
+   * máy biết AI đang dùng máy. Lỗi của lớp phủ không bao giờ làm hỏng thao tác.
+   */
+  const watched = (kindOf, fn, appOf = (a) => a?.window) => (args, ctx, env) => {
+    let end = null;
+    try { end = indicator?.begin?.({ kind: typeof kindOf === 'function' ? kindOf(args) : kindOf, app: appOf(args) }); } catch { end = null; }
+    const done = (ok) => { try { end?.(ok); } catch { /* phụ */ } };
+    return Promise.resolve().then(() => fn(args, ctx, env)).then((r) => { done(true); return r; }, (e) => { done(false); throw e; });
+  };
+  const nodeApp = (a) => (a?.node_id ? snapshotWindows.get(String(a.node_id).split('.')[0])?.process : a?.window);
+  return {
+    windows: watched(OverlayKind.LOOK, windows, () => undefined),
+    observe: watched(OverlayKind.LOOK, observe),
+    find: watched(OverlayKind.LOOK, find),
+    waitFor: watched(OverlayKind.LOOK, waitFor),
+    readTable: watched(OverlayKind.LOOK, readTable, nodeApp),
+    focus: watched(OverlayKind.FOCUS, focus),
+    act: watched((a) => overlayKindOfAct(a?.action), act, nodeApp),
+    semanticDo: watched((a) => overlayKindOfDo(a?.do), semanticDo, (a) => a?.within || (String(a?.do) === 'open' ? a?.target : undefined)),
+    openApp: watched(OverlayKind.OPEN, openApp, (a) => a?.name),
+    prewarm: () => listApps(),
+    close: () => host.close(),
+  };
+}
+
+/** Loại việc hiện trên lớp phủ — trùng tên với OverlayActivity của desktop/agentOverlay.mjs. */
+const OverlayKind = Object.freeze({
+  LOOK: 'look', CLICK: 'click', TYPE: 'type', KEY: 'key', SCROLL: 'scroll', SELECT: 'select', DRAG: 'drag', FOCUS: 'focus', OPEN: 'open',
+});
+
+export function overlayKindOfAct(action) {
+  switch (String(action || GuiAction.CLICK)) {
+    case GuiAction.SET_VALUE: case GuiAction.TYPE: return OverlayKind.TYPE;
+    case GuiAction.KEY: return OverlayKind.KEY;
+    case GuiAction.SCROLL: return OverlayKind.SCROLL;
+    case GuiAction.SELECT: return OverlayKind.SELECT;
+    case GuiAction.DRAG: return OverlayKind.DRAG;
+    default: return OverlayKind.CLICK;
+  }
+}
+
+export function overlayKindOfDo(verb) {
+  switch (String(verb || '')) {
+    case 'fill': return OverlayKind.TYPE;
+    case 'select': return OverlayKind.SELECT;
+    case 'key': return OverlayKind.KEY;
+    case 'scroll': return OverlayKind.SCROLL;
+    case 'open': return OverlayKind.OPEN;
+    default: return OverlayKind.CLICK;
+  }
 }
 
 /** Công cụ GUI cho danh mục của Planner. */

@@ -112,6 +112,25 @@ test('act: hành động lạ bị từ chối; báo "AI đang điều khiển" 
   assert.equal(notes.length, 1);
 });
 
+test('lớp phủ: mỗi công cụ gui báo begin/end kèm loại việc + ứng dụng; lỗi của lớp phủ không làm hỏng thao tác', async () => {
+  const host = fakeHost({ observe: { snapshot: 9, window: NOTEPAD, nodes: [], tree_quality: 'good' }, window_info: NOTEPAD, act: {} });
+  const seen = [];
+  const indicator = { begin: (a) => { seen.push({ ...a, ended: null }); const i = seen.length - 1; return (ok) => { seen[i].ended = ok; }; } };
+  const gui = createGuiController({ host, notify: () => {}, indicator });
+  await gui.observe({ window: '0x10' }, {});
+  await gui.act({ action: 'set_value', node_id: '9.2', text: 'x' }, {});
+  await gui.act({ action: 'key', keys: 'enter', window: 'notepad' }, {});
+  await assert.rejects(gui.act({ action: 'format_disk' }, {}), (e) => e.code === 'INVALID_ARGS');
+  assert.deepEqual(seen, [
+    { kind: 'look', app: '0x10', ended: true },
+    { kind: 'type', app: 'Notepad', ended: true },
+    { kind: 'key', app: 'notepad', ended: true },
+    { kind: 'click', app: undefined, ended: false },
+  ]);
+  const broken = createGuiController({ host, notify: () => {}, indicator: { begin: () => { throw new Error('boom'); } } });
+  assert.equal((await broken.observe({}, {})).snapshot, 9);
+});
+
 test('open_app: không mở tệp chạy được; tên trùng nhiều → trả ứng viên', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gui-root-'));
   fs.writeFileSync(path.join(root, 'evil.bat'), 'echo');

@@ -57,6 +57,7 @@ import { castViewerInfo, castViewerLabel, createCastTrust, createDeviceProver } 
 import { createCastTouchViewers, shouldDrawCursorInFrame } from './desktop/castTouchViewers.mjs';
 import { prepareHumanIdle, readHumanIdleMs } from './desktop/humanIdle.mjs';
 import { prepareIdentify, showIdentify } from './desktop/identifyOverlay.mjs';
+import { createAgentOverlay, prepareAgentOverlay } from './desktop/agentOverlay.mjs';
 import { findWindowTitle, prepareWindowProbe } from './desktop/windowProbe.mjs';
 import { isOwnAddress } from './desktop/desktopWebRtc.mjs';
 import { createConfirmBarrier } from './confirmBarrier.mjs';
@@ -323,8 +324,10 @@ export async function startRemoteClient(options = {}) {
   const guiHost = guiProfile ? createWindowsHost() : null;
   const officeHost = officeApps.length ? createWindowsHost() : null;
   // Không nói cửa sổ mà focus đang ở linh vật (chủ máy vừa gõ vào ô hỏi) → cửa sổ họ đang dùng lúc hỏi (mascot/ask.mjs).
+  // Viền màu quanh màn hình + nhãn "AIVIN đang bấm · Excel" khi AI dùng máy (desktop/agentOverlay.mjs).
+  const agentOverlay = guiProfile ? createAgentOverlay({ lang: () => mascotLang(process.env, process.platform, creds?.lang) }) : null;
   const gui = guiProfile ? createGuiController({
-    fullAccess, host: guiHost, say: (m) => say(chalk.magenta(m)),
+    fullAccess, host: guiHost, say: (m) => say(chalk.magenta(m)), indicator: agentOverlay,
     defaultWindow: () => (mascot.pid() ? { avoid_pid: mascot.pid(), fallback: mascotChat?.userWindow()?.window } : null),
   }) : null;
   // Kho hoàn tác (xoá → thùng rác của kho, ghi đè → giữ bản cũ). Máy tính tổ chức: công cụ tệp chạy dưới tài khoản thành viên, không có kho.
@@ -789,6 +792,7 @@ export async function startRemoteClient(options = {}) {
       cancelGating([...gating.keys()]);
       browserTunnels?.closeAll();
       guiHost?.close();
+      agentOverlay?.close();
       officeHost?.close();
       processes.stopAll();
       activeAgentRunner()?.stopAll('Remote control was paused on this device');
@@ -863,6 +867,7 @@ export async function startRemoteClient(options = {}) {
     void meetings?.shutdown();
     gui?.close();
     guiHost?.close();
+    agentOverlay?.close();
     officeHost?.close();
     processes.stopAll();
     // Job của agent lập trình: dừng + ghi hồ sơ (`stopped`) — lần chạy sau `agent.status` vẫn đọc được, nói tiếp bằng session_id.
@@ -1203,7 +1208,7 @@ export async function startRemoteClient(options = {}) {
   announceProfile = () => (socket.connected ? announce() : undefined);
   socket.on('connect', guarded('connect', async () => {
     // Dựng sẵn exe đọc thời gian rảnh tay + exe hiện tên máy (lần đầu ~1–2 s csc) để lần máy chủ hỏi đầu tiên không quá hạn.
-    void prepareHumanIdle().then(() => prepareIdentify()).then(() => prepareWindowProbe());
+    void prepareHumanIdle().then(() => prepareIdentify()).then(() => prepareWindowProbe()).then(() => (guiProfile ? prepareAgentOverlay() : null));
     confirmServerCredentialMigration(serverUrl);
     await announce();
     flushUnsent();
