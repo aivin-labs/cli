@@ -304,11 +304,13 @@ export async function pickWorkspaceAndProject(options) {
 //
 // `POST /project/:workspaceId/project/edit` is a real upsert on the backend: omit `id` to create a
 // new project, include it to update the matching one - there's no separate create endpoint.
+// `workspace_id` must also be in the body: the backend's ValidationPipe checks `ProjectRequest` (workspace_id required) before the
+// handler copies it from the URL, so a body without it is rejected with "workspace_id should not be empty" (found 17/11/2026).
 
 export async function upsertProject(serverUrl, authHeaders, { workspaceId, id, name }) {
   let response;
   try {
-    response = await axios.post(`${serverUrl}/project/${workspaceId}/project/edit`, { id, name }, authHeaders);
+    response = await axios.post(`${serverUrl}/project/${workspaceId}/project/edit`, { workspace_id: workspaceId, id, name }, authHeaders);
   } catch (error) {
     const message = error.response?.data?.message || error.message || error.code || 'Unknown error';
     throw new Error(`Failed to save project: ${message}`, { cause: error });
