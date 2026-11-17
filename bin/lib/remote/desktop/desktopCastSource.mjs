@@ -1658,22 +1658,31 @@ namespace AivinDesktopCast {
 
     static int focusProbeSeq = 0;
 
+    /** Lần dò đầu sau cú nhấp / khoảng cách giữa các lần dò / hạn chót: quá hạn vẫn chưa thấy ô nhập mới báo "không phải". */
+    const int FocusProbeFirstMs = 40;
+    const int FocusProbeStepMs = 60;
+    const int FocusProbeDeadlineMs = 700;
+
     /**
-     * Sau cú nhấp trái của người xem: chờ ứng dụng nhận tiêu điểm rồi báo ô đang chọn có phải ô nhập chữ (có caret) không —
-     * trình duyệt trên điện thoại dựa vào đó tự mở bàn phím ảo. Kiểm sớm ở 40 ms để mở bàn phím nhanh, nếu chưa thấy mới chờ thêm.
+     * Sau cú nhấp trái của người xem: chờ ứng dụng nhận tiêu điểm rồi báo ô đang chọn có phải ô nhập chữ không — trình duyệt
+     * trên điện thoại dựa vào đó tự mở bàn phím ảo. Dò lặp tới hạn chót, thấy ô nhập là báo ngay: ứng dụng chậm / trang đặt
+     * tiêu điểm bằng JS / máy đang bận nhận tiêu điểm sau hơn 100 ms, và Chromium chỉ dựng cây trợ năng ở lần hỏi đầu tiên
+     * (lần đó chỉ thấy khung cửa sổ) — trước 17/11/2026 dò 2 lần trong 130 ms nên những ca này báo nhầm "không phải ô nhập".
      */
     static void ProbeInputFocus() {
       int seq = Interlocked.Increment(ref focusProbeSeq);
       ThreadPool.QueueUserWorkItem(_ => {
         try {
-          Thread.Sleep(40);
-          if (seq != focusProbeSeq) return;
-          bool editable = HasSystemCaret();
-          if (!editable) {
-            Thread.Sleep(90);
+          var waited = System.Diagnostics.Stopwatch.StartNew();
+          Thread.Sleep(FocusProbeFirstMs);
+          bool editable;
+          while (true) {
             if (seq != focusProbeSeq) return;
-            editable = HasSystemCaret() || FocusedIsTextInput();
+            editable = FocusIsEditable();
+            if (editable || waited.ElapsedMilliseconds + FocusProbeStepMs > FocusProbeDeadlineMs) break;
+            Thread.Sleep(FocusProbeStepMs);
           }
+          if (seq != focusProbeSeq) return;
           var msg = new Dictionary<string, object>();
           msg["t"] = "input_focus";
           msg["editable"] = editable;
@@ -1691,20 +1700,50 @@ namespace AivinDesktopCast {
       return tid != 0 && Native.GetGUIThreadInfo(tid, ref info) && info.hwndCaret != IntPtr.Zero;
     }
 
-    /** Chromium / Edge / Electron chỉ tạo caret hệ thống khi bật trợ năng → hỏi UI Automation: ô Edit, hoặc ô có giá trị sửa được. */
+    /** Ô đang có tiêu điểm nhận chữ gõ vào không: caret hệ thống (ứng dụng Win32 cổ điển), không thì hỏi UI Automation. */
+    public static bool FocusIsEditable() {
+      return HasSystemCaret() || FocusedIsTextInput();
+    }
+
+    /** Chromium / Edge / Electron chỉ tạo caret hệ thống khi bật trợ năng, Notepad Win 11 có caret lúc có lúc không → hỏi UI Automation. */
     static bool FocusedIsTextInput() {
       try {
         var fe = AutomationElement.FocusedElement;
-        if (fe == null) return false;
-        var ct = fe.Current.ControlType;
-        if (ct == ControlType.Edit) return true;
-        if (ct == ControlType.ComboBox || ct == ControlType.Document) {
-          object vp;
-          if (fe.TryGetCurrentPattern(ValuePattern.Pattern, out vp)) return !((ValuePattern)vp).Current.IsReadOnly;
-        }
+        return fe != null && IsTextInput(fe);
       } catch {
+        return false;
       }
-      return false;
+    }
+
+    /**
+     * Phân loại theo đo 17/11/2026 (Chrome, Notepad Win 11, Windows Terminal):
+     * - Edit (input chữ / mật khẩu / tìm kiếm, textarea, contenteditable có role=textbox): nhận chữ, trừ khi ValuePattern báo chỉ đọc.
+     * - Document: khung trang web cũng là Document (ValuePattern chỉ đọc) → chỉ tính khi ValuePattern sửa được (Notepad); không có
+     *   ValuePattern (Word…) thì hỏi chỗ con trỏ chữ có chỉ đọc không. Không hỏi cả văn bản: tài liệu dài thì chậm, trang web báo "lẫn".
+     * - Loại khác có TextPattern — contenteditable không role (Group: ô soạn tin của nhiều trang chat), input number (Spinner),
+     *   Windows Terminal (Text): hỏi vùng chữ của chính ô đó có chỉ đọc không.
+     * - Không có TextPattern (select = ComboBox, nút, liên kết, div có tabindex) → không phải ô nhập.
+     */
+    public static bool IsTextInput(AutomationElement fe) {
+      var ct = fe.Current.ControlType;
+      object vp;
+      bool hasValue = fe.TryGetCurrentPattern(ValuePattern.Pattern, out vp);
+      if (ct == ControlType.Edit) return !(hasValue && ((ValuePattern)vp).Current.IsReadOnly);
+      object tp;
+      if (!fe.TryGetCurrentPattern(TextPattern.Pattern, out tp)) return false;
+      var text = (TextPattern)tp;
+      if (ct == ControlType.Document) {
+        if (hasValue) return !((ValuePattern)vp).Current.IsReadOnly;
+        var selection = text.GetSelection();
+        return selection.Length > 0 && IsWritableRange(selection[0]);
+      }
+      return IsWritableRange(text.DocumentRange);
+    }
+
+    /** Thuộc tính IsReadOnly của một vùng chữ: chỉ tin khi trả đúng kiểu bool (vùng lẫn chỗ sửa được / không hỗ trợ thì coi là không). */
+    static bool IsWritableRange(System.Windows.Automation.Text.TextPatternRange range) {
+      object readOnly = range.GetAttributeValue(TextPattern.IsReadOnlyAttribute);
+      return readOnly is bool && !(bool)readOnly;
     }
 
     static void ClickIfAsked(Dictionary<string, object> cmd, int x, int y) {

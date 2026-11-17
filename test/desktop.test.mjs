@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
 const {
@@ -277,6 +277,55 @@ test('vẽ con trỏ vào khung tại chỗ: không chép nguyên khung, gửi x
     ].join('; ');
     const out = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' }).trim().split(/\r?\n/).pop();
     assert.equal(out, 'True');
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+});
+
+test('dò ô nhập sau cú nhấp: dò lặp tới hạn chót, nhận ô theo UI Automation (17/11/2026)', { skip: process.platform !== 'win32', timeout: 120_000 }, () => {
+  // Trước đây dò 2 lần trong 130 ms rồi chốt "không phải ô nhập" — ứng dụng nhận tiêu điểm chậm / Chromium lần hỏi đầu thì trượt.
+  assert.match(DESKTOP_CAST_CSHARP, /editable \|\| waited\.ElapsedMilliseconds \+ FocusProbeStepMs > FocusProbeDeadlineMs/);
+  assert.ok(DESKTOP_CAST_CSHARP.includes('TextPattern.IsReadOnlyAttribute'), 'ô contenteditable (Group) / Spinner / Terminal nhận theo vùng chữ sửa được');
+  const tmp = path.join(os.tmpdir(), `aivin-cast-focus-${process.pid}.cs`);
+  fs.writeFileSync(tmp, DESKTOP_CAST_CSHARP);
+  try {
+    // Cửa sổ thử là WPF (có sẵn trợ năng UI Automation đầy đủ), chạy ở tiến trình riêng: UI Automation hỏi cửa sổ cùng luồng thì
+    // chỉ thấy Pane; ô WinForms (Win32 Edit) cũng chỉ hiện Pane — ứng dụng Win32 cổ điển nhận bằng caret hệ thống.
+    const handles = path.join(os.tmpdir(), `aivin-cast-focus-${process.pid}.txt`);
+    const host = [
+      `Add-Type -AssemblyName PresentationFramework`,
+      `$w = New-Object System.Windows.Window; $w.ShowInTaskbar = $false; $w.ShowActivated = $false; $w.WindowStartupLocation = 'Manual'; $w.Left = -3000; $w.Top = -3000; $w.Width = 300; $w.Height = 300`,
+      `$sp = New-Object System.Windows.Controls.StackPanel; $w.Content = $sp`,
+      `function Add($c, $id) { [System.Windows.Automation.AutomationProperties]::SetAutomationId($c, $id); [void]$sp.Children.Add($c) }`,
+      `Add (New-Object System.Windows.Controls.TextBox) 'tb'`,
+      `$ro = New-Object System.Windows.Controls.TextBox; $ro.IsReadOnly = $true; Add $ro 'ro'`,
+      `Add (New-Object System.Windows.Controls.Button) 'bt'`,
+      `$cb = New-Object System.Windows.Controls.ComboBox; [void]$cb.Items.Add('a'); Add $cb 'cb'`,
+      `Add (New-Object System.Windows.Controls.RichTextBox) 'rt'`,
+      `$rr = New-Object System.Windows.Controls.RichTextBox; $rr.IsReadOnly = $true; Add $rr 'rr'`,
+      `$w.Add_ContentRendered({ (New-Object System.Windows.Interop.WindowInteropHelper($w)).Handle.ToInt64() | Set-Content -LiteralPath '${handles}' })`,
+      `$t = New-Object System.Windows.Threading.DispatcherTimer; $t.Interval = [TimeSpan]::FromSeconds(60); $t.Add_Tick({ $w.Close() }); $t.Start()`,
+      `[void]$w.ShowDialog()`,
+    ].join('; ');
+    const child = spawn('powershell.exe', ['-NoProfile', '-STA', '-Command', host], { stdio: 'ignore' });
+    const script = [
+      `Add-Type -Path '${tmp}' -ReferencedAssemblies 'UIAutomationClient','UIAutomationTypes','WindowsBase','System.Drawing','System.Windows.Forms','System.Web.Extensions','System.Core'`,
+      `$deadline = (Get-Date).AddSeconds(45); while (-not (Test-Path -LiteralPath '${handles}') -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }`,
+      `Start-Sleep -Milliseconds 300`,
+      `$root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr][long](Get-Content -LiteralPath '${handles}'))`,
+      `$r = 'tb','ro','bt','cb','rt','rr' | ForEach-Object { $c = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $_); [AivinDesktopCast.CastHost]::IsTextInput($root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $c)) }`,
+      `$r -join ','`,
+    ].join('; ');
+    let out;
+    try {
+      out = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' }).trim();
+    } finally {
+      child.kill();
+      fs.rmSync(handles, { force: true });
+    }
+    // Ô chữ: có; ô chỉ đọc: không; nút: không; hộp chọn: không (trước đây bị nhận nhầm là ô nhập); ô soạn thảo (Document,
+    // không có ValuePattern): có; ô soạn thảo chỉ đọc: không.
+    assert.equal(out, 'True,False,False,False,True,False');
   } finally {
     fs.rmSync(tmp, { force: true });
   }
