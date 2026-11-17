@@ -27,6 +27,18 @@ RUN userdel -r node \
  && rm -rf /var/tmp && ln -s /tmp /var/tmp \
  && chmod 755 /run/lock
 
+# Agent làm "mô hình trên máy" cho từng thành viên (17/11/2026, bin/lib/remote/localLlmMembers.mjs): cài chung một bản (root, /usr/local),
+# mỗi thành viên đăng nhập tài khoản Claude / ChatGPT CỦA CHÍNH HỌ từ Aivin — tệp đăng nhập nằm trong /home/<vùng>, không ai dùng chung
+# tài khoản / hạn mức của ai. Ghim bản đã đo đăng nhập không màn hình (claude auth login, codex login --device-auth); nâng bản = build lại
+# image. Thành viên không ghi được /usr/local → tắt tự cập nhật. /var/lib/aivin-llm: thư mục làm việc rỗng của agent (root, 0755).
+ARG CLAUDE_CODE_VERSION=2.1.326
+ARG CODEX_VERSION=0.169.0
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
+ && npm cache clean --force \
+ && mkdir -p /var/lib/aivin-llm && chmod 755 /var/lib/aivin-llm \
+ && claude --version && codex --version
+ENV DISABLE_AUTOUPDATER=1
+
 WORKDIR /opt/aivin-cli
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force

@@ -249,7 +249,65 @@ export const EMOJI_CS = String.raw`
       return tag ?? block.Text;
     }
 
+    static readonly System.Text.RegularExpressions.Regex UrlPattern = new System.Text.RegularExpressions.Regex(@"https?://[^\s<>""']+", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    static readonly Brush LinkBrush = MakeLinkBrush();
+    static Brush MakeLinkBrush() { var b = new SolidColorBrush(Color.FromRgb(0x16, 0x5D, 0xFF)); b.Freeze(); return b; }
+
+    /**
+     * Nhu Set, them: dia chi http(s) trong chu thanh link (xanh, gach duoi, tay tro). Bam link noi su kien Hyperlink.RequestNavigate len
+     * TextBlock - host bat su kien do va mo trinh duyet (qua OpenWebUrl, chi http/https). Dau cau dinh cuoi dia chi (. , ) ...) khong tinh vao link.
+     */
+    public static void SetLinked(System.Windows.Controls.TextBlock block, string text) {
+      string s = text ?? "";
+      var found = UrlPattern.Matches(s);
+      if (found.Count == 0) { Set(block, s); return; }
+      block.Tag = s;
+      try {
+        bool emoji = MayHaveEmoji(s);
+        if (emoji && !loaded) Load();
+        emoji = emoji && face != null;
+        var parts = new List<System.Windows.Documents.Inline>(); int at = 0;
+        foreach (System.Text.RegularExpressions.Match m in found) {
+          string url = m.Value.TrimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\'');
+          Uri uri;
+          if (url.Length < 9 || !Uri.TryCreate(url, UriKind.Absolute, out uri)) continue;
+          if (m.Index > at) AddText(parts, s.Substring(at, m.Index - at), block.FontSize, emoji);
+          var link = new System.Windows.Documents.Hyperlink(new System.Windows.Documents.Run(LinkLabel(url))) { NavigateUri = uri, Foreground = LinkBrush, ToolTip = url };
+          link.TextDecorations = System.Windows.TextDecorations.Underline;
+          parts.Add(link); at = m.Index + url.Length;
+        }
+        if (at < s.Length) AddText(parts, s.Substring(at), block.FontSize, emoji);
+        block.Inlines.Clear();
+        block.Inlines.AddRange(parts);
+      } catch { block.Text = s; }
+    }
+
+    /** Chu hien cua link: bo "https://" / "www." / "/" cuoi; dai qua thi cat (dia chi day du o ToolTip, bam van mo dung dia chi). */
+    public static string LinkLabel(string url) {
+      string s = url;
+      int scheme = s.IndexOf("://", StringComparison.Ordinal);
+      if (scheme > 0) s = s.Substring(scheme + 3);
+      if (s.StartsWith("www.", StringComparison.OrdinalIgnoreCase)) s = s.Substring(4);
+      if (s.EndsWith("/", StringComparison.Ordinal)) s = s.Substring(0, s.Length - 1);
+      if (s.Length > LinkMax) s = s.Substring(0, LinkMax - 1) + (char)0x2026;
+      return s.Length > 0 ? s : url;
+    }
+    const int LinkMax = 42;
+
+    static void AddText(List<System.Windows.Documents.Inline> parts, string s, double fontSize, bool emoji) {
+      if (!emoji || !AppendPieces(parts, s, fontSize)) parts.Add(new System.Windows.Documents.Run(s));
+    }
+
     static bool SetInlines(System.Windows.Controls.TextBlock block, string s) {
+      var parts = new List<System.Windows.Documents.Inline>();
+      if (!AppendPieces(parts, s, block.FontSize)) return false;
+      block.Inlines.Clear();
+      block.Inlines.AddRange(parts);
+      return true;
+    }
+
+    /** Chu + hinh emoji cua s vao parts; false (parts khong doi) khi s khong co emoji nao ve duoc. */
+    static bool AppendPieces(List<System.Windows.Documents.Inline> outParts, string s, double fontSize) {
       var parts = new List<System.Windows.Documents.Inline>(); var plain = new StringBuilder(); bool any = false;
       for (int i = 0; i < s.Length; ) {
         if (char.IsHighSurrogate(s[i]) && !(i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) || char.IsLowSurrogate(s[i])) { plain.Append(s[i]); i++; continue; }
@@ -261,12 +319,11 @@ export const EMOJI_CS = String.raw`
         }
         any = true;
         if (plain.Length > 0) { parts.Add(new System.Windows.Documents.Run(plain.ToString())); plain.Clear(); }
-        foreach (ushort g in run) if (baseFirst.ContainsKey(g)) parts.Add(PictureInline(g, block.FontSize));
+        foreach (ushort g in run) if (baseFirst.ContainsKey(g)) parts.Add(PictureInline(g, fontSize));
       }
       if (!any) return false;
       if (plain.Length > 0) parts.Add(new System.Windows.Documents.Run(plain.ToString()));
-      block.Inlines.Clear();
-      block.Inlines.AddRange(parts);
+      outParts.AddRange(parts);
       return true;
     }
   }

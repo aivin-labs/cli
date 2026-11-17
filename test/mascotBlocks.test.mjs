@@ -425,7 +425,8 @@ test('biểu mẫu: có/không thành nút; giá trị điền sẵn thành nút
   assert.deepEqual(lastChoices(), [['true', 'Có'], ['false', 'Không']]);
   await chat.choose('false');
   assert.deepEqual(lastChoices(), [['2', 'Giữ: 2']]);
-  assert.ok(assistantRows(sent).some((r) => /\(vd 3\)/.test(r.text)), 'hiện gợi ý');
+  assert.equal(sent.filter((c) => c.t === AskCommand.CHOICES).at(-1).hint, 'vd 3', 'gợi ý nhập thành gợi ý mờ của ô nhập');
+  assert.ok(!assistantRows(sent).some((r) => /vd 3/.test(r.text)), 'gợi ý không nằm trong bong bóng');
   await chat.reply('7');
   assert.deepEqual(lastChoices(), [['a', 'A']]);
   await chat.reply('gói riêng');

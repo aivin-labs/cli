@@ -32,7 +32,8 @@ import { showOSNotification } from './notify.mjs';
 import { createMeetingManager, watchMeetingRequests } from './meeting/index.mjs';
 import { createMediaHost, mediaSupported } from './meeting/recorder.mjs';
 import { createClipboard } from './clipboard.mjs';
-import { activeAgentRunner, activeLocalLlm, buildTools, toolMap } from './toolHandlers.mjs';
+import { activeAgentRunner, activeLlmLogin, activeLocalLlm, buildTools, toolMap } from './toolHandlers.mjs';
+import { createLocalLlm } from './localLlm.mjs';
 import { localLlmAccounts } from './localLlmAccounts.mjs';
 import { createBrowserTunnels, detectLocalBrowser } from './browserTunnel.mjs';
 import { createGuiController, detectGui } from './gui/index.mjs';
@@ -401,7 +402,9 @@ export async function startRemoteClient(options = {}) {
       return ack?.ok ? { ok: true } : { ok: false, error: ack?.error || 'failed' };
     },
   }) : null;
-  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: officeHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer, meetings, media, clipboard: multiUser ? null : createClipboard() };
+  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: officeHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer, meetings, media, clipboard: multiUser ? null : createClipboard(),
+    // Máy tính tổ chức: agent làm mô hình chạy dưới tài khoản từng thành viên, bằng đăng nhập của chính họ (localLlmMembers.mjs).
+    ...(multiUser ? { localLlm: createLocalLlm({ memberMode: true }) } : {}) };
   const host = multiUser ? createMultiUserHost({ baseEnv: env, say: (m) => say(chalk.gray(m)) }) : null;
   host?.start();
   const tools = buildTools(env);
@@ -412,8 +415,10 @@ export async function startRemoteClient(options = {}) {
     // `accounts`: băm tài khoản từng agent — BE tính hạn mức theo tài khoản + nhóm model (localLlmAccounts.mjs).
     if (agents.length) {
       const ids = agents.map((a) => a.id);
-      const accounts = localLlmAccounts(ids);
-      profile.local_llm = { provider: ids[0], agents: ids, ...(accounts ? { accounts } : {}) };
+      // Máy tính tổ chức: mỗi thành viên một tài khoản agent riêng → không có vân tay chung của máy; `per_member` = BE tính đăng nhập +
+      // hạn mức theo từng thành viên.
+      const accounts = multiUser ? undefined : localLlmAccounts(ids);
+      profile.local_llm = { provider: ids[0], agents: ids, ...(accounts ? { accounts } : {}), ...(multiUser ? { per_member: true } : {}) };
     }
   }
   // Công cụ chủ máy tắt (`aivin remote policy deny`) không vào danh mục — Planner không lập kế hoạch với nó (gọi tới vẫn bị chặn ở sàn luật).
@@ -879,6 +884,7 @@ export async function startRemoteClient(options = {}) {
     // Job của agent lập trình: dừng + ghi hồ sơ (`stopped`) — lần chạy sau `agent.status` vẫn đọc được, nói tiếp bằng session_id.
     activeAgentRunner()?.stopAll();
     activeLocalLlm()?.stopAll();
+    activeLlmLogin()?.closeAll();
     keepAwake.close();
     castAwake.close();
     watches?.closeAll();

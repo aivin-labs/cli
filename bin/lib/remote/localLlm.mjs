@@ -5,6 +5,7 @@ import { execFile, spawn } from 'child_process';
 import { DeviceErrorCode, REMOTE_CONFIG_DIR, ToolGroup } from './constants.mjs';
 import { DeviceToolError, agentEnv } from './sandbox.mjs';
 import { CLAUDE_ADAPTER, findAgentBinary } from './codingAgents.mjs';
+import { MEMBER_LLM_AGENTS, MEMBER_LLM_DIR, createSignInChecker, memberSpawnArgs } from './localLlmMembers.mjs';
 
 /**
  * Mô hình trên máy cho BE (16/11/2026, bản thử) — BE gọi `llm.complete` như gọi một LLM: chỉ dẫn + lịch sử → chữ trả lời. Chạy bằng agent
@@ -43,6 +44,17 @@ const ACP_MAX_USES = 40;
 /** Mã lỗi riêng: agent định dùng công cụ — câu trả lời bị bỏ. */
 export const TOOL_USE_ERROR = 'LOCAL_LLM_TOOL_USE';
 export const QUOTA_ERROR = 'LOCAL_LLM_QUOTA';
+/** Agent chưa đăng nhập / phiên đăng nhập hết hạn (máy tính tổ chức: thành viên chưa đăng nhập agent của mình). BE chạy cloud. */
+export const NOT_SIGNED_IN_ERROR = 'LOCAL_LLM_NOT_SIGNED_IN';
+const AUTH_ERROR_RE = /please run \/login|not (?:logged|signed) in|invalid api key|oauth token (?:has )?expired|token (?:has )?(?:expired|been revoked)|authentication_error|401 unauthorized|refresh token/i;
+
+/** Mã lỗi theo câu báo của agent: chưa đăng nhập / hết hạn mức / lỗi thường (undefined). */
+export function agentErrorCode(message) {
+  const text = String(message || '');
+  if (AUTH_ERROR_RE.test(text)) return NOT_SIGNED_IN_ERROR;
+  if (/limit|quota/i.test(text)) return QUOTA_ERROR;
+  return undefined;
+}
 const BASE_SYSTEM = 'You are a language model answering requests from the Aivin server through an API. You have no tools and must not call any. Follow the instructions inside each request exactly; when it asks for JSON, reply with that JSON only, no prose and no code fence.';
 
 const invalid = (msg) => new DeviceToolError(DeviceErrorCode.INVALID_ARGS, msg);
@@ -147,7 +159,7 @@ export const CLAUDE_LLM = Object.freeze({
       return;
     }
     if (m.type === 'result') {
-      if (m.is_error) return st.fail(failed(String(m.result || m.subtype || 'Model error').slice(0, 500), /limit|quota/i.test(String(m.result)) ? QUOTA_ERROR : undefined));
+      if (m.is_error) return st.fail(failed(String(m.result || m.subtype || 'Model error').slice(0, 500), agentErrorCode(m.result)));
       if (typeof m.result === 'string') st.final(m.result);
       st.done();
     }
@@ -196,7 +208,7 @@ export const CODEX_LLM = Object.freeze({
     }
     if (m.type === 'turn.failed' || m.type === 'error') {
       const msg = String(m.error?.message || m.message || 'Codex error');
-      st.fail(failed(msg.slice(0, 500), /limit|quota/i.test(msg) ? QUOTA_ERROR : undefined));
+      st.fail(failed(msg.slice(0, 500), agentErrorCode(msg)));
     }
   },
 });
@@ -235,7 +247,10 @@ const AGY_QUOTA_RE = /^\s*⚠?\s*(individual )?quota reached/i;
 export function createLocalLlm({
   adapters = DEFAULT_LLM_ADAPTERS, spawnImpl = spawn, dir = LLM_DIR, now = Date.now, idleMs = WARM_IDLE_MS, version = versionOf,
   warmPerKey = WARM_PER_KEY, maxWarmProcs = MAX_WARM_PROCS,
+  // Máy tính tổ chức: lời gọi nào cũng phải mang tài khoản thành viên (`ctx.runAs`) — agent chạy dưới tài khoản đó, không bao giờ bằng root.
+  memberMode = false, memberDir = MEMBER_LLM_DIR, signIn: signInOverride,
 } = {}) {
+  if (memberMode) adapters = adapters.filter((a) => MEMBER_LLM_AGENTS.includes(a.id));
   const found = new Map();
   const probes = new Map();
   const versions = new Map();
@@ -260,6 +275,20 @@ export function createLocalLlm({
   for (const a of installed()) {
     Promise.resolve(binOf(a).version || version(binOf(a).bin)).then((v) => versions.set(a.id, v || null)).catch(() => {});
   }
+  const signIn = memberMode ? (signInOverride || createSignInChecker({ binOf, dir: memberDir })) : null;
+  /** Tài khoản thành viên của lời gọi; chế độ máy tổ chức mà thiếu → từ chối (không chạy agent bằng root). */
+  const accountOf = (ctx) => {
+    const account = ctx?.runAs || null;
+    if (memberMode && !account) throw invalid('This shared computer runs models only for a member — the call has no member');
+    return memberMode ? account : null;
+  };
+  /** Máy tổ chức: thành viên chưa đăng nhập agent → lỗi ngay, không khởi động agent. */
+  async function assertSignedIn(adapter, account) {
+    if (!account || !signIn) return;
+    if (!(await signIn.status(adapter, account))) {
+      throw failed(`${adapter.label} is not signed in for this member on this shared computer — sign in from Aivin first`, NOT_SIGNED_IN_ERROR);
+    }
+  }
 
   /** key → { procs: Promise<proc>[], lastUsed } — các tiến trình đã khởi động, chưa nhận lời gọi nào. */
   const warm = new Map();
@@ -267,12 +296,17 @@ export function createLocalLlm({
   let sweeper = null;
 
   // --- Một tiến trình. stream / stdin: chỉ là child. acp: child + phiên đã mở + model đã chọn (`ready`).
-  function startProc(adapter, { model, effort }) {
-    fs.mkdirSync(dir, { recursive: true });
+  function startProc(adapter, { model, effort, account = null }) {
+    if (!account) fs.mkdirSync(dir, { recursive: true });
     const bin = binOf(adapter).bin;
-    const proc = { adapter, model, effort, child: null, ready: null, rpc: null, exited: false };
+    const proc = { adapter, model, effort, account, child: null, ready: null, rpc: null, exited: false };
+    const cwd = account ? memberDir : dir;
     const launch = (argv) => {
-      const child = spawnImpl(bin, argv, { cwd: dir, env: agentEnv(process.env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      // Thành viên máy tổ chức: chạy dưới tài khoản Linux của họ (HOME riêng → đăng nhập agent của chính họ), có trần số tiến trình.
+      const [cmd, args, opts] = account
+        ? memberSpawnArgs(account, bin, argv, { dir: memberDir })
+        : [bin, argv, { cwd: dir, env: agentEnv(process.env), windowsHide: true }];
+      const child = spawnImpl(cmd, args, { ...opts, stdio: ['pipe', 'pipe', 'pipe'] });
       child.on('error', () => { proc.exited = true; });
       child.once('exit', () => { proc.exited = true; });
       child.stderr?.on('data', (d) => { proc.stderr = ((proc.stderr || '') + d).slice(-4000); });
@@ -287,7 +321,7 @@ export function createLocalLlm({
       return Promise.resolve(proc);
     }
     return probeOf(adapter).then((probe) => {
-      proc.child = launch(adapter.args({ model, effort, cwd: dir, probe }));
+      proc.child = launch(adapter.args({ model, effort, cwd, probe }));
       return proc;
     });
   }
@@ -299,7 +333,7 @@ export function createLocalLlm({
     proc.modelId = null;
     proc.ready = (async () => {
       await proc.initialized;
-      const sess = await proc.rpc.call('session/new', { cwd: dir, mcpServers: [] });
+      const sess = await proc.rpc.call('session/new', { cwd: proc.account ? memberDir : dir, mcpServers: [] });
       const modelId = pickAgyModel(sess?.models?.availableModels, model, effort);
       if (model && !modelId) throw failed(`${adapter.label} has no model "${model}" here`, DeviceErrorCode.NOT_FOUND);
       if (modelId && modelId !== sess?.models?.currentModelId) await proc.rpc.call('session/set_model', { sessionId: sess.sessionId, modelId });
@@ -314,7 +348,8 @@ export function createLocalLlm({
     try { proc.child?.kill(); } catch { /* đã thoát */ }
   }
 
-  const keyOf = (adapter, opts) => `${adapter.id}|${opts.model || ''}|${opts.effort || ''}`;
+  // Máy tổ chức: tiến trình giữ sẵn của thành viên nào chỉ phục vụ thành viên đó (đã đăng nhập bằng tài khoản của họ).
+  const keyOf = (adapter, opts) => `${opts.account?.name ? `${opts.account.name}|` : ''}${adapter.id}|${opts.model || ''}|${opts.effort || ''}`;
 
   function entryFor(key) {
     let entry = warm.get(key);
@@ -390,12 +425,14 @@ export function createLocalLlm({
 
   async function complete(args = {}, ctx = {}) {
     const { adapter, model, effort } = validate(args);
+    const account = accountOf(ctx);
+    await assertSignedIn(adapter, account);
     const content = renderRequest(args, { withBase: adapter.kind !== 'stream' });
     if (content.length > MAX_INPUT_CHARS) throw invalid(`Request is too long (${content.length} chars, max ${MAX_INPUT_CHARS})`);
     const startedAt = now();
     const timeoutMs = Math.min(Number(args.timeout_ms) || ctx.timeoutMs || DEFAULT_TIMEOUT_MS, 10 * 60_000);
     if (ctx.signal?.aborted) throw failed('Cancelled', DeviceErrorCode.CANCELLED);
-    const { proc, warmStart } = await take(adapter, { model, effort });
+    const { proc, warmStart } = await take(adapter, { model, effort, account });
 
     return new Promise((resolve, reject) => {
       let text = '';
@@ -414,7 +451,9 @@ export function createLocalLlm({
         if (onChildExit) proc.child.off?.('exit', onChildExit);
         // ACP thành công → dùng lại tiến trình (phiên mới); lỗi / huỷ / hết giờ / định dùng công cụ → đóng (phiên có thể đang dở).
         if (!err && adapter.kind === 'acp') recycleAcp(proc); else closeProc(proc);
-        if (adapter.kind === 'acp') setImmediate(() => keepWarm(adapter, { model, effort }));
+        if (adapter.kind === 'acp') setImmediate(() => keepWarm(adapter, { model, effort, account }));
+        // Agent báo chưa đăng nhập / hết phiên → lần sau hỏi lại trạng thái đăng nhập ngay (không tin kết quả nhớ).
+        if (err?.code === NOT_SIGNED_IN_ERROR && account) signIn?.forget(adapter.id, account);
         if (err) reject(err); else resolve(value);
       };
       const st = {
@@ -442,7 +481,7 @@ export function createLocalLlm({
       const timer = setTimeout(() => finish(failed(`Model did not finish in ${timeoutMs} ms`, DeviceErrorCode.CALL_TIMEOUT)), timeoutMs);
       ctx.signal?.addEventListener?.('abort', onAbort, { once: true });
       onChildError = (e) => finish(failed(`Could not start ${adapter.label}: ${e.message}`));
-      onChildExit = (code) => finish(failed(`${adapter.label} exited (${code}) before answering${proc.stderr ? `: ${proc.stderr.trim().slice(-400)}` : ''}`));
+      onChildExit = (code) => finish(failed(`${adapter.label} exited (${code}) before answering${proc.stderr ? `: ${proc.stderr.trim().slice(-400)}` : ''}`, agentErrorCode(proc.stderr)));
       proc.child.once('error', onChildError);
       proc.child.once('exit', onChildExit);
 
@@ -471,7 +510,7 @@ export function createLocalLlm({
           if (r?.usage) st.meta({ usage: { input_tokens: r.usage.inputTokens, output_tokens: r.usage.outputTokens } });
           st.meta({ stop_reason: r?.stopReason });
           st.done();
-        }).catch((e) => finish(e instanceof DeviceToolError ? e : failed(`${adapter.label}: ${e?.message || e}`, /quota|limit/i.test(String(e?.message)) ? QUOTA_ERROR : undefined)));
+        }).catch((e) => finish(e instanceof DeviceToolError ? e : failed(`${adapter.label}: ${e?.message || e}`, agentErrorCode(e?.message))));
         return;
       }
 
@@ -500,12 +539,23 @@ export function createLocalLlm({
     agents: () => installed().map((a) => ({ id: a.id, label: a.label, ...(versions.get(a.id) ? { version: versions.get(a.id) } : {}) })),
     info: () => ({ agents: installed().map((a) => ({ id: a.id, ...(versions.get(a.id) ? { version: versions.get(a.id) } : {}) })), warm: [...warm.keys()], warm_procs: warmCount() }),
     complete,
-    /** BE báo trước agent / model sắp dùng (người dùng vừa chọn máy này) → khởi động sẵn. */
-    prewarm: (args = {}) => {
+    /** BE báo trước agent / model sắp dùng (người dùng vừa chọn máy này) → khởi động sẵn. Máy tổ chức: chỉ khi thành viên đã đăng nhập. */
+    prewarm: (args = {}, ctx = {}) => {
       const { adapter, model, effort } = validate(args);
-      keepWarm(adapter, { model, effort });
-      return { warm: [...warm.keys()] };
+      const account = accountOf(ctx);
+      const warmNow = () => {
+        keepWarm(adapter, { model, effort, account });
+        const own = [...warm.keys()].filter((k) => !account || k.startsWith(`${account.name}|`));
+        return { warm: account ? own.map((k) => k.slice(account.name.length + 1)) : own };
+      };
+      if (!account) return warmNow();
+      return signIn.status(adapter, account).then((ok) => (ok ? warmNow() : { warm: [], signed_in: false }));
     },
+    memberMode,
+    memberDir,
+    signIn,
+    binOf,
+    adapterFor,
     stopAll: () => { for (const k of [...warm.keys()]) closeWarm(k); if (sweeper) { clearInterval(sweeper); sweeper = null; } },
   };
 }
@@ -558,7 +608,7 @@ export function acpClient(child) {
 export function buildLocalLlmTools(llm) {
   const list = llm.agents().map((a) => `${a.id}${a.version ? ` ${a.version}` : ''}`).join(', ');
   return [
-    { name: 'llm.complete', group: ToolGroup.PROC, read_only: true, internal: true, handler: (a, c) => llm.complete(a, c),
+    { name: 'llm.complete', group: ToolGroup.PROC, read_only: true, internal: true, handler: (a, c, e) => llm.complete(a, { ...c, runAs: e?.runAs }),
       description: `BE-only: answer one LLM request with a coding agent the person is signed in to on this computer, as a plain model — no tools, no files, no project settings. Installed: ${list}. Text streams on stdout; the result has text, json (when json_schema was given), agent, model, usage and timing. Error ${TOOL_USE_ERROR}: the agent tried to use a tool and its answer was discarded.`,
       input_schema: schema({
         agent: str(`which agent: ${llm.agents().map((a) => a.id).join(' | ')} (default the first)`),
@@ -569,7 +619,7 @@ export function buildLocalLlmTools(llm) {
         effort: str(EFFORTS.join(' | ')),
         timeout_ms: { type: 'number', description: 'default 180000, max 600000' },
       }) },
-    { name: 'llm.prewarm', group: ToolGroup.PROC, read_only: true, internal: true, handler: (a) => llm.prewarm(a),
+    { name: 'llm.prewarm', group: ToolGroup.PROC, read_only: true, internal: true, handler: (a, c, e) => llm.prewarm(a, { ...c, runAs: e?.runAs }),
       description: 'BE-only: start a model process ahead of the next llm.complete with this agent / model / effort.',
       input_schema: schema({ agent: str('agent id'), model: str('model'), effort: str('effort') }) },
   ];

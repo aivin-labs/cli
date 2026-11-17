@@ -42,19 +42,19 @@ test('biểu mẫu nhiều trường: hỏi từng trường (nút cho trường
   const { chat, sent, socket, pending } = setup();
   notify(chat);
   assert.equal(chat.hasPending(), true);
-  assert.ok(rows(sent).some((r) => r.text === 'Người nhận (1/3)' && r.id.startsWith(QUESTION_ROW)), 'dòng trường đầu, id mang tiền tố câu hỏi');
+  assert.ok(rows(sent).some((r) => r.text === 'Người nhận' && r.field === true && r.sub === 'Bước 1/3' && r.id.startsWith(QUESTION_ROW)), 'dòng trường đầu: tên đậm + dòng phụ bước, id mang tiền tố câu hỏi');
   assert.deepEqual(lastChoices(sent), []);
 
   await chat.reply('an@aivin.vn');
   assert.equal(socket.emitted.length, 0, 'chưa gửi khi còn trường');
-  assert.ok(rows(sent).some((r) => r.text === 'Giọng văn (2/3)'));
+  assert.ok(rows(sent).some((r) => r.text === 'Giọng văn' && r.sub === 'Bước 2/3'));
   assert.deepEqual(lastChoices(sent), [{ id: 'formal', text: 'Trang trọng' }, { id: 'casual', text: 'Thân mật' }]);
 
   await chat.reply('vui vẻ');
   assert.equal(rows(sent).at(-1).role, ChatRole.ERROR, 'trường có lựa chọn: chữ không khớp nút thì báo chọn lại');
   await chat.choose('casual');
   assert.ok(rows(sent).some((r) => r.role === ChatRole.USER && r.text === 'Thân mật'));
-  assert.ok(rows(sent).some((r) => r.text === 'Ghi chú (3/3) (không bắt buộc)'));
+  assert.ok(rows(sent).some((r) => r.text === 'Ghi chú' && r.sub === 'Bước 3/3 · Không bắt buộc'));
   assert.deepEqual(lastChoices(sent), [{ id: FORM_SKIP_ID, text: 'Bỏ qua' }]);
 
   await chat.choose(FORM_SKIP_ID);
@@ -87,11 +87,22 @@ test('BE từ chối biểu mẫu (invalid_answer) → hỏi lại từ trườn
   await chat.reply('2');
   assert.equal(socket.emitted.length, 1);
   assert.equal(chat.hasPending(), true);
-  assert.equal(rows(sent).filter((r) => r.text === 'A (1/2)').length, 2, 'hỏi lại trường đầu');
+  assert.equal(rows(sent).filter((r) => r.text === 'A' && r.sub === 'Bước 1/2').length, 2, 'hỏi lại trường đầu');
   await chat.reply('3');
   await chat.reply('4');
   assert.deepEqual(socket.emitted[1].payload.fields, { a: '3', b: '4' });
   assert.equal(chat.hasPending(), false);
+});
+
+test('gợi ý nhập của trường (placeholder) đi theo nút làm gợi ý mờ của ô nhập, không nằm trong bong bóng; hết câu hỏi thì bỏ', async () => {
+  const { chat, sent } = setup();
+  notify(chat, { reply_id: 'f9', kind: 'form', question: 'Mời ai?', fields: [{ name: 'who', label: 'Người được mời', required: false, placeholder: 'Chọn thành viên hoặc gõ email rồi Enter' }] });
+  const field = rows(sent).find((r) => r.text === 'Người được mời');
+  assert.equal(field.sub, 'Không bắt buộc');
+  assert.ok(!rows(sent).some((r) => r.text.includes('gõ email')), 'gợi ý không vào bong bóng');
+  assert.equal(sent.filter((c) => c.t === AskCommand.CHOICES).at(-1).hint, 'Chọn thành viên hoặc gõ email rồi Enter');
+  await chat.choose(FORM_SKIP_ID);
+  assert.equal(sent.filter((c) => c.t === AskCommand.CHOICES).at(-1).hint, undefined, 'gửi xong: bỏ gợi ý riêng');
 });
 
 test('gõ tên nút hoặc "bỏ qua" cũng được ở trường biểu mẫu', async () => {

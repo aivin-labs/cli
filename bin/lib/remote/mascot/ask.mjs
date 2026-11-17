@@ -191,9 +191,12 @@ export function createMascotChat({
     if (iconPath) return { icon_path: iconPath };
     return /\p{Extended_Pictographic}/u.test(icon) ? { icon } : {};
   };
-  /** Nút lựa chọn: `multiple` = câu chọn nhiều (cửa sổ cho tích nhiều mục rồi xác nhận); `icon` của mục (nếu có) đi kèm để hiện cuối nút. */
-  const showChoices = (options, multiple = false) => send({
-    t: AskCommand.CHOICES, multiple,
+  /**
+   * Nút lựa chọn: `multiple` = câu chọn nhiều (cửa sổ cho tích nhiều mục rồi xác nhận); `icon` của mục (nếu có) đi kèm để hiện cuối nút.
+   * `hint`: gợi ý mờ trong ô nhập cho câu / trường đang hỏi (gợi ý nhập của trường biểu mẫu) — lần gửi nút kế (kể cả bỏ nút) thay / xoá nó.
+   */
+  const showChoices = (options, multiple = false, hint = '') => send({
+    t: AskCommand.CHOICES, multiple, ...(hint ? { hint } : {}),
     options: options.map((o) => ({ id: String(o.id), text: String(o.text), ...choiceIcon(o.icon) })),
   });
   const setPending = (sessionId, question, text, url = null, payload = null) => {
@@ -251,12 +254,14 @@ export function createMascotChat({
     const total = q.fields.length;
     const options = fieldOptions(f);
     // Một trường bắt buộc không có lựa chọn: câu hỏi đã đủ, không cần dòng tên trường.
-    if (total > 1 || options.length || !f.required || f.placeholder) {
-      const base = total > 1 ? t(MascotText.FORM_FIELD, { label: f.label || f.name, n: q.step + 1, total }) : String(f.label || f.name);
-      const label = f.placeholder ? `${base} (${f.placeholder})` : base;
-      row(ChatRole.ASSISTANT, f.required ? label : `${label} ${t(MascotText.FORM_OPTIONAL)}`, `${QUESTION_ROW}${q.reply_id}-${q.step}`);
+    // Dòng trường: tên trường đậm (`field`), bên dưới một dòng phụ nhạt "Bước 1/3 · Không bắt buộc" (`sub`) — không nhồi ngoặc vào câu.
+    // Gợi ý nhập (`placeholder`) hiện mờ trong ô nhập (`hint` của nút), không nằm trong bong bóng.
+    if (total > 1 || options.length || !f.required) {
+      const sub = [total > 1 ? t(MascotText.FORM_STEP, { n: q.step + 1, total }) : '', f.required ? '' : t(MascotText.FORM_OPTIONAL)].filter(Boolean).join(' · ');
+      row(ChatRole.ASSISTANT, String(f.label || f.name), `${QUESTION_ROW}${q.reply_id}-${q.step}`, { field: true, ...(sub ? { sub } : {}) });
     }
-    showChoices(f.required ? options : [...options, { id: FORM_SKIP_ID, text: t(MascotText.FORM_SKIP) }]);
+    const hint = typeof f.placeholder === 'string' ? f.placeholder.trim() : '';
+    showChoices(f.required ? options : [...options, { id: FORM_SKIP_ID, text: t(MascotText.FORM_SKIP) }], false, hint);
   }
   /** Ghi giá trị trường hiện tại (`null` = bỏ qua) → trường kế, hoặc gửi cả biểu mẫu một lần. */
   async function fillField(q, value, shown) {

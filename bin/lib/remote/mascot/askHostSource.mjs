@@ -269,12 +269,17 @@ $script:clickCheckTimer.Start()
 (E 'Mascot').Add_MouseRightButtonUp({ param($s, $e) CloseAsk; OpenPanel; $e.Handled = $true })
 # One button: empty box = mic, typed text = send.
 # Waiting on a turn the server can stop (chat_busy { cancel }): the empty-box button is a stop button instead of the mic.
+$script:fieldHint = ''
 function StopMode { $script:chatBusy -and $script:canCancel -and -not $script:voiceLive -and -not (E 'AskBox').Text.Trim() -and -not $script:files }
 function SyncAction {
   # Files waiting (chips above the input): the button sends even with nothing typed, and the hint asks what to do with them.
   $typed = [bool](E 'AskBox').Text.Trim() -or ($script:files -gt 0 -and -not $script:voiceLive)
   $stop = StopMode
-  (E 'AskHint').Text = if ($script:files -gt 0) { $T.ask_attached } else { $T.ask_hint }
+  # A form field being asked: its own input hint ("pick a member or type an email") instead of the generic one; may wrap to a second line.
+  $field = $script:fieldHint -and $script:files -le 0
+  (E 'AskHint').Text = if ($script:files -gt 0) { $T.ask_attached } elseif ($field) { $script:fieldHint } else { $T.ask_hint }
+  (E 'AskHint').TextWrapping = if ($field) { 'Wrap' } else { 'NoWrap' }
+  (E 'AskHint').FontSize = if ($field) { 13 } else { 14 }
   (E 'AskHint').Visibility = if ((E 'AskBox').Text) { 'Collapsed' } else { 'Visible' }
   (E 'SendIcon').Visibility = if ($typed) { 'Visible' } else { 'Collapsed' }; (E 'MicIcon').Visibility = if ($typed -or $stop) { 'Collapsed' } else { 'Visible' }
   (E 'StopIcon').Visibility = if ($stop) { 'Visible' } else { 'Collapsed' }
@@ -367,13 +372,18 @@ function ChatRow($m) {
     # the same on all four sides.
     $b = New-Object Windows.Controls.Border; $b.Padding = '10,5,10,5'; $b.Margin = '0,0,0,4'; $b.MaxWidth = $script:bubbleMax
     $tb = New-Object Windows.Controls.TextBlock; $tb.TextWrapping = 'Wrap'; $tb.FontSize = 14; $tb.LineHeight = 20; $tb.LineStackingStrategy = 'BlockLineHeight'
-    $b.Child = $tb; [void]$list.Children.Add($b)
+    # Links in the text (Emoji.SetLinked): a click opens the browser (http/https only, OpenWebUrl), not the bubble's own link.
+    $tb.AddHandler([Windows.Documents.Hyperlink]::RequestNavigateEvent, [Windows.Navigation.RequestNavigateEventHandler]{ param($s, $e) $e.Handled = $true; OpenWebUrl $e.Uri.AbsoluteUri })
+    # Second line under the text (a form field's "Step 1/3 - Optional"): smaller, muted.
+    $sub = New-Object Windows.Controls.TextBlock; $sub.TextWrapping = 'Wrap'; $sub.FontSize = 12; $sub.Margin = '0,1,0,1'; $sub.Foreground = Brush $P.muted; $sub.Visibility = 'Collapsed'
+    $body = New-Object Windows.Controls.StackPanel; [void]$body.Children.Add($tb); [void]$body.Children.Add($sub)
+    $b.Child = $body; [void]$list.Children.Add($b)
     $slide = New-Object Windows.Media.TranslateTransform 0, 6; $b.RenderTransform = $slide
     $ease = New-Object Windows.Media.Animation.CubicEase; $ease.EasingMode = 'EaseOut'
     $fade = New-Object Windows.Media.Animation.DoubleAnimation 0, 1, ([TimeSpan]::FromMilliseconds(200)); $fade.EasingFunction = $ease
     $rise = New-Object Windows.Media.Animation.DoubleAnimation 6, 0, ([TimeSpan]::FromMilliseconds(240)); $rise.EasingFunction = $ease
     $b.BeginAnimation([Windows.UIElement]::OpacityProperty, $fade); $slide.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $rise)
-    $row = @{ box = $b; text = $tb; url = $null }
+    $row = @{ box = $b; body = $body; text = $tb; sub = $sub; url = $null }
     # The link rides on the bubble itself (Tag, updated below): the handler is not a closure, $row at click time is not this row.
     $b.Add_MouseLeftButtonUp({ param($s) OpenWebUrl $s.Tag })
     if ($id) { $script:chatRows[$id] = $row }
@@ -396,7 +406,10 @@ function ChatRow($m) {
   $fg = if ($role -eq 'progress') { $P.muted } elseif ($role -eq 'error') { '#CB2634' } else { $P.ink }
   $row.box.Background = Brush $bg; $row.text.Foreground = Brush $fg
   $row.text.FontStyle = if ($role -eq 'progress') { 'Italic' } else { 'Normal' }
-  SetText $row.text $m.text
+  if ($role -eq 'progress') { SetText $row.text $m.text } else { [AivinMascot.Emoji]::SetLinked($row.text, [string]$m.text) }
+  # A form field's row: the field name in bold, the step / "optional" under it.
+  $row.text.FontWeight = if ($m.field) { 'SemiBold' } else { 'Normal' }
+  if ($m.sub) { SetText $row.sub $m.sub; $row.sub.Visibility = 'Visible' } else { $row.sub.Visibility = 'Collapsed' }
   ChatLinks $row $null
   ChatBlocks $row $m.blocks
   ChatLinks $row $m.links
@@ -405,7 +418,7 @@ function ChatRow($m) {
   if ($m.typing) {
     if (-not $row.dots) { $row.dots = TypingDots }
     $row.box.Child = $row.dots; $row.box.Background = Brush '#F4F6FA'; $row.box.CornerRadius = '10,10,10,3'
-  } elseif ($row.dots -and $row.box.Child -ne $row.text) { $row.box.Child = $row.text }
+  } elseif ($row.dots -and $row.box.Child -ne $row.body) { $row.box.Child = $row.body }
   # Words the owner is still saying: lighter until the sentence is settled (the box's own opacity is the fade-in).
   $row.text.Opacity = if ($m.partial) { 0.55 } else { 1 }
   $script:scrollRow = if ($row.blocks) { $row } else { $null }
@@ -634,7 +647,7 @@ function Handle($m) {
       return
     }
     'ask_status' { AskStatus $m.text; return }
-    'ask_choices' { ChoiceButtons $m.options $m.multiple; return }
+    'ask_choices' { ChoiceButtons $m.options $m.multiple; $script:fieldHint = [string]$m.hint; SyncAction; return }
     # Files waiting for the next question: chips above the input; then on to the bot's tray (no return).
     'ask_files' { $chips = @($m.files | Where-Object { $_ }); $more = @($chips | Where-Object { -not $_.pinned }).Count -gt @((E 'AttachBar').Children | Where-Object { $_.Tag -ne 'pinned' }).Count; $script:files = [int]$m.n; AttachChips $chips; SyncAction; if ($more) { PeekAsk; HideAskLater ${ASK_IDLE_MS} } }
     'ask_pin' {

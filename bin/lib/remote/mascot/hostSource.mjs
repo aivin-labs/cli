@@ -199,8 +199,14 @@ export const MASCOT_XAML = `<Window xmlns="http://schemas.microsoft.com/winfx/20
      <Button x:Name="PanelClose" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Content="✕" Width="30" Height="30" FontSize="11"
              FontWeight="Normal" Background="Transparent" BorderThickness="0" Tag="#F2F3F5" Foreground="${B.muted}"/>
     </DockPanel>
-    <TextBlock x:Name="NowLabel" DockPanel.Dock="Top" Margin="0,14,0,4" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
-    <TextBlock x:Name="NowText" DockPanel.Dock="Top" Margin="0,0,6,0" FontSize="14" Foreground="${B.ink}" TextWrapping="Wrap" LineHeight="20"/>
+    <!-- "Đang làm": nhãn bên trái, việc hiện tại là tag bên phải (dài thì xuống dòng trong tag, căn phải). -->
+    <Grid DockPanel.Dock="Top" Margin="0,14,6,0">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+     <TextBlock x:Name="NowLabel" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+     <Border Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" CornerRadius="10" Background="#F2F3F5" Padding="10,3,10,4">
+      <TextBlock x:Name="NowText" FontSize="12.5" FontWeight="SemiBold" Foreground="${B.ink}" TextWrapping="Wrap" TextAlignment="Right" LineHeight="18"/>
+     </Border>
+    </Grid>
     <!-- Tần suất thông báo: 3 nấc (Ít = phiên này + cần xử lý, Vừa = thêm việc trên máy, Tất cả), khối trắng trượt tới nấc đang chọn -->
     <TextBlock x:Name="NotifyFreqLabel" DockPanel.Dock="Top" Margin="0,14,0,6" FontSize="11" FontWeight="SemiBold" Foreground="${B.muted}"/>
     <Grid x:Name="NotifySteps" DockPanel.Dock="Top" Margin="0,0,6,0" Height="30">
@@ -298,7 +304,7 @@ ${[0, 1, 2].map((i) => `      <Border x:Name="NotifyStep${i}" Tag="${i}" Backgro
     <TextBlock x:Name="AskStatus" Visibility="Collapsed" FontSize="13" Foreground="${B.muted}" Margin="0,2,4,1" TextTrimming="CharacterEllipsis"/>
    </StackPanel>
    <!-- Dau x mo o goc phai tren: cat o hoi di ngay, ke ca khi Aivin dang cho tra loi (cau hoi van con, mo lai bang cach re vao bot). -->
-   <Button x:Name="AskClose" Visibility="Collapsed" Style="{StaticResource IconBtn}" Width="18" Height="18" Padding="0" Margin="0,1,1,0" Opacity="0.3"
+   <Button x:Name="AskClose" Visibility="Collapsed" Style="{StaticResource IconBtn}" Width="18" Height="18" Padding="0" Margin="0,5,5,0" Opacity="0.3"
            HorizontalAlignment="Right" VerticalAlignment="Top" Background="#E8FFFFFF" BorderThickness="0" Tag="#F2F3F5">
     <Path Data="${ICON_CLOSE_X}" Stroke="${B.muted}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
           Width="9" Height="9" Stretch="Uniform"/>

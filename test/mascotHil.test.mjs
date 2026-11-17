@@ -168,7 +168,7 @@ test('nút lựa chọn / nút link vừa ô hỏi cả khi có thanh cuộn: ic
 test('cửa sổ có hàng nút lựa chọn + lệnh ask_choices, bấm nút gửi sự kiện choose', () => {
   assert.match(MASCOT_XAML, /x:Name="Choices"/);
   const ps = hostScript();
-  assert.match(ps, /'ask_choices' \{ ChoiceButtons \$m\.options \$m\.multiple; return \}/);
+  assert.match(ps, /'ask_choices' \{ ChoiceButtons \$m\.options \$m\.multiple; \$script:fieldHint = \[string\]\$m\.hint; SyncAction; return \}/);
   assert.match(ps, /t = 'choose'; id = \[string\]\$s\.CommandParameter/);
   // Chọn nhiều: tích rồi xác nhận → gửi các id đã tích.
   assert.match(ps, /t = 'choose'; ids = @\(\$script:picked\.ToArray\(\)\)/);

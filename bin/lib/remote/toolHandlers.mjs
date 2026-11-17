@@ -22,6 +22,7 @@ import { measurePath } from './undoStore.mjs';
 import { buildProcessTools, shellCommand } from './processes.mjs';
 import { buildAgentTools, createAgentRunner } from './codingAgents.mjs';
 import { buildLocalLlmTools, createLocalLlm } from './localLlm.mjs';
+import { buildLlmLoginTools, createLlmLogin } from './localLlmLogin.mjs';
 
 /** Một bộ chạy agent lập trình cho cả tiến trình (việc đang chạy sống qua các lần dựng lại danh mục công cụ). */
 let sharedAgents = null;
@@ -30,6 +31,9 @@ export const activeAgentRunner = () => sharedAgents;
 /** Mô hình trên máy cho BE (`llm.complete`) — giữ tiến trình sẵn qua các lần dựng lại danh mục. */
 let sharedLlm = null;
 export const activeLocalLlm = () => sharedLlm;
+/** Đăng nhập agent cho thành viên máy tính tổ chức (localLlmLogin.mjs) — lần đăng nhập đang chờ sống qua các lần dựng lại danh mục. */
+let sharedLlmLogin = null;
+export const activeLlmLogin = () => sharedLlmLogin;
 import { buildScheduleTools } from './schedule.mjs';
 import { buildWatchTools } from './deviceWatches.mjs';
 import { buildTransferTools } from './httpTransfer.mjs';
@@ -845,9 +849,18 @@ export function buildTools(env) {
   if (env.processes && env.schedules && !env.runAs) {
     sharedAgents ||= env.codingAgents || createAgentRunner();
     if (sharedAgents.installed().length) tools.push(...buildAgentTools(sharedAgents));
-    // Claude Code của người dùng làm mô hình cho BE (không công cụ, không tệp) — BE chọn khi phiên chat gắn với máy này.
+  }
+  // Claude Code / Codex làm mô hình cho BE (không công cụ, không tệp) — BE chọn khi phiên chat gắn với máy này. Máy tính tổ chức
+  // (`env.localLlm.memberMode`): mỗi lời gọi chạy dưới tài khoản của thành viên, bằng đăng nhập agent của chính họ (+ công cụ đăng nhập).
+  if (env.processes && !env.runAs && (env.schedules || env.localLlm?.memberMode)) {
     sharedLlm ||= env.localLlm || createLocalLlm();
-    if (sharedLlm.available()) tools.push(...buildLocalLlmTools(sharedLlm));
+    if (sharedLlm.available()) {
+      tools.push(...buildLocalLlmTools(sharedLlm));
+      if (sharedLlm.memberMode) {
+        sharedLlmLogin ||= createLlmLogin({ llm: sharedLlm });
+        tools.push(...buildLlmLoginTools(sharedLlmLogin));
+      }
+    }
   }
   // Lịch chạy định kỳ (Task Scheduler / crontab) — máy cá nhân; máy tính tổ chức không đặt lịch cho thành viên.
   if (env.schedules) tools.push(...buildScheduleTools(env.schedules));
