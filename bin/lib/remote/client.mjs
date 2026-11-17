@@ -33,6 +33,7 @@ import { createMeetingManager, watchMeetingRequests } from './meeting/index.mjs'
 import { createMediaHost, mediaSupported } from './meeting/recorder.mjs';
 import { createClipboard } from './clipboard.mjs';
 import { activeAgentRunner, activeLocalLlm, buildTools, toolMap } from './toolHandlers.mjs';
+import { localLlmAccounts } from './localLlmAccounts.mjs';
 import { createBrowserTunnels, detectLocalBrowser } from './browserTunnel.mjs';
 import { createGuiController, detectGui } from './gui/index.mjs';
 import { createWindowsHost } from './gui/windowsHost.mjs';
@@ -408,7 +409,12 @@ export async function startRemoteClient(options = {}) {
   // Mô hình trên máy (`llm.complete`, công cụ BE-only nên BE biết qua cờ này) — BE dùng cho tier nặng khi phiên chat gắn với máy này.
   if (byName.has('llm.complete')) {
     const agents = activeLocalLlm()?.info().agents || [];
-    if (agents.length) profile.local_llm = { provider: agents[0].id, agents: agents.map((a) => a.id) };
+    // `accounts`: băm tài khoản từng agent — BE tính hạn mức theo tài khoản + nhóm model (localLlmAccounts.mjs).
+    if (agents.length) {
+      const ids = agents.map((a) => a.id);
+      const accounts = localLlmAccounts(ids);
+      profile.local_llm = { provider: ids[0], agents: ids, ...(accounts ? { accounts } : {}) };
+    }
   }
   // Công cụ chủ máy tắt (`aivin remote policy deny`) không vào danh mục — Planner không lập kế hoạch với nó (gọi tới vẫn bị chặn ở sàn luật).
   const deniedTools = new Set(policyGuard.read().deny_tools);
