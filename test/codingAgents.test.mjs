@@ -329,7 +329,8 @@ test('hồ sơ tài khoản (14/11/2026): agent chạy với thư mục cấu h�
   fs.mkdirSync(path.join(profilesRoot, 'claude', 'work'), { recursive: true });
   const { calls, spawnImpl } = fakeSpawn();
   const runner = createAgentRunner({ find: () => ({ bin: 'claude', version: '2.1.312' }), spawnImpl, probeFlags: () => null, profilesRoot });
-  assert.deepEqual(runner.profiles(), { profiles: { claude: ['work'] } });
+  // Codex (17/11/2026) cũng có hồ sơ tài khoản qua CODEX_HOME — chưa tạo hồ sơ nào thì rỗng.
+  assert.deepEqual(runner.profiles(), { profiles: { claude: ['work'], codex: [] } });
 
   const p = runner.run({ prompt: 'đọc dự án', account: 'work', wait_ms: 5000 }, {}, env);
   await tick();

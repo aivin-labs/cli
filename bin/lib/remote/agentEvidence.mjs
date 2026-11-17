@@ -489,7 +489,8 @@ export async function measureEvidence({ job, contract, testCheck, jobDir, signal
 
   const missing = [];
   for (const o of contract.outputs.filter((x) => x.required)) {
-    if (o.kind === 'report_md' && !report?.ok) missing.push(`${o.id}: REPORT.md is ${report ? 'not in the agreed format' : 'missing'}`);
+    // Lỗi khuôn cụ thể đi kèm — vòng sửa nói đúng chỗ sai (17/11/2026: Codex ghi kết quả cho ca mới NEW-x vào `results`, vòng sửa chỉ biết "sai khuôn").
+    if (o.kind === 'report_md' && !report?.ok) missing.push(`${o.id}: REPORT.md is ${report ? `not in the agreed format (${(report.errors || []).slice(0, 3).join('; ')})` : 'missing'}`);
     if (o.kind === 'git_branch' && !diff?.files.length) missing.push(`${o.id}: no code change in the job worktree`);
   }
   evidence.checks.push(check(CheckKind.OUTPUTS_COMPLETE, missing.length ? 'fail' : 'pass', missing.length ? { missing } : {}));

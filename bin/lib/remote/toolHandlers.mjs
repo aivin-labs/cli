@@ -26,6 +26,10 @@ import { buildLlmLoginTools, createLlmLogin } from './localLlmLogin.mjs';
 
 /** Một bộ chạy agent lập trình cho cả tiến trình (việc đang chạy sống qua các lần dựng lại danh mục công cụ). */
 let sharedAgents = null;
+/** Máy tính tổ chức: một runner job lập trình cho mỗi thành viên (tiến trình con dưới tài khoản của họ, thư mục job riêng). */
+const memberAgents = new Map();
+/** Thư mục job của thành viên trên máy tổ chức (ngoài HOME của họ — không tính vào hạn mức đĩa, không lẫn tệp của họ). */
+const MEMBER_JOBS_ROOT = '/var/lib/aivin-jobs';
 /** Bộ chạy agent đã dựng (null khi máy chưa có danh mục agent) — daemon hỏi để biết còn job chạy không, và dừng chúng khi tắt. */
 export const activeAgentRunner = () => sharedAgents;
 /** Mô hình trên máy cho BE (`llm.complete`) — giữ tiến trình sẵn qua các lần dựng lại danh mục. */
@@ -849,6 +853,13 @@ export function buildTools(env) {
   if (env.processes && env.schedules && !env.runAs) {
     sharedAgents ||= env.codingAgents || createAgentRunner();
     if (sharedAgents.installed().length) tools.push(...buildAgentTools(sharedAgents));
+  } else if (env.processes && env.runAs && env.localLlm?.memberMode) {
+    // Máy tính tổ chức (17/11/2026): thành viên giao việc lập trình chạy bằng agent họ đã đăng nhập (Claude Code / Codex cài sẵn trong image),
+    // dưới tài khoản Linux của họ, trong thư mục của họ.
+    const name = env.runAs.name;
+    if (!memberAgents.has(name)) memberAgents.set(name, env.codingAgents || createAgentRunner({ runAs: env.runAs, jobsDir: path.join(MEMBER_JOBS_ROOT, name) }));
+    const runner = memberAgents.get(name);
+    if (runner.installed().length) tools.push(...buildAgentTools(runner));
   }
   // Claude Code / Codex làm mô hình cho BE (không công cụ, không tệp) — BE chọn khi phiên chat gắn với máy này. Máy tính tổ chức
   // (`env.localLlm.memberMode`): mỗi lời gọi chạy dưới tài khoản của thành viên, bằng đăng nhập agent của chính họ (+ công cụ đăng nhập).

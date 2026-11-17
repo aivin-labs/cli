@@ -5,11 +5,12 @@ import { randomUUID } from 'crypto';
 import { execFile, execFileSync, spawn } from 'child_process';
 import { DeviceErrorCode, REMOTE_CONFIG_DIR, ToolGroup } from './constants.mjs';
 import { DeviceToolError, agentEnv, resolveInRoots } from './sandbox.mjs';
+import { accountEnv, withProcessCap } from './multiUser.mjs';
 import { parseContract, parseReport, parseTestCheck, reportTemplate, sha256 } from './agentContract.mjs';
 
 /** Thời gian tối đa cho lượt nhắc agent ghi lại REPORT.md sai khuôn (cùng phiên). */
 const REPORT_REPAIR_MS = 5 * 60_000;
-import { commitJobWork, gitRead, gitWrite, globToRegExp, listWorktrees, measureEvidence, resolveCommit, worktreeState } from './agentEvidence.mjs';
+import { commitJobWork, gitRead, gitWrite, globToRegExp, listWorktrees, measureEvidence, resolveCommit, runVerifyCommand, worktreeState } from './agentEvidence.mjs';
 
 const MAX_SCOPE_RULES = 400;
 /** Mẫu kiểu gitignore → mẫu luật quyền của Claude Code, neo ở mọi tầng (`package.json` → `**\/package.json`). */
@@ -162,6 +163,44 @@ export function agentProfileDir(adapter, name, { root = AGENT_PROFILES_DIR } = {
   return dir;
 }
 
+/** Biến chỉ tiến trình root được mang — không lọt sang tài khoản thành viên (agent đọc đăng nhập trong HOME của chính họ). */
+const ROOT_ONLY_AGENT_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY'];
+
+/**
+ * Máy tính tổ chức (17/11/2026): tiến trình con của job lập trình chạy dưới tài khoản Linux của thành viên — agent, mọi lệnh git (worktree,
+ * commit, đo diff) và lệnh kiểm chứng; HOME / USER của họ, có trần số tiến trình theo uid. Root không ghi gì vào kho của thành viên.
+ */
+export function memberSpawner(account, spawnImpl = spawn) {
+  return (cmd, argv, opts = {}) => {
+    const [c, a] = withProcessCap(cmd, argv);
+    const env = { ...accountEnv(account, agentEnv(opts.env || process.env)), DISABLE_AUTOUPDATER: '1', BROWSER: '/bin/true', NO_COLOR: '1' };
+    for (const k of ROOT_ONLY_AGENT_ENV) delete env[k];
+    return spawnImpl(c, a, { ...opts, env, uid: account.uid, gid: account.gid });
+  };
+}
+
+/** Đổi chủ cả cây thư mục (thư mục job cho thành viên). Lỗi từng mục bỏ qua — chỉ chạy được khi daemon là root. */
+function chownTree(dir, uid, gid) {
+  try { fs.chownSync(dir, uid, gid); } catch { return; }
+  for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, d.name);
+    if (d.isDirectory()) chownTree(p, uid, gid);
+    else { try { fs.chownSync(p, uid, gid); } catch { /* bỏ qua */ } }
+  }
+}
+
+/** Thêm một mẫu vào `info/exclude` của kho (không đụng .gitignore của dự án) — thư mục worktree của job không làm bẩn `git status`. */
+async function excludeFromRepo(cwd, pattern, gitOpts) {
+  try {
+    const file = path.resolve(cwd, (await gitRead(cwd, ['rev-parse', '--git-path', 'info/exclude'], gitOpts)).toString().trim());
+    const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    if (!text.split(/\r?\n/).includes(pattern)) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, `${text && !text.endsWith('\n') ? '\n' : ''}${pattern}\n`);
+    }
+  } catch { /* không ghi được — worktree vẫn chạy, chỉ hiện trong git status */ }
+}
+
 /** Hồ sơ đã có của từng adapter (tên thư mục). */
 export function listAgentProfiles(adapters, { root = AGENT_PROFILES_DIR } = {}) {
   const out = {};
@@ -250,7 +289,71 @@ export const CLAUDE_ADAPTER = Object.freeze({
   },
 });
 
-export const DEFAULT_AGENT_ADAPTERS = Object.freeze([CLAUDE_ADAPTER]);
+/** Thư mục cài Codex đi kèm extension VS Code (openai.chatgpt-*), theo nền tảng. */
+function codexExtensionBins(home, exe) {
+  const sub = process.platform === 'win32' ? 'windows-x86_64' : `${process.platform}-${os.arch()}`;
+  const root = path.join(home, '.vscode', 'extensions');
+  try {
+    return fs.readdirSync(root).filter((d) => d.startsWith('openai.chatgpt-')).sort().reverse().map((d) => path.join(root, d, 'bin', sub, exe));
+  } catch { return []; }
+}
+
+/**
+ * Codex CLI (17/11/2026) — `codex exec --json`, đề bài qua stdin. Đã đo trên bản 0.169 (Windows): `-s workspace-write` một mình bị chặn mọi
+ * lệnh ("blocked by policy"), `--approve-for-me` (sandbox workspace-write + duyệt tự động) chạy được; chỉ đọc = `-s read-only`. Không có cờ
+ * ngân sách (thời hạn hợp đồng vẫn do daemon cắt), không quản worktree theo tên → daemon tự dựng worktree (`selfWorktree: false`).
+ * `exec resume` không nhận cờ sandbox / duyệt → vòng sửa mở phiên MỚI trong worktree cũ (`resumable: false`; hợp đồng + lời nhắc đủ ngữ cảnh).
+ */
+export const CODEX_ADAPTER = Object.freeze({
+  id: 'codex',
+  label: 'Codex',
+  profileEnv: 'CODEX_HOME',
+  selfWorktree: false,
+  resumable: false,
+  helpArgs: ['exec', '--help'],
+  candidates({ env = process.env, platform = process.platform, home = os.homedir() } = {}) {
+    const exe = platform === 'win32' ? 'codex.exe' : 'codex';
+    return [...onPath(exe, env), path.join(home, '.local', 'bin', exe), ...codexExtensionBins(home, exe)];
+  },
+  args({ mode, model, effort, addDirs = [] }) {
+    const argv = ['exec', '--json', '--ignore-user-config', '--ignore-rules'];
+    // Chế độ quyền chung → sandbox của Codex. "manual" (việc cần quyền bị từ chối) không có tương đương an toàn → chỉ đọc.
+    if (mode === AgentMode.ACCEPT_EDITS) argv.push('--approve-for-me');
+    else argv.push('-s', 'read-only');
+    for (const d of addDirs) argv.push('--add-dir', d);
+    if (model) argv.push('-m', model);
+    if (effort) argv.push('-c', `model_reasoning_effort="${effort === 'xhigh' || effort === 'max' ? 'high' : effort}"`);
+    argv.push('-');
+    return argv;
+  },
+  /** Một dòng JSONL của `codex exec --json` → cập nhật việc; trả đoạn chữ đáng đẩy lên Aivin. */
+  parse(job, msg) {
+    if (msg.type === 'thread.started' && typeof msg.thread_id === 'string' && !job.session_id) { job.session_id = msg.thread_id; return ''; }
+    const item = msg.item;
+    if (msg.type === 'item.completed' && item?.type === 'agent_message' && typeof item.text === 'string' && item.text.trim()) {
+      job.texts.push(item.text);
+      return item.text;
+    }
+    if (msg.type === 'item.started' && item && item.type !== 'agent_message' && item.type !== 'reasoning') {
+      const target = item.command || (Array.isArray(item.changes) ? item.changes.map((c) => c.path).join(', ') : '') || '';
+      const line = `🔧 ${item.type}${target ? ` ${String(target).slice(0, 160)}` : ''}`;
+      job.tools.push(line);
+      return line;
+    }
+    if (msg.type === 'turn.completed') {
+      job.result = {
+        ok: true, answer: String(job.texts[job.texts.length - 1] || '').slice(0, MAX_ANSWER_CHARS),
+        usage: { input_tokens: msg.usage?.input_tokens, output_tokens: msg.usage?.output_tokens },
+      };
+    }
+    if (msg.type === 'turn.failed' || msg.type === 'error') {
+      job.result = { ok: false, answer: String(msg.error?.message || msg.message || 'Codex error').slice(0, MAX_ANSWER_CHARS), stop_reason: 'error' };
+    }
+    return '';
+  },
+});
+
+export const DEFAULT_AGENT_ADAPTERS = Object.freeze([CLAUDE_ADAPTER, CODEX_ADAPTER]);
 
 function versionOf(bin) {
   try {
@@ -262,9 +365,9 @@ function versionOf(bin) {
 const newer = (a, b) => { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i]; return false; };
 
 /** Các cờ `--xxx` mà `--help` của binary liệt kê, hoặc null khi không đọc được. Bất đồng bộ — không chặn daemon. */
-export function helpFlags(bin) {
+export function helpFlags(bin, helpArgs = ['--help']) {
   return new Promise((resolve) => {
-    execFile(bin, ['--help'], { encoding: 'utf8', timeout: 20_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
+    execFile(bin, helpArgs, { encoding: 'utf8', timeout: 20_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, out) => {
       resolve(err ? null : new Set(String(out).match(/--[a-z][a-z-]+/gi) || []));
     });
   });
@@ -325,7 +428,12 @@ function contractPrompt({ jobId, jobDir, contract, hasTestCheck, note }) {
 export function createAgentRunner({
   adapters = DEFAULT_AGENT_ADAPTERS, find = findAgentBinary, spawnImpl = spawn, now = Date.now, jobsDir = JOBS_DIR, measure = measureEvidence, probeFlags = helpFlags,
   profilesRoot = AGENT_PROFILES_DIR,
+  /** Máy tính tổ chức: tài khoản Linux của thành viên ({ name, uid, gid, home }) — mọi tiến trình con chạy dưới tài khoản này. */
+  runAs = null,
 } = {}) {
+  const childSpawn = runAs ? memberSpawner(runAs, spawnImpl) : spawnImpl;
+  /** Lệnh git của job: dưới tài khoản thành viên khi có (tệp trong .git của họ không thuộc root). */
+  const gitOpts = runAs ? { spawnImpl: childSpawn } : undefined;
   const found = new Map();
   const flagCache = new Map();
   const jobs = new Map();
@@ -336,7 +444,7 @@ export function createAgentRunner({
   const flagsOf = async (adapter) => {
     const b = binaryOf(adapter);
     if (b?.flags) return new Set(b.flags);
-    if (!flagCache.has(adapter.id)) flagCache.set(adapter.id, b ? Promise.resolve(probeFlags(b.bin)).catch(() => null) : null);
+    if (!flagCache.has(adapter.id)) flagCache.set(adapter.id, b ? Promise.resolve(probeFlags(b.bin, adapter.helpArgs)).catch(() => null) : null);
     return flagCache.get(adapter.id);
   };
   /** Agent đã cài trên máy (theo thứ tự ưu tiên của danh sách adapter). */
@@ -435,7 +543,7 @@ export function createAgentRunner({
    * Job có hợp đồng: kiểm khuôn + mã băm, dựng thư mục job, tính cờ của agent từ hợp đồng. Trả phần riêng của job (gộp vào `j`) + tham số
    * cho adapter. Mọi lỗi ở đây xảy ra TRƯỚC khi agent chạy (không có gì thay đổi).
    */
-  async function prepareContract(args, env, jobId, prev) {
+  async function prepareContract(args, env, jobId, prev, adapter) {
     const text = String(args.contract);
     if (!args.contract_sha256) throw invalid('contract_sha256 is required with contract (the sha256 of CONTRACT.md Aivin issued)');
     const parsed = parseContract(text, { expectedSha: String(args.contract_sha256) });
@@ -456,10 +564,16 @@ export function createAgentRunner({
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `Folder not found: ${args.cwd || contract.workspace.cwd}`);
     if (prev?.worktree && !fs.existsSync(prev.worktree)) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `The worktree of ${prev.id} is gone: ${prev.worktree}`);
     const isolate = prev ? !!prev.worktree : contract.workspace.isolation === 'worktree';
-    const baseCommit = prev ? prev.baseCommit : await resolveCommit(cwd, contract.workspace.base_ref);
+    const baseCommit = prev ? prev.baseCommit : await resolveCommit(cwd, contract.workspace.base_ref, gitOpts);
     if (isolate && !baseCommit) throw invalid(`worktree isolation needs a git repository with ${contract.workspace.base_ref} in ${args.cwd || cwd}`);
-    if (!prev && isolate && contract.workspace.base_ref !== 'HEAD' && baseCommit !== (await resolveCommit(cwd, 'HEAD'))) {
-      throw invalid(`the job worktree starts from HEAD — check out ${contract.workspace.base_ref} first, or set base_ref: HEAD`);
+    // Daemon tự dựng worktree (17/11/2026) khi agent không tự quản worktree theo tên (Codex) hoặc hợp đồng đi từ commit khác HEAD (việc nối
+    // tiếp việc trước) — agent tự dựng thì luôn từ HEAD. Nhánh `aivin/<job>`, thư mục `<repo>/.aivin-worktrees/<job>` (loại khỏi git status).
+    let ownWorktree = null;
+    // Máy tổ chức: daemon luôn tự dựng worktree (dưới tài khoản thành viên) — không để agent dựng bằng đường dẫn root không biết trước.
+    if (!prev && isolate && (runAs || adapter.selfWorktree === false || (baseCommit !== (await resolveCommit(cwd, 'HEAD', gitOpts))))) {
+      ownWorktree = path.join(cwd, '.aivin-worktrees', jobId);
+      await excludeFromRepo(cwd, '/.aivin-worktrees/', gitOpts);
+      await gitWrite(cwd, ['worktree', 'add', '-q', '-b', `aivin/${jobId}`, ownWorktree, baseCommit], gitOpts);
     }
 
     const jobDir = dirOf(jobId);
@@ -467,23 +581,26 @@ export function createAgentRunner({
     const writeLocked = (name, body) => { const f = path.join(jobDir, name); fs.writeFileSync(f, body); try { fs.chmodSync(f, 0o444); } catch { /* chỉ là lớp phụ — mã băm mới là lớp chặn */ } };
     writeLocked('CONTRACT.md', text);
     if (testCheckText !== null) writeLocked('TEST_CHECK.md', testCheckText);
+    // Thư mục job thuộc về thành viên: agent của họ đọc hợp đồng + ghi REPORT.md (sửa CONTRACT.md thì mã băm bắt).
+    if (runAs) chownTree(jobDir, runAs.uid, runAs.gid);
     // Agent chỉ được ghi REPORT.md trong thư mục job; hợp đồng, bộ check và bằng chứng là của Aivin / daemon.
     const deny = [
       ...['CONTRACT.md', 'TEST_CHECK.md', 'evidence.json', 'job.json', 'logs/**'].flatMap((n) => ['Edit', 'Write'].map((t) => `${t}(${claudeAbsPath(path.join(jobDir, n))})`)),
       // Phạm vi chặn TRƯỚC (không chỉ phát hiện sau): `npm test` được phép + sửa được package.json = chạy được mọi lệnh.
-      ...(await scopeDenyRules(contract, cwd)),
+      ...(await scopeDenyRules(contract, cwd, { gitOpts })),
     ];
     return {
       job: {
         contract, contractId: contract.contract_id, contractSha: parsed.sha256, hasTestCheck: testCheckText !== null, testCheckText,
-        baseCommit, mainStateBefore: isolate ? await worktreeState(cwd) : null, isolate,
+        baseCommit, mainStateBefore: isolate ? await worktreeState(cwd, gitOpts) : null, isolate,
         ...(prev ? { worktree: prev.worktree, fixedWorktree: !!prev.worktree, continuedFrom: prev.id } : {}),
+        ...(ownWorktree ? { worktree: ownWorktree, fixedWorktree: true } : {}),
       },
       cwd,
-      spawnCwd: prev?.worktree || cwd,
+      spawnCwd: prev?.worktree || ownWorktree || cwd,
       agentOpts: {
         mode: contract.permissions.mode, budgetUsd: contract.limits.max_budget_usd, effort: contract.limits.effort,
-        allowedTools: contract.permissions.allowed_tools, addDirs: [jobDir], worktree: isolate && !prev ? jobId : undefined, projectConfig: false,
+        allowedTools: contract.permissions.allowed_tools, addDirs: [jobDir], worktree: isolate && !prev && !ownWorktree ? jobId : undefined, projectConfig: false,
         settings: { permissions: { deny } },
       },
       wallMs: contract.limits.max_wall_ms,
@@ -492,7 +609,7 @@ export function createAgentRunner({
 
   /** Worktree agent đã tạo cho job: thư mục phiên (sự kiện init) nếu đúng là một worktree của kho; không thì tìm theo tên job. */
   async function findJobWorktree(j) {
-    const trees = await listWorktrees(j.cwd);
+    const trees = await listWorktrees(j.cwd, gitOpts);
     const same = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
     if (j.session_cwd && !same(j.session_cwd, j.cwd) && trees.some((t) => same(t, j.session_cwd))) return path.resolve(j.session_cwd);
     return trees.find((t) => !same(t, j.cwd) && path.basename(t) === j.id) || null;
@@ -504,7 +621,9 @@ export function createAgentRunner({
    * cùng phiên, vẫn sai thì coi là chưa giao đủ"). Rẻ hơn cả một vòng sửa (đo lại + agent đọc lại hợp đồng) chỉ vì thiếu một tiêu đề mục.
    */
   async function repairReport(j) {
-    if (!j.respawn || !j.session_id || j.abort.signal.aborted) return;
+    if (!j.respawn || j.abort.signal.aborted) return;
+    const fresh = j.respawn.adapter.resumable === false;
+    if (!fresh && !j.session_id) return;
     const file = path.join(dirOf(j.id), 'REPORT.md');
     let text = null;
     try { text = fs.readFileSync(file, 'utf8'); } catch { /* chưa ghi */ }
@@ -512,11 +631,13 @@ export function createAgentRunner({
     if (parsed.ok) return;
     const { adapter, opts, flags, env, bin } = j.respawn;
     let argv;
-    try { argv = agentArgs(adapter, { ...opts, worktree: undefined, resume: j.session_id }, flags); } catch { return; }
-    const prompt = `${file} is not in the agreed format: ${parsed.errors.slice(0, 8).join('; ')}. Rewrite only REPORT.md, exactly in the format given at the start (keep every section heading, even when empty). Do not change any other file.`;
+    try { argv = agentArgs(adapter, { ...opts, worktree: undefined, resume: fresh ? undefined : j.session_id }, flags); } catch { return; }
+    // Agent không nói tiếp phiên được (Codex): phiên mới không thấy khuôn lúc đầu → gửi kèm khuôn mẫu.
+    const format = fresh ? `\n\nThe agreed format:\n${reportTemplate({ jobId: j.id, contractId: j.contractId })}` : '';
+    const prompt = `${file} is not in the agreed format: ${parsed.errors.slice(0, 8).join('; ')}. Rewrite only REPORT.md, exactly in the ${fresh ? 'format below' : 'format given at the start'} (keep every section heading, even when empty). Do not change any other file.${format}`;
     await new Promise((resolve) => {
       let child;
-      try { child = spawnImpl(bin, argv, { cwd: j.worktree || j.respawn.cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); } catch { resolve(); return; }
+      try { child = childSpawn(bin, argv, { cwd: j.worktree || j.respawn.cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); } catch { resolve(); return; }
       const timer = setTimeout(() => { try { child.kill(); } catch { /* đã thoát */ } }, REPORT_REPAIR_MS);
       const done = () => { clearTimeout(timer); resolve(); };
       child.stdout?.on?.('data', () => undefined);
@@ -536,7 +657,7 @@ export function createAgentRunner({
     // Đầu ra `git_branch`: commit thay đổi của worktree lên nhánh của job TRƯỚC khi đo — bằng chứng gắn đúng một commit.
     if (j.worktree && j.contract?.outputs?.some((o) => o.kind === 'git_branch')) {
       try {
-        j.delivery = await commitJobWork(j.worktree, `aivin: ${j.contractId} v${j.contract.version} (job ${j.id})`, { jobId: j.id });
+        j.delivery = await commitJobWork(j.worktree, `aivin: ${j.contractId} v${j.contract.version} (job ${j.id})`, { jobId: j.id, ...(gitOpts || {}) });
       } catch (e) { j.delivery = { error: e.message.slice(0, 300) }; }
     }
     persist(j);
@@ -544,6 +665,7 @@ export function createAgentRunner({
       const evidence = await measure({
         job: { id: j.id, contractSha: j.contractSha, worktree: j.worktree, cwd: j.cwd, baseCommit: j.baseCommit, mainStateBefore: j.mainStateBefore, delivery: j.delivery },
         contract: j.contract, testCheck: j.hasTestCheck ? parseTestCheck(j.testCheckText) : null, jobDir: dirOf(j.id), signal: j.abort.signal,
+        ...(runAs ? { gitOpts, runCommand: (cmd, o) => runVerifyCommand(cmd, { ...o, spawnImpl: childSpawn }) } : {}),
       });
       if (j.isolate && !j.worktree) {
         evidence.worktree_missing = true;
@@ -564,6 +686,7 @@ export function createAgentRunner({
     if ([...jobs.values()].filter((j) => RUNNING.has(j.status)).length >= MAX_JOBS) throw new DeviceToolError(AGENT_BUSY, `${MAX_JOBS} agent tasks are already running — wait or agent.stop one`);
     const adapter = adapterFor(args.agent ? String(args.agent) : undefined);
     const account = args.account ? String(args.account).trim() : '';
+    if (runAs && account) throw invalid('account profiles are not used on an organisation computer — each member signs in to the agent with their own account');
     const accountDir = account ? agentProfileDir(adapter, account, { root: profilesRoot }) : null;
     const jobId = `${adapter.id}-${randomUUID().slice(0, 8)}`;
 
@@ -580,7 +703,7 @@ export function createAgentRunner({
       if (!withContract) throw invalid('continue_job needs the contract (the same or a new version)');
     }
     if (withContract) {
-      const prep = await prepareContract(args, env, jobId, prev);
+      const prep = await prepareContract(args, env, jobId, prev, adapter);
       ({ cwd, spawnCwd, agentOpts, wallMs } = prep);
       extra = prep.job;
     } else {
@@ -591,7 +714,7 @@ export function createAgentRunner({
         projectConfig: args.project_config !== false,
       };
     }
-    const session = prev ? prev.session_id : String(args.session || 'new');
+    const session = prev ? (adapter.resumable === false ? 'new' : prev.session_id) : String(args.session || 'new');
     const resume = session === 'new' ? undefined
       : session === 'continue' ? loadSessions().find((s) => s.agent === adapter.id && s.cwd === cwd && (s.account || '') === account)?.session_id
       : session;
@@ -619,7 +742,7 @@ export function createAgentRunner({
     };
     // Hồ sơ tài khoản: thư mục cấu hình riêng qua biến môi trường chính thức của agent — phiên / đăng nhập / hạn mức của tài khoản đó.
     const childEnv = accountDir ? { ...agentEnv(process.env), [adapter.profileEnv]: accountDir } : agentEnv(process.env);
-    const child = spawnImpl(binaryOf(adapter).bin, argv, { cwd: spawnCwd || cwd, env: childEnv, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = childSpawn(binaryOf(adapter).bin, argv, { cwd: spawnCwd || cwd, env: childEnv, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     j.child = child;
     // Gọi lại cùng phiên (nhắc ghi lại REPORT.md) cần đúng tệp chạy, cờ, môi trường của lần này.
     if (withContract) j.respawn = { adapter, bin: binaryOf(adapter).bin, opts: { ...agentOpts, model: args.model ? String(args.model) : undefined }, flags: await flagsOf(adapter), env: childEnv, cwd: spawnCwd || cwd };
@@ -734,11 +857,11 @@ export function createAgentRunner({
     if (RUNNING.has(j.status)) throw invalid(`${j.id} is still running`);
     if (!j.worktree || j.worktreeRemoved) return { job: j.id, removed: false, reason: 'no worktree to remove' };
     const wt = j.worktree;
-    const known = (await listWorktrees(j.cwd)).some((t) => path.resolve(t).toLowerCase() === path.resolve(wt).toLowerCase());
+    const known = (await listWorktrees(j.cwd, gitOpts)).some((t) => path.resolve(t).toLowerCase() === path.resolve(wt).toLowerCase());
     if (!known) throw invalid(`${wt} is not a worktree of ${j.cwdShown}`);
     if (hasLinks(wt)) throw invalid(`${wt} contains links (symlink / junction) — remove it by hand so nothing outside it is deleted`);
-    await gitWrite(j.cwd, ['worktree', 'unlock', wt]).catch(() => undefined);
-    await gitWrite(j.cwd, ['worktree', 'remove', '--force', wt]);
+    await gitWrite(j.cwd, ['worktree', 'unlock', wt], gitOpts).catch(() => undefined);
+    await gitWrite(j.cwd, ['worktree', 'remove', '--force', wt], gitOpts);
     j.worktreeRemoved = true;
     persist(j);
     return { job: j.id, removed: true, worktree: wt, ...(j.delivery?.branch ? { branch_kept: j.delivery.branch } : {}) };
