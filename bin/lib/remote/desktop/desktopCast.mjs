@@ -291,7 +291,9 @@ export function createDesktopCastManager({ dir = CAST_DIR, spawnImpl = spawn } =
       } else if (msg.t === 'cursor_hidden') {
         cursorHidden = msg.hidden === true;
       } else if (msg.t === 'clipboard') {
-        if (typeof msg.text === 'string' && msg.text) onClipboard?.({ text: msg.text });
+        // Ảnh / chụp màn hình: không kèm chữ, vẫn báo để người xem biết máy vừa copy.
+        const text = typeof msg.text === 'string' ? msg.text : '';
+        if (text || msg.changed === true) onClipboard?.(text ? { text } : {});
       } else if (msg.t === 'secure_desktop') {
         onSecureDesktop?.({ active: msg.active === true });
       } else if (msg.t === 'capture') {

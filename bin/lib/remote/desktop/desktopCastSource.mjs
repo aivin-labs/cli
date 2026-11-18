@@ -189,6 +189,7 @@ namespace AivinDesktopCast {
   public static class CastPaste {
     public static bool Run(Func<System.Windows.Forms.DataObject> build, bool notifyOnFail) {
       bool ok = false;
+      ClipboardSync.ExpectOwnWrite();
       var sta = new Thread(() => {
         try {
           System.Windows.Forms.Clipboard.SetDataObject(build(), true, 10, 100);
@@ -198,6 +199,7 @@ namespace AivinDesktopCast {
       sta.SetApartmentState(ApartmentState.STA);
       sta.Start();
       bool done = sta.Join(3000) && ok;
+      if (done) ClipboardSync.OwnWriteDone();
       if (done) PressPaste();
       else if (notifyOnFail) Out.Send(Out.Msg("paste_failed"));
       return done;

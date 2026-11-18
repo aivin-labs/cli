@@ -863,17 +863,34 @@ namespace AivinDesktopCast {
     }
   }
 
-  /** Đồng bộ bộ nhớ tạm (Clipboard văn bản Unicode) hai chiều giữa máy từ xa và trình duyệt điều khiển. */
+  /**
+   * Đồng bộ bộ nhớ tạm giữa máy từ xa và trình duyệt điều khiển. Mọi lần người dùng máy copy (kể cả ảnh, ảnh chụp màn hình) đều báo:
+   * người xem cần biết bên nào copy sau cùng để Ctrl + V dán đúng bên. Chữ thì gửi kèm nội dung.
+   */
   public static class ClipboardSync {
     const uint CF_UNICODETEXT = 13;
     const uint GMEM_MOVEABLE = 0x0002;
     const int MAX_CHARS = 65536;
+    const long OWN_WRITE_TICKS = 1500 * TimeSpan.TicksPerMillisecond;
     static readonly object syncGate = new object();
     static uint lastSeq = 0;
     static string lastText = "";
+    static long ownUntil = 0;
 
     public static void Init() {
       try { lastSeq = Native.GetClipboardSequenceNumber(); } catch { }
+    }
+
+    /** Lệnh dán của người xem sắp ghi clipboard: lần đổi đó không phải người dùng máy copy, không báo. */
+    public static void ExpectOwnWrite() {
+      lock (syncGate) { ownUntil = DateTime.UtcNow.Ticks + OWN_WRITE_TICKS; }
+    }
+
+    /** Đã ghi xong: nhận số thứ tự hiện tại là của mình. */
+    public static void OwnWriteDone() {
+      lock (syncGate) {
+        try { lastSeq = Native.GetClipboardSequenceNumber(); } catch { }
+      }
     }
 
     public static void Poll() {
@@ -884,12 +901,14 @@ namespace AivinDesktopCast {
       lock (syncGate) {
         if (seq == lastSeq) return;
         lastSeq = seq;
+        if (DateTime.UtcNow.Ticks < ownUntil) return;
         text = ReadTextUnsafe();
-        if (string.IsNullOrEmpty(text) || text == lastText) return;
-        lastText = text;
+        if (string.IsNullOrEmpty(text) || text == lastText) text = null;
+        else lastText = text;
       }
       var msg = Out.Msg("clipboard");
-      msg["text"] = text;
+      msg["changed"] = true;
+      if (text != null) msg["text"] = text;
       Out.Send(msg);
     }
 

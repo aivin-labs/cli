@@ -359,9 +359,12 @@ test('WebRTC Clipboard + Secure Desktop: đẩy hai chiều qua kênh điều kh
   pcs[0].input.readyState = 'open';
 
   device.pushClipboard({ text: 'copied from remote' });
+  // Máy copy ảnh / chụp màn hình: vẫn báo (không kèm chữ) để Ctrl + V của người xem dán của máy (18/11/2026).
+  device.pushClipboard({});
   device.pushSecureDesktop({ active: true });
   assert.deepEqual(sentInput, [
     { t: 'clipboard', text: 'copied from remote' },
+    { t: 'clipboard' },
     { t: 'secure_desktop', active: true },
   ]);
 

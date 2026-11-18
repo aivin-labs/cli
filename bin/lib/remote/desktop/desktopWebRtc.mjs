@@ -371,11 +371,10 @@ export function createDesktopWebRtc({ emitSignal = () => {}, emitStatus = () => 
     }
   }
 
-  /** Nội dung Clipboard văn bản mới trên máy từ xa → gửi qua kênh điều khiển cho trình duyệt người xem. */
+  /** Máy từ xa vừa copy (chữ thì kèm nội dung) → báo trình duyệt người xem qua kênh điều khiển: Ctrl + V sau đó dán của máy. */
   function pushClipboard(clip) {
     const text = typeof clip?.text === 'string' ? clip.text : '';
-    if (!text) return;
-    const packet = JSON.stringify({ t: 'clipboard', text });
+    const packet = JSON.stringify(text ? { t: 'clipboard', text } : { t: 'clipboard' });
     for (const peer of peers.values()) {
       if (peer.inputChannel?.readyState !== 'open') continue;
       try { peer.inputChannel.send(packet); } catch { /* kênh vừa đóng */ }
