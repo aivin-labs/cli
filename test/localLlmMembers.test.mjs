@@ -173,7 +173,8 @@ test('Claude Code: bắt đầu → link; dán mã → ghi vào stdin, agent tho
   assert.equal(started.state, LoginState.PENDING);
   assert.equal(started.needs_code, true);
   assert.match(started.url, /oauth\/authorize/);
-  assert.deepEqual(spawned[0].argv, ['auth', 'login', '--claudeai']);
+  // Linux bọc lệnh bằng `prlimit --nproc=… -- <agent>` (giới hạn tiến trình của thành viên) — chỉ kiểm phần lệnh của agent (CI ubuntu 17/11 trượt).
+  assert.deepEqual(spawned[0].argv.slice(-3), ['auth', 'login', '--claudeai']);
   assert.deepEqual([spawned[0].opts.uid, spawned[0].opts.env.HOME], [alice.uid, alice.home]);
   // Người khác không dùng được lần đăng nhập của Alice.
   await assert.rejects(login.submitCode({ login_id: started.login_id, code: 'abcdef#123456' }, { runAs: bob }), (e) => e.code === 'NOT_FOUND');
@@ -189,7 +190,7 @@ test('Codex: link + mã thiết bị; xác nhận trên trình duyệt → agent
   const { login, spawned } = makeLogin({ onSpawn: (c) => c.stdout.write(CODEX_LOGIN_OUT) });
   const started = await login.start({ agent: 'codex' }, { runAs: bob });
   assert.deepEqual([started.url, started.user_code, started.needs_code], ['https://auth.openai.com/codex/device', 'MZ01-M041L', false]);
-  assert.deepEqual(spawned[0].argv, ['login', '--device-auth']);
+  assert.deepEqual(spawned[0].argv.slice(-2), ['login', '--device-auth']);
   setTimeout(() => spawned[0].emit('exit', 0), 30);
   const polled = await login.poll({ login_id: started.login_id, wait_ms: 2000 }, { runAs: bob });
   assert.equal(polled.state, LoginState.SUCCEEDED);
