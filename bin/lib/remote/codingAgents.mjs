@@ -733,6 +733,11 @@ export function createAgentRunner({
       argv = agentArgs(adapter, { ...agentOpts, resume, model: args.model ? String(args.model) : undefined }, flags);
     } catch (e) {
       if (withContract) fs.rmSync(dirOf(jobId), { recursive: true, force: true });
+      // Worktree daemon vừa dựng cho job này (chưa giao agent) → gỡ luôn worktree + nhánh, không để rác trong repo của người dùng.
+      if (withContract && !prev && extra.worktree && extra.fixedWorktree) {
+        await gitWrite(cwd, ['worktree', 'remove', '--force', extra.worktree], gitOpts).catch(() => undefined);
+        await gitWrite(cwd, ['branch', '-D', `aivin/${jobId}`], gitOpts).catch(() => undefined);
+      }
       throw e;
     }
     const fullPrompt = withContract
