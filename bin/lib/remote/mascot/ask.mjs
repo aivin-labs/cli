@@ -7,6 +7,7 @@ import { fetchMascotImage } from './images.mjs';
 import { fileChip } from './fileChips.mjs';
 import { lucidePath } from './lucideIcons.mjs';
 import { safeLinkUrl, safeWebUrl } from './safeUrl.mjs';
+import { createLocalLinkRegistry, LOCAL_LINK_PREFIX, localOpenTarget, LocalOpenKind, openLocal as openLocalPath } from './localOpen.mjs';
 import { MascotText, mascotText } from './strings.mjs';
 
 /**
@@ -151,6 +152,8 @@ export function createMascotChat({
   const features = { inbox: false, cancel: false, newChat: false, parallel: false };
   /** Câu hỏi đang chờ theo thứ tự đến: `{ session_id, reply_id, kind, options, text }`; đầu hàng = câu đang có nút. */
   const queue = [];
+  /** Nút mở tệp / thư mục trên máy (`links[].path`): cửa sổ chỉ cầm mã `local:<id>`, daemon tra ra đường dẫn rồi kiểm (localOpen.mjs). */
+  const localLinks = createLocalLinkRegistry();
   const head = () => queue[0] || null;
   const seenNotify = new Set();
   /** Tệp thả vào bot, chờ đi kèm câu kế tiếp. */
@@ -322,6 +325,13 @@ export function createMascotChat({
   const linkButtons = (payload) => {
     const web = payload?.session_id ? safeWebUrl(webUrlForSession(payload.session_id, serverUrl)) : null;
     const links = (Array.isArray(payload?.links) ? payload.links : []).map((l) => {
+      // (18/11/2026) Tệp / thư mục TRÊN MÁY (thẻ duyệt việc lập trình: thư mục dự án, TEST_CHECK.md): chỉ khi đường dẫn có thật trên máy này.
+      if (typeof l?.path === 'string' && l.path) {
+        const target = localOpenTarget(l.path);
+        if (!target) return { text: '', url: null };
+        const icon = lucidePath(l?.icon) || lucidePath(target.kind === LocalOpenKind.FOLDER ? 'folder-open' : 'file-text') || lucidePath('folder');
+        return { text: typeof l?.text === 'string' ? l.text.trim() : '', url: `${LOCAL_LINK_PREFIX}${localLinks.register(target.path)}`, icon_path: icon };
+      }
       const url = l?.web === true ? web : safeLinkUrl(l?.url);
       const scheme = String(url || '').split(':')[0].toLowerCase();
       return { text: typeof l?.text === 'string' ? l.text.trim() : '', url, icon_path: lucidePath(l?.icon) || lucidePath(LINK_SCHEME_ICONS[scheme] || LINK_SCHEME_ICONS.https) };
@@ -1005,8 +1015,14 @@ export function createMascotChat({
     }
   }
 
+  /** Cửa sổ bấm nút mở trên máy: tra mã → đường dẫn đã đăng ký, kiểm lại (có thể đã bị xoá) rồi mới mở. */
+  const openLocal = (id) => {
+    const p = localLinks.pathOf(id);
+    if (!p || !openLocalPath(p)) send({ t: AskCommand.STATUS, text: t(MascotText.ASK_LOCAL_OPEN_FAILED) });
+  };
+
   return {
-    openTool,
+    openTool, openLocal,
     ask, reply, choose, attach, detach, setWorkDir, workDirDenied, workDir: () => workDir, cancel, newChat, onChatEvent, onNotify, onQuestionClosed, syncInbox, checkQuestions, setServerFeatures, busy: () => !!current || !!call, hasPending: () => queue.length > 0, userWindow: () => target,
     voiceStart, voiceAudio, voiceInterrupt, voiceStop, voiceMicLost, voiceDisconnected, onVoiceEvent, setVoiceSupported, inCall: () => !!call,
     setNotifyFreq: (val) => { const v = Number(val); if (Number.isInteger(v) && v >= 0 && v <= 2) currentNotifyFreq = v; },

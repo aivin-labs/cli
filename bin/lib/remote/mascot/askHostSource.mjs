@@ -345,10 +345,11 @@ function LinkCard($text, $url, $iconPath = '${LINK_ICON_PATH}') {
   $dock = New-Object Windows.Controls.DockPanel; $dock.MaxWidth = ${CHOICE_ROW_WIDTH}
   $icon = LucideIcon $(if ($iconPath) { $iconPath } else { '${LINK_ICON_PATH}' }) 13 '${ICON_INKS[2]}'; $icon.Margin = '8,2,0,0'; $icon.VerticalAlignment = 'Top'; [Windows.Controls.DockPanel]::SetDock($icon, 'Right'); [void]$dock.Children.Add($icon)
   $tb = New-Object Windows.Controls.TextBlock; $tb.TextWrapping = 'Wrap'; $tb.Foreground = Brush '${CHOICE_INK}'; SetText $tb $text; [void]$dock.Children.Add($tb)
-  $btn = New-Object Windows.Controls.Button; $btn.Style = $w.FindResource('Btn'); $btn.Content = $dock; $btn.CommandParameter = [string]$url; $btn.ToolTip = [string]$url
+  $btn = New-Object Windows.Controls.Button; $btn.Style = $w.FindResource('Btn'); $btn.Content = $dock; $btn.CommandParameter = [string]$url; if (-not ([string]$url).StartsWith('local:')) { $btn.ToolTip = [string]$url }
   $btn.FontSize = 13; $btn.FontWeight = 'Normal'; $btn.Padding = '10,6,10,6'; $btn.Margin = '0,0,0,3'; $btn.HorizontalAlignment = 'Left'
   $btn.Background = Brush '${CHOICE_CARDS[2]}'; $btn.BorderThickness = '0'; $btn.Tag = Brush '${CHOICE_HOVER}'
-  $btn.Add_Click({ param($s) OpenWebUrl $s.CommandParameter })
+  # Open-on-this-computer buttons (url 'local:<id>'): the window never opens them itself - it sends the id, the daemon checks the path first (localOpen.mjs).
+  $btn.Add_Click({ param($s) $u = [string]$s.CommandParameter; if ($u.StartsWith('local:')) { Send @{ t = 'open_local'; id = $u.Substring(6) } } else { OpenWebUrl $u } })
   $btn
 }
 function ChatLinks($row, $links) {

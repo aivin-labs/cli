@@ -466,6 +466,7 @@ export async function startRemoteClient(options = {}) {
     onCancel: () => { void mascotChat?.cancel(); },
     onNewChat: () => { void mascotChat?.newChat(); },
     onOpenTool: (msg) => { void mascotChat?.openTool(msg); },
+    onOpenLocal: (id) => mascotChat?.openLocal(id),
     onNotifyFreq: (val) => { mascotChat?.setNotifyFreq(val); },
     // Thả tệp vào bot → đi kèm câu gõ kế tiếp.
     // "Gửi cho AIVIN Bot" từ Explorer có thể tới trước khi ô hỏi dựng xong (daemon vừa được khay mở) → giữ lại, dựng xong thì đính.

@@ -439,3 +439,32 @@ test('link phiên trên web: đúng tên miền web của máy chủ đang ghép
   assert.equal(webUrlForSession('s1', 'https://api.aivin.cloud'), 'https://aivin.cloud/?session_id=s1');
   assert.equal(webUrlForSession('s 1', 'wss://demo-api.aivin.vn:8443'), 'https://demo.aivin.vn:8443/?session_id=s%201');
 });
+
+test('nút mở tệp / thư mục trên máy (thẻ duyệt việc lập trình): cửa sổ chỉ cầm mã; đường dẫn không có trên máy thì không có nút', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-local-'));
+  const file = path.join(dir, 'TEST_CHECK.md');
+  fs.writeFileSync(file, '# check');
+  const sent = [];
+  const emitted = [];
+  const socket = { connected: true, timeout() { return this; }, async emitWithAck(event, payload) { emitted.push({ event, payload }); return { ok: true }; } };
+  const chat = createMascotChat({ socket: () => socket, send: (c) => sent.push(c), lang: 'vi', onAlert: () => {}, onPending: () => {}, serverUrl: 'https://beta-api.aivin.vn' });
+  await chat.ask('Làm web');
+  chat.onChatEvent({
+    request_id: emitted[0].payload.request_id, kind: 'answer', text: 'Duyệt?', session_id: 's1',
+    links: [{ text: 'Mở thư mục', path: dir }, { text: 'TEST_CHECK.md', path: file }, { text: 'Mất', path: path.join(dir, 'missing') }, { text: 'Mạng', path: String.raw`\\srv\share` }],
+  });
+  const row = assistantRows(sent).at(-1);
+  assert.deepEqual(row.links.map((l) => l.text), ['Mở thư mục', 'TEST_CHECK.md']);
+  assert.ok(row.links.every((l) => /^local:l\d+$/.test(l.url)), 'cửa sổ chỉ nhận mã, không nhận đường dẫn');
+  assert.ok(!JSON.stringify(row.links).includes(dir), 'đường dẫn không đi xuống cửa sổ');
+  // Mã lạ → báo không mở được, không chạy gì.
+  chat.openLocal('l999');
+  assert.equal(sent.at(-1).t, 'ask_status');
+  fs.rmSync(dir, { recursive: true, force: true });
+  // Đã đăng ký nhưng tệp bị xoá sau đó → kiểm lại lúc bấm, báo không mở được.
+  chat.openLocal(row.links[1].url.slice('local:'.length));
+  assert.equal(sent.at(-1).t, 'ask_status');
+});

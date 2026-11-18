@@ -122,7 +122,7 @@ export function requestMascotHide(file = MASCOT_HIDE_FILE) {
   fs.writeFileSync(file, String(Date.now()));
 }
 export const HostEvent = Object.freeze({
-  READY: 'ready', POS: 'pos', PAUSE: 'pause', RESUME: 'resume', HIDE: 'hide', OFF: 'off', ASK: 'ask', CHOOSE: 'choose', CANCEL: 'cancel', NEW_CHAT: 'new_chat', OPEN_WEBVIEW: 'open_webview',
+  READY: 'ready', POS: 'pos', PAUSE: 'pause', RESUME: 'resume', HIDE: 'hide', OFF: 'off', ASK: 'ask', CHOOSE: 'choose', CANCEL: 'cancel', NEW_CHAT: 'new_chat', OPEN_WEBVIEW: 'open_webview', OPEN_LOCAL: 'open_local',
   DROP: 'drop', DETACH: 'detach', AWAY: 'away', BACK: 'back', NOTIFY_FREQ: 'notify_freq', HOTKEYS: 'hotkeys',
   VOICE_START: 'voice_start', VOICE_AUDIO: 'voice_audio', VOICE_INTERRUPT: 'voice_interrupt', VOICE_STOP: 'voice_stop', VOICE_MIC_LOST: 'voice_mic_lost',
 });
@@ -240,7 +240,7 @@ export function userWindow(w) {
  */
 export function createMascot({
   enabled = true, platform = process.platform, env = process.env, lang: preferredLang, onPause = () => {}, onResume = () => {}, say = () => {},
-  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onOpenTool = () => {}, onDrop = () => {}, onWorkFolder = () => {}, onDetach = () => {}, onNotifyFreq = () => {},
+  onAsk = () => {}, onVoice = () => {}, onChoose = () => {}, onCancel = () => {}, onNewChat = () => {}, onOpenTool = () => {}, onOpenLocal = () => {}, onDrop = () => {}, onWorkFolder = () => {}, onDetach = () => {}, onNotifyFreq = () => {},
   spawnImpl = spawn, dir = MASCOT_DIR, settingsFile = MASCOT_SETTINGS_FILE, showFile = MASCOT_SHOW_FILE, hideFile = MASCOT_HIDE_FILE, voiceFile = MASCOT_VOICE_FILE, hotkeysFile = MASCOT_HOTKEYS_FILE,
   attachDir = MASCOT_ATTACH_DIR, now = Date.now, timers = { setTimeout, clearTimeout },
   thinkMs = THINK_MS, resultMs = RESULT_MS, mainThrottleMs = MAIN_THROTTLE_MS, offlineGraceMs = OFFLINE_GRACE_MS, restartDelaysMs = RESTART_DELAYS_MS, awayWaveMs = AWAY_WAVE_MS,
@@ -352,6 +352,8 @@ export function createMascot({
     // Nút "Chat mới" trên bảng: phiên chat mới cho linh vật.
     if (msg.t === HostEvent.NEW_CHAT) return onNewChat();
     if (msg.t === HostEvent.OPEN_WEBVIEW) return onOpenTool(msg);
+    // Nút mở tệp / thư mục trên máy (thẻ duyệt việc lập trình): cửa sổ chỉ gửi mã, daemon tra + kiểm rồi mới mở (localOpen.mjs).
+    if (msg.t === HostEvent.OPEN_LOCAL && typeof msg.id === 'string' && msg.id) return onOpenLocal(msg.id);
     if (msg.t === HostEvent.NOTIFY_FREQ && Number.isFinite(msg.value)) {
       const val = Number(msg.value);
       if (val >= 0 && val <= 2) {
