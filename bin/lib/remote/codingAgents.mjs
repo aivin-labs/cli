@@ -11,6 +11,7 @@ import { parseContract, parseReport, parseTestCheck, reportTemplate, sha256 } fr
 /** Thời gian tối đa cho lượt nhắc agent ghi lại REPORT.md sai khuôn (cùng phiên). */
 const REPORT_REPAIR_MS = 5 * 60_000;
 import { commitJobWork, gitRead, gitWrite, globToRegExp, listWorktrees, measureEvidence, resolveCommit, runVerifyCommand, worktreeState } from './agentEvidence.mjs';
+import { PREVIEW_MAX_SHOTS, capturePreview } from './agentPreview.mjs';
 
 const MAX_SCOPE_RULES = 400;
 /** Mẫu kiểu gitignore → mẫu luật quyền của Claude Code, neo ở mọi tầng (`package.json` → `**\/package.json`). */
@@ -190,13 +191,16 @@ function chownTree(dir, uid, gid) {
 }
 
 /** Thêm một mẫu vào `info/exclude` của kho (không đụng .gitignore của dự án) — thư mục worktree của job không làm bẩn `git status`. */
-async function excludeFromRepo(cwd, pattern, gitOpts) {
+async function excludeFromRepo(cwd, pattern, gitOpts, owner = null) {
   try {
     const file = path.resolve(cwd, (await gitRead(cwd, ['rev-parse', '--git-path', 'info/exclude'], gitOpts)).toString().trim());
-    const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    const existed = fs.existsSync(file);
+    const text = existed ? fs.readFileSync(file, 'utf8') : '';
     if (!text.split(/\r?\n/).includes(pattern)) {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.appendFileSync(file, `${text && !text.endsWith('\n') ? '\n' : ''}${pattern}\n`);
+      // Máy tổ chức: tệp mới trong .git của thành viên phải thuộc về họ (daemon là root).
+      if (!existed && owner) { try { fs.chownSync(file, owner.uid, owner.gid); } catch { /* bỏ qua */ } }
     }
   } catch { /* không ghi được — worktree vẫn chạy, chỉ hiện trong git status */ }
 }
@@ -572,7 +576,7 @@ export function createAgentRunner({
     // Máy tổ chức: daemon luôn tự dựng worktree (dưới tài khoản thành viên) — không để agent dựng bằng đường dẫn root không biết trước.
     if (!prev && isolate && (runAs || adapter.selfWorktree === false || (baseCommit !== (await resolveCommit(cwd, 'HEAD', gitOpts))))) {
       ownWorktree = path.join(cwd, '.aivin-worktrees', jobId);
-      await excludeFromRepo(cwd, '/.aivin-worktrees/', gitOpts);
+      await excludeFromRepo(cwd, '/.aivin-worktrees/', gitOpts, runAs);
       await gitWrite(cwd, ['worktree', 'add', '-q', '-b', `aivin/${jobId}`, ownWorktree, baseCommit], gitOpts);
     }
 
@@ -867,13 +871,28 @@ export function createAgentRunner({
     return { job: j.id, removed: true, worktree: wt, ...(j.delivery?.branch ? { branch_kept: j.delivery.branch } : {}) };
   }
 
+  /**
+   * Cổng khớp wireframe (18/11/2026): chạy app của job trong worktree của nó, chụp các đường dẫn BE nêu, tắt app (agentPreview.mjs). Chỉ khi job
+   * đã đo xong và worktree còn. Máy tổ chức: lệnh mở app chạy dưới tài khoản thành viên như lệnh verify.
+   */
+  async function preview(args, ctx) {
+    const j = contractJob(args);
+    if (RUNNING.has(j.status)) throw invalid(`${j.id} is still running`);
+    if (!j.worktree || j.worktreeRemoved) throw invalid(`${j.id} has no worktree any more — preview runs before cleanup`);
+    try {
+      return { job: j.id, ...(await capturePreview(args, { cwd: j.worktree, spawnApp: childSpawn, signal: ctx?.signal })) };
+    } catch (e) {
+      throw invalid(e.message);
+    }
+  }
+
   function sessions(args, _ctx, env = {}) {
     const cwd = args.cwd ? resolveInRoots(env.roots || [], String(args.cwd)) : null;
     return { sessions: loadSessions().filter((s) => (!cwd || s.cwd === cwd) && (!args.agent || s.agent === args.agent)).slice(0, 20) };
   }
 
   return {
-    run, status, stop, sessions, jobFile, cleanup,
+    run, status, stop, sessions, jobFile, cleanup, preview,
     profiles: () => ({ profiles: listAgentProfiles(installed(), { root: profilesRoot }) }),
     installed: () => installed().map((a) => ({ id: a.id, label: a.label, version: binaryOf(a).version })),
     /** Còn job đang chạy / đang đo — daemon không tự khởi động lại để cập nhật lúc này. */
@@ -912,6 +931,13 @@ export function buildAgentTools(runner) {
     { name: 'agent.cleanup', group: ToolGroup.PROC, internal: true, handler: (a) => runner.cleanup(a),
       description: "BE-only: remove a finished contract job's worktree (the delivery branch is kept).",
       input_schema: schema({ job: str('contract job') }, ['job']) },
+    { name: 'agent.preview', group: ToolGroup.PROC, internal: true, handler: (a, c) => runner.preview(a, c),
+      description: "BE-only: start the app of a finished contract job inside its worktree (argv), wait for url to answer, screenshot each shot path headless, stop the app. Returns PNGs (base64) to compare with the wireframe.",
+      input_schema: schema({
+        job: str('contract job'), argv: { type: 'array', items: { type: 'string' }, description: 'command that starts the app, as words' },
+        url: str('base address on this computer, e.g. http://localhost:5173'), ready_timeout_ms: num('wait this long for the app to answer (max 600000)'),
+        shots: { type: 'array', items: { type: 'object', properties: { id: str('screen id'), path: str('path starting with /'), device: str('desktop | tablet | mobile') } }, description: `at most ${PREVIEW_MAX_SHOTS} screens` },
+      }, ['job', 'argv', 'url', 'shots']) },
     { name: 'agent.profiles', group: ToolGroup.PROC, read_only: true, handler: () => runner.profiles(),
       description: 'Account profiles of each installed coding agent on this computer (each has its own sign-in and usage limits). Pass one as account to agent.run to switch account without any UI. The person creates a profile once by signing in to it.',
       input_schema: schema({}) },
