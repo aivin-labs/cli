@@ -20,7 +20,8 @@ import { killWindowsTree } from './winTree.mjs';
  */
 
 export const PREVIEW_MAX_SHOTS = 8;
-const PREVIEW_MAX_TOTAL_BYTES = 6 * 1024 * 1024;
+/** Ảnh thô; base64 phình ~4/3 — giữ dưới MAX_RESULT_BYTES (8 MB) của một kết quả công cụ. */
+const PREVIEW_MAX_TOTAL_BYTES = Math.floor(4.5 * 1024 * 1024);
 const POLL_MS = 500;
 const SHOT_TIMEOUT_MS = 45_000;
 const DEFAULT_READY_MS = 90_000;

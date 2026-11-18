@@ -154,7 +154,7 @@ test('đầu vào sai + danh mục: không đề bài, thư mục ngoài vùng, 
   await assert.rejects(createAgentRunner({ find: () => null }).run({ prompt: 'x' }, {}, env), /No coding agent is installed/);
 
   assert.deepEqual(buildAgentTools(runner).map((t) => [t.name, !!t.read_only]),
-    [['agent.run', false], ['agent.status', true], ['agent.stop', false], ['agent.job_file', true], ['agent.cleanup', false], ['agent.profiles', true], ['agent.sessions', true]]);
+    [['agent.run', false], ['agent.status', true], ['agent.stop', false], ['agent.job_file', true], ['agent.cleanup', false], ['agent.preview', false], ['agent.profiles', true], ['agent.sessions', true]]);
   const base = { roots: [root], binaries: [], projects: [], processes: { start() {} } };
   assert.equal(buildTools({ ...base, schedules: {}, runAs: { uid: 1 }, codingAgents: runner }).some((t) => t.name.startsWith('agent.')), false, 'máy tính tổ chức: không');
   assert.ok(buildTools({ ...base, schedules: {}, codingAgents: runner }).some((t) => t.name === 'agent.run'), 'máy cá nhân có agent: có');
