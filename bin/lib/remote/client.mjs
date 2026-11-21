@@ -32,6 +32,8 @@ import { showOSNotification } from './notify.mjs';
 import { createMeetingManager, watchMeetingRequests } from './meeting/index.mjs';
 import { createMediaHost, mediaSupported } from './meeting/recorder.mjs';
 import { createClipboard } from './clipboard.mjs';
+import { lightcodeReadiness, startLightcodeEventBridge } from './lightcodeAgent.mjs';
+import { sanitizeAuthEnv } from './ephemeralAuth.mjs';
 import { activeAgentRunner, activeLlmLogin, activeLocalLlm, buildTools, toolMap } from './toolHandlers.mjs';
 import { createLocalLlm } from './localLlm.mjs';
 import { localLlmAccounts } from './localLlmAccounts.mjs';
@@ -70,6 +72,8 @@ import {
 } from '../selfUpdate.mjs';
 import { cliLaunchCommand, detectSupervisor } from './autoStart.mjs';
 
+/** Cách nhau bao lâu thì xem lại LightCode đã dùng được chưa (người dùng đăng nhập tài khoản sau khi máy kết nối). */
+const LIGHTCODE_WATCH_MS = 60_000;
 const HEARTBEAT_MS = 20_000;
 // Nhịp nối lại tối đa. Máy cá nhân giãn tới 30 s (nhiều máy cùng dội BE lúc deploy). Cloud Computer (`--multi-user`): một socket / org qua
 // mạng nội bộ, BE có thể đang chờ máy nối về để giao việc — giãn 30 s (+50 % ngẫu nhiên) nghĩa là BE lên lại rồi vẫn chờ tới ~45 s (28/10/2026).
@@ -136,6 +140,7 @@ export function isValidDeviceCall(call) {
   if (call.args !== undefined && call.args !== null && !isPlainObject(call.args)) return false;
   if (call.timeout_ms !== undefined && call.timeout_ms !== null && !Number.isFinite(call.timeout_ms)) return false;
   if (call.user_scope !== undefined && call.user_scope !== null && typeof call.user_scope !== 'string') return false;
+  if (call.auth_env !== undefined && call.auth_env !== null && !isPlainObject(call.auth_env)) return false;
   if (call.idem_key !== undefined && call.idem_key !== null && (typeof call.idem_key !== 'string' || call.idem_key.length > 80)) return false;
   if (call.purpose !== undefined && call.purpose !== null && typeof call.purpose !== 'string') return false;
   return true;
@@ -402,7 +407,8 @@ export async function startRemoteClient(options = {}) {
       return ack?.ok ? { ok: true } : { ok: false, error: ack?.error || 'failed' };
     },
   }) : null;
-  const env = { roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: officeHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer, meetings, media, clipboard: multiUser ? null : createClipboard(),
+  // Cài xong LightCode (lightcode.install) → chào lại để BE thấy agent mới ngay, không chờ nối lại.
+  const env = { announceProfile: () => announceProfile?.(), roots, binaries: profile.binaries, projects: profile.projects, fileIndex, browserTunnels, gui, office: officeApps.length ? { host: officeHost, apps: officeApps } : null, undo, processes, schedules, watches, transfer, meetings, media, clipboard: multiUser ? null : createClipboard(),
     // Máy tính tổ chức: agent làm mô hình chạy dưới tài khoản từng thành viên, bằng đăng nhập của chính họ (localLlmMembers.mjs).
     ...(multiUser ? { localLlm: createLocalLlm({ memberMode: true }) } : {}) };
   const host = multiUser ? createMultiUserHost({ baseEnv: env, say: (m) => say(chalk.gray(m)) }) : null;
@@ -431,6 +437,8 @@ export async function startRemoteClient(options = {}) {
   const earlyDrops = [];
   let earlyWorkDir = null;
   let announceProfile = null;
+  /** Sự cố LightCode đã báo cho BE ở lần chào gần nhất (null = dùng được / chưa biết) — để chào lại đúng lúc nó đổi. */
+  let lightcodeIssueSent = null;
   const applyWorkDir = (dir) => { if (mascotChat) mascotChat.setWorkDir(dir); else earlyWorkDir = dir; };
   /** Chủ máy đồng ý mở thêm thư mục: có hiệu lực ngay (công cụ đọc env.roots lúc gọi), báo BE hồ sơ mới, lưu cho các lần chạy sau. */
   const grantRoot = (dir) => {
@@ -817,6 +825,25 @@ export async function startRemoteClient(options = {}) {
   }
   const pauseWatch = setInterval(checkPauseNow, PAUSE_POLL_MS);
   pauseWatch.unref?.();
+  // Người dùng đăng nhập tài khoản AI (hoặc kích hoạt bản quyền) trong LightCode sau khi máy đã kết nối → chào lại ngay để BE giao việc cho nó, không đợi lần nối lại.
+  const lightcodeWatch = setInterval(async () => {
+    if (stopped || multiUser || !socket.connected || !activeAgentRunner()?.installed().some((a) => a.id === 'lightcode')) return;
+    const why = await lightcodeReadiness().catch(() => undefined);
+    if (why === undefined || (why || null) === lightcodeIssueSent) return;
+    void announceProfile?.();
+  }, LIGHTCODE_WATCH_MS);
+  lightcodeWatch.unref?.();
+  // Cầu đẩy sự kiện từ LightCode (`job.finished`, `job.attention` — gồm cả deploy): báo ngay lên BE và hiện thông báo hệ thống khi cần chú ý.
+  const lightcodeEventBridge = (!multiUser && process.platform === 'win32') ? startLightcodeEventBridge({
+    onEvent: (ev) => {
+      if (socket.connected) socket.emit(DeviceEvent.LIGHTCODE_EVENT, ev);
+      if (ev?.type === 'job.attention' && !isPaused()) {
+        const title = `LightCode · ${String(ev.title || 'Needs attention').slice(0, 80)}`;
+        const body = String(ev.data?.summary || ev.data?.kind || 'A LightCode job needs your input').slice(0, 200);
+        showOSNotification(title, body);
+      }
+    },
+  }) : null;
   // `aivin remote pause` / nút ở khay / lệnh ngắt cast ở cửa sổ khác: phản ứng ngay khi tệp đổi (fs.watch), không đợi tới 1–2 s của lượt kiểm
   // định kỳ — trong lúc đó màn hình vẫn đang phát cho người xem. Tên tệp có thể vắng (Windows) → kiểm cả hai.
   let configWatcher = null;
@@ -858,6 +885,8 @@ export async function startRemoteClient(options = {}) {
     stopped = true;
     clearInterval(heartbeat);
     clearInterval(pauseWatch);
+    clearInterval(lightcodeWatch);
+    lightcodeEventBridge?.stop();
     clearInterval(castActionTimer);
     try { configWatcher?.close(); } catch { /* đã đóng */ }
     clearTimeout(confirmTimer);
@@ -963,6 +992,19 @@ export async function startRemoteClient(options = {}) {
   const announce = async () => {
     try {
       if (!multiUser) profile.update = updateProfile({ enabled: autoUpdateEnabled });
+      // Agent lập trình chạy được HỢP ĐỒNG trên máy (20/11/2026: gồm LightCode — cài / bật sau khi daemon chạy nên đọc lại mỗi lần chào).
+      // Luôn gửi (kể cả rỗng): BE coi đây là danh sách đầy đủ, không còn đoán "có agent.run là có Claude".
+      const runner = multiUser ? null : activeAgentRunner();
+      if (runner) {
+        profile.coding_agents = runner.installed().map((a) => a.id);
+        // LightCode cài rồi mà chưa dùng được (chưa đăng nhập tài khoản AI nào / hết bản quyền) → BE không giao việc cho nó, thay vì thất bại ngay lượt đầu.
+        delete profile.coding_agent_issues;
+        lightcodeIssueSent = null;
+        if (profile.coding_agents.includes('lightcode')) {
+          const why = await lightcodeReadiness().catch(() => null);
+          if (why) { profile.coding_agent_issues = { lightcode: why }; lightcodeIssueSent = why; }
+        }
+      }
       const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash, inflight: ledger.heldIds() });
       const userLang = hello?.user_lang || hello?.lang;
       if (userLang && mascot.enabled) {
@@ -1096,6 +1138,8 @@ export async function startRemoteClient(options = {}) {
         callEnv = host.envFor(call.user_scope);
         host.assertQuota(call.tool);
       }
+      const authEnv = sanitizeAuthEnv(call.auth_env);
+      if (authEnv) callEnv = { ...callEnv, authEnv };
       await localGate(call, tool);
       if (!tool.read_only) await waitConfirmBarrier(call);
       // Chủ máy có thể vừa tạm dừng trong lúc chờ hộp xác nhận (của chính lời gọi này hoặc của lời gọi khác).

@@ -21,8 +21,10 @@ import { buildOfficeTools } from './office/index.mjs';
 import { measurePath } from './undoStore.mjs';
 import { buildProcessTools, shellCommand } from './processes.mjs';
 import { buildAgentTools, createAgentRunner } from './codingAgents.mjs';
+import { buildLightcodeTools } from './lightcodeAgent.mjs';
 import { buildLocalLlmTools, createLocalLlm } from './localLlm.mjs';
 import { buildLlmLoginTools, createLlmLogin } from './localLlmLogin.mjs';
+import { buildCommandAuthEnv, redactAuthText } from './ephemeralAuth.mjs';
 
 /** Một bộ chạy agent lập trình cho cả tiến trình (việc đang chạy sống qua các lần dựng lại danh mục công cụ). */
 let sharedAgents = null;
@@ -690,7 +692,16 @@ async function shellExec(args, ctx, env) {
   assertCommandAllowed(command);
   const cwd = resolveInRoots(env.roots, args.cwd || '');
   const [cmd, argv] = shellCommand(command);
-  const result = await runProcess(cmd, argv, { cwd, signal: ctx.signal, onOutput: ctx.onOutput, runAs: env.runAs });
+  const { env: authExtra, secrets } = buildCommandAuthEnv(env.authEnv, command);
+  const procEnv = secrets.length || Object.keys(authExtra).length ? { ...agentEnv(), ...authExtra } : undefined;
+  const onOutput = secrets.length && ctx.onOutput
+    ? (stream, chunk) => ctx.onOutput(stream, redactAuthText(chunk, secrets))
+    : ctx.onOutput;
+  const result = await runProcess(cmd, argv, { cwd, signal: ctx.signal, onOutput, runAs: env.runAs, ...(procEnv ? { env: procEnv } : {}) });
+  if (secrets.length) {
+    result.stdout = redactAuthText(result.stdout, secrets);
+    result.stderr = redactAuthText(result.stderr, secrets);
+  }
   return { command, cwd: displayPath(env.roots, cwd), ...result };
 }
 
@@ -852,7 +863,12 @@ export function buildTools(env) {
   // Giao việc cho agent lập trình trên máy (Claude Code…, chế độ không giao diện, có phiên nói tiếp) — máy cá nhân có cài ít nhất một agent.
   if (env.processes && env.schedules && !env.runAs) {
     sharedAgents ||= env.codingAgents || createAgentRunner();
-    if (sharedAgents.installed().length) tools.push(...buildAgentTools(sharedAgents));
+    // LightCode (20/11/2026): xem / cài bên thực thi cho hợp đồng lập trình — máy Windows của một người (cài cần người đồng ý: sàn luật
+    // tại máy luôn hỏi lightcode.install, BE luôn hỏi duyệt trong chat). Có LightCode thì agent.run luôn có mặt: máy chưa có agent nào
+    // cài LightCode giữa chừng vẫn nhận được hợp đồng ngay (agent.run tự định vị lại LightCode lúc giao).
+    const lightcode = process.platform === 'win32' && !env.noLightcode;
+    if (sharedAgents.installed().length || lightcode) tools.push(...buildAgentTools(sharedAgents));
+    if (lightcode) tools.push(...buildLightcodeTools({ onInstalled: env.announceProfile, roots: env.roots }));
   } else if (env.processes && env.runAs && env.localLlm?.memberMode) {
     // Máy tính tổ chức (17/11/2026): thành viên giao việc lập trình chạy bằng agent họ đã đăng nhập (Claude Code / Codex cài sẵn trong image),
     // dưới tài khoản Linux của họ, trong thư mục của họ.

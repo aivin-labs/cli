@@ -52,11 +52,15 @@ const COMMAND_ARG = Object.freeze({
 
 /** Công cụ luôn xét là rủi ro: gửi ra ngoài thay người dùng, cài việc chạy định kỳ (cách bám trụ kinh điển của mã độc). */
 // meeting.start: ghi âm micro + âm thanh máy — AI không tự bật ghi âm khi không ai ngồi trước máy biết (29/10/2026).
-const ALWAYS_RISKY_TOOLS = new Set(['office.outlook.send', 'sys.schedule', 'meeting.start']);
+// lightcode.install: cài phần mềm mới lên máy (20/11/2026) — người ở máy phải tự bấm đồng ý.
+// lightcode.deploy: phát hành sản phẩm lên môi trường qua LightCode (20/11/2026) — luôn cần người ở máy xác nhận.
+const ALWAYS_RISKY_TOOLS = new Set(['office.outlook.send', 'sys.schedule', 'meeting.start', 'lightcode.install', 'lightcode.deploy']);
 const ALWAYS_RISKY_REASON = {
   'office.outlook.send': 'Gửi thư thay bạn',
   'sys.schedule': 'Đặt việc chạy định kỳ trên máy',
   'meeting.start': 'Ghi âm cuộc họp (micro + âm thanh máy) và chụp màn hình',
+  'lightcode.install': 'Cài ứng dụng LightCode (lightcode.live) để thực thi việc lập trình Aivin giao',
+  'lightcode.deploy': 'Phát hành sản phẩm lên môi trường qua quy trình LightCode',
 };
 
 /**

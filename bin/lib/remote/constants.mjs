@@ -47,6 +47,8 @@ export const DeviceEvent = Object.freeze({
   EMBED: 'device:embed',
   /** CLI → BE: sự kiện của một theo dõi (tệp mới / dòng log khớp) → BE chạy Automation Job gắn với nó. */
   EVENT: 'device:event',
+  /** CLI → BE (21/11/2026): sự kiện đẩy từ LightCode (`job.finished`, `job.attention` — kể cả deploy xong / cần hỗ trợ). */
+  LIGHTCODE_EVENT: 'device:lightcode_event',
   /** CLI → BE (29/10/2026): lời gọi đang chờ người bấm xác nhận trên máy — `{ call_id, extra_ms }`, BE lùi hạn chờ kết quả bấy nhiêu. */
   HOLD: 'device:hold',
   /** CLI → BE: đã lưu token mới BE cấp trong ack của HELLO (`rotate_token`) — BE bỏ token cũ. */

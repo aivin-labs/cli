@@ -10,7 +10,7 @@ FROM node:22-bookworm-slim
 # service-manager dùng chính image này làm helper privileged chốc lát để dựng đĩa ext4 theo gói và remount /proc hidepid (28/10/2026).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl wget git ripgrep jq less nano procps util-linux mount e2fsprogs coreutils unzip zip xz-utils file \
+      ca-certificates curl wget git gh ripgrep jq less nano procps util-linux mount e2fsprogs coreutils unzip zip xz-utils file \
       python3 python3-pip python3-venv build-essential \
       libreoffice-core-nogui libreoffice-writer-nogui libreoffice-calc-nogui fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
@@ -33,10 +33,11 @@ RUN userdel -r node \
 # image. Thành viên không ghi được /usr/local → tắt tự cập nhật. /var/lib/aivin-llm: thư mục làm việc rỗng của agent (root, 0755).
 ARG CLAUDE_CODE_VERSION=2.1.326
 ARG CODEX_VERSION=0.169.0
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
+ARG GEMINI_CLI_VERSION=0.70.0
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
  && npm cache clean --force \
  && mkdir -p /var/lib/aivin-llm && chmod 755 /var/lib/aivin-llm \
- && claude --version && codex --version
+ && claude --version && codex --version && gemini --version
 ENV DISABLE_AUTOUPDATER=1
 
 WORKDIR /opt/aivin-cli

@@ -6,12 +6,14 @@ import { execFile, execFileSync, spawn } from 'child_process';
 import { DeviceErrorCode, REMOTE_CONFIG_DIR, ToolGroup } from './constants.mjs';
 import { DeviceToolError, agentEnv, resolveInRoots } from './sandbox.mjs';
 import { accountEnv, withProcessCap } from './multiUser.mjs';
-import { parseContract, parseReport, parseTestCheck, reportTemplate, sha256 } from './agentContract.mjs';
+import { contractBrief, parseContract, parseReport, parseTestCheck, reportTemplate, sha256 } from './agentContract.mjs';
 
 /** Thời gian tối đa cho lượt nhắc agent ghi lại REPORT.md sai khuôn (cùng phiên). */
 const REPORT_REPAIR_MS = 5 * 60_000;
 import { commitJobWork, gitRead, gitWrite, globToRegExp, listWorktrees, measureEvidence, resolveCommit, runVerifyCommand, worktreeState } from './agentEvidence.mjs';
 import { PREVIEW_MAX_SHOTS, capturePreview } from './agentPreview.mjs';
+import { LIGHTCODE_ADAPTER } from './lightcodeAgent.mjs';
+import { buildCommandAuthEnv, redactAuthText } from './ephemeralAuth.mjs';
 
 const MAX_SCOPE_RULES = 400;
 /** Mẫu kiểu gitignore → mẫu luật quyền của Claude Code, neo ở mọi tầng (`package.json` → `**\/package.json`). */
@@ -174,9 +176,12 @@ const ROOT_ONLY_AGENT_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_API_K
 export function memberSpawner(account, spawnImpl = spawn) {
   return (cmd, argv, opts = {}) => {
     const [c, a] = withProcessCap(cmd, argv);
-    const env = { ...accountEnv(account, agentEnv(opts.env || process.env)), DISABLE_AUTOUPDATER: '1', BROWSER: '/bin/true', NO_COLOR: '1' };
+    const { authExtra, ...spawnOpts } = opts;
+    const env = { ...accountEnv(account, agentEnv(spawnOpts.env || process.env)), DISABLE_AUTOUPDATER: '1', BROWSER: '/bin/true', NO_COLOR: '1' };
     for (const k of ROOT_ONLY_AGENT_ENV) delete env[k];
-    return spawnImpl(c, a, { ...opts, env, uid: account.uid, gid: account.gid });
+    // Token ngắn hạn từ AIVIN CredentialBroker (đã lọc allowlist) được gắn sau agentEnv để không bị gọt sạch, chỉ sống trong tiến trình con này.
+    if (authExtra && typeof authExtra === 'object') Object.assign(env, authExtra);
+    return spawnImpl(c, a, { ...spawnOpts, env, uid: account.uid, gid: account.gid });
   };
 }
 
@@ -357,7 +362,8 @@ export const CODEX_ADAPTER = Object.freeze({
   },
 });
 
-export const DEFAULT_AGENT_ADAPTERS = Object.freeze([CLAUDE_ADAPTER, CODEX_ADAPTER]);
+/** LightCode (20/11/2026, lightcodeAgent.mjs): bên thực thi nhiều agent + tài khoản dự phòng — đứng cuối, BE chọn theo hồ sơ năng lực. */
+export const DEFAULT_AGENT_ADAPTERS = Object.freeze([CLAUDE_ADAPTER, CODEX_ADAPTER, LIGHTCODE_ADAPTER]);
 
 function versionOf(bin) {
   try {
@@ -379,6 +385,8 @@ export function helpFlags(bin, helpArgs = ['--help']) {
 
 /** Bản mới nhất chạy được của một agent trên máy, hoặc null. */
 export function findAgentBinary(adapter, opts = {}) {
+  // Agent không phải tệp chạy trên PATH (LightCode: ứng dụng desktop + cửa cục bộ) tự định vị.
+  if (typeof adapter.locate === 'function') return adapter.locate(opts);
   let best = null;
   for (const bin of [...new Set(adapter.candidates(opts))]) {
     if (!fs.existsSync(bin)) continue;
@@ -442,9 +450,12 @@ export function createAgentRunner({
   const flagCache = new Map();
   const jobs = new Map();
   const binaryOf = (adapter) => {
-    if (!found.has(adapter.id)) found.set(adapter.id, find(adapter));
+    // Agent tự định vị (LightCode) có thể được cài / bật khi daemon đang chạy → chưa thấy thì lần sau tìm lại.
+    if (!found.has(adapter.id) || (adapter.locate && !found.get(adapter.id))) found.set(adapter.id, find(adapter));
     return found.get(adapter.id);
   };
+  /** Adapter tự dựng "tiến trình" (LightCode nối qua cửa cục bộ) dùng spawn riêng; còn lại qua childSpawn (máy tổ chức: dưới tài khoản thành viên). */
+  const spawnOf = (adapter) => (adapter?.spawn && !runAs ? adapter.spawn : childSpawn);
   const flagsOf = async (adapter) => {
     const b = binaryOf(adapter);
     if (b?.flags) return new Set(b.flags);
@@ -452,7 +463,7 @@ export function createAgentRunner({
     return flagCache.get(adapter.id);
   };
   /** Agent đã cài trên máy (theo thứ tự ưu tiên của danh sách adapter). */
-  const installed = () => adapters.filter((a) => binaryOf(a));
+  const installed = () => adapters.filter((a) => !(runAs && a.multiUser === false) && binaryOf(a));
   const adapterFor = (id) => {
     const list = installed();
     if (!list.length) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `No coding agent is installed on this computer (looked for: ${adapters.map((a) => a.label).join(', ')})`);
@@ -464,37 +475,13 @@ export function createAgentRunner({
 
   // --- Hồ sơ job trên đĩa: `<jobsDir>/<job>/job.json` (+ CONTRACT.md, TEST_CHECK.md, REPORT.md, evidence.json, logs/ của job có hợp đồng).
   const dirOf = (id) => path.join(jobsDir, id);
-  const RECORD_KEYS = ['id', 'agent', 'status', 'cwd', 'cwdShown', 'mode', 'model', 'session_id', 'worktree', 'baseCommit', 'contractId', 'contractSha', 'continuedFrom', 'delivery', 'worktreeRemoved', 'reportRepaired', 'startedAt', 'endedAt', 'result', 'error'];
+  const RECORD_KEYS = ['id', 'agent', 'status', 'cwd', 'cwdShown', 'mode', 'model', 'session_id', 'last_seq', 'worktree', 'baseCommit', 'isolate', 'fixedWorktree', 'mainStateBefore', 'wallMs', 'contractId', 'contractSha', 'continuedFrom', 'delivery', 'worktreeRemoved', 'reportRepaired', 'progress', 'startedAt', 'endedAt', 'result', 'error'];
   function persist(j) {
     try {
       fs.mkdirSync(dirOf(j.id), { recursive: true });
       fs.writeFileSync(path.join(dirOf(j.id), 'job.json'), JSON.stringify({ ...Object.fromEntries(RECORD_KEYS.map((k) => [k, j[k]])), prompt: j.prompt.slice(0, 200) }, null, 1));
     } catch { /* hồ sơ chỉ để trả lời sau khi khởi động lại */ }
   }
-  /** Lần đầu dựng runner: nạp job cũ còn hồ sơ; job đang chạy lúc daemon tắt → `interrupted`. Dọn hồ sơ quá hạn. */
-  function restore() {
-    let names;
-    try { names = fs.readdirSync(jobsDir); } catch { return; }
-    for (const name of names) {
-      if (!JOB_ID_RE.test(name)) continue;
-      let rec;
-      try { rec = JSON.parse(fs.readFileSync(path.join(dirOf(name), 'job.json'), 'utf8')); } catch { continue; }
-      if (rec.id !== name) continue;
-      if (now() - (rec.endedAt || rec.startedAt || 0) > KEEP_JOB_DIR_MS) {
-        try { fs.rmSync(dirOf(name), { recursive: true, force: true }); } catch { /* lần sau */ }
-        continue;
-      }
-      const j = { ...rec, prompt: rec.prompt || '', texts: [], tools: [], waiters: new Set(), child: null, restored: true };
-      if (RUNNING.has(j.status)) {
-        j.status = 'interrupted';
-        j.error = 'The Aivin agent on this device restarted while this job was running — continue it with session set to its session_id';
-        j.endedAt = now();
-        persist(j);
-      }
-      jobs.set(j.id, j);
-    }
-  }
-  restore();
 
   const prune = () => {
     for (const [id, j] of jobs) if (!RUNNING.has(j.status) && now() - j.endedAt > KEEP_DONE_MS && !j.contractId) jobs.delete(id);
@@ -503,12 +490,19 @@ export function createAgentRunner({
     try { const s = fs.readFileSync(path.join(dirOf(j.id), name), 'utf8'); return s.length > max ? `${s.slice(0, max)}\n…` : s; } catch { return undefined; }
   };
   const view = (j, sinceText = 0, sinceTool = 0) => {
+    const redact = (v) => (j._authSecrets?.length && typeof v === 'string' ? redactAuthText(v, j._authSecrets) : v);
+    const rawText = j.texts.slice(sinceText).join('\n\n').slice(-MAX_ANSWER_CHARS) || undefined;
+    const redactedResult = j.result && typeof j.result === 'object' && j._authSecrets?.length
+      ? { ...j.result, ...(typeof j.result.answer === 'string' ? { answer: redact(j.result.answer) } : {}) }
+      : j.result;
     const out = {
       job: j.id, agent: j.agent, status: j.status, session_id: j.session_id, cwd: j.cwdShown, mode: j.mode, model: j.model,
-      new_text: j.texts.slice(sinceText).join('\n\n').slice(-MAX_ANSWER_CHARS) || undefined,
+      new_text: redact(rawText),
       tools_used: j.tools.slice(sinceTool).slice(-40),
-      ...(j.result ? { result: j.result } : {}),
-      ...(j.error ? { error: j.error } : {}),
+      ...(redactedResult ? { result: redactedResult } : {}),
+      ...(j.progress ? { progress: j.progress } : {}),
+      ...(j.questions?.length ? { questions: j.questions } : {}),
+      ...(j.error ? { error: redact(j.error) } : {}),
       next_text: j.texts.length, next_tool: j.tools.length,
     };
     if (j.contractId) {
@@ -606,6 +600,15 @@ export function createAgentRunner({
         mode: contract.permissions.mode, budgetUsd: contract.limits.max_budget_usd, effort: contract.limits.effort,
         allowedTools: contract.permissions.allowed_tools, addDirs: [jobDir], worktree: isolate && !prev && !ownWorktree ? jobId : undefined, projectConfig: false,
         settings: { permissions: { deny } },
+        // LightCode (20/11/2026): agent hỏi lại giữa chừng → dừng + chuyển câu hỏi cho Aivin (mặc định bật cho hợp đồng); `inner_agent` = agent trong LightCode.
+        clarify: args.clarify !== false, provider: args.inner_agent ? String(args.inner_agent) : undefined,
+        clientJobId: jobId,
+        ...(args.goal_id ? { goalId: String(args.goal_id) } : {}),
+        ...(Array.isArray(args.depends_on) && args.depends_on.length ? { dependsOn: args.depends_on } : {}),
+        ...(Number.isInteger(Number(args.max_fix_rounds)) && Number(args.max_fix_rounds) > 0 ? { maxFixRounds: Number(args.max_fix_rounds) } : {}),
+        ...(Array.isArray(args.deliverables) && args.deliverables.length ? { deliverables: args.deliverables } : {}),
+        // Khoán việc: tiêu chí nghiệm thu (khóa) đi theo để LightCode tự đối chiếu và báo `verdict`.
+        ...contractBrief(parsed.body, contract),
       },
       wallMs: contract.limits.max_wall_ms,
     };
@@ -626,6 +629,8 @@ export function createAgentRunner({
    */
   async function repairReport(j) {
     if (!j.respawn || j.abort.signal.aborted) return;
+    // LightCode (20/11/2026): lượt dừng vì câu hỏi / vượt phạm vi / hết ngân sách… — không còn báo cáo để sửa, Aivin quyết bước kế.
+    if (['needs_clarification', 'scope_violation', 'budget_exceeded', 'orphaned', 'stopped'].includes(j.result?.stop_reason)) return;
     const fresh = j.respawn.adapter.resumable === false;
     if (!fresh && !j.session_id) return;
     const file = path.join(dirOf(j.id), 'REPORT.md');
@@ -635,13 +640,14 @@ export function createAgentRunner({
     if (parsed.ok) return;
     const { adapter, opts, flags, env, bin } = j.respawn;
     let argv;
-    try { argv = agentArgs(adapter, { ...opts, worktree: undefined, resume: fresh ? undefined : j.session_id }, flags); } catch { return; }
+    // Nhắc viết lại REPORT.md chỉ sửa tệp báo cáo: không kèm lại acceptance/constraints hay bật clarify thừa cho LightCode.
+    try { argv = agentArgs(adapter, { ...opts, worktree: undefined, resume: fresh ? undefined : j.session_id, acceptance: undefined, constraints: undefined, clarify: false }, flags); } catch { return; }
     // Agent không nói tiếp phiên được (Codex): phiên mới không thấy khuôn lúc đầu → gửi kèm khuôn mẫu.
     const format = fresh ? `\n\nThe agreed format:\n${reportTemplate({ jobId: j.id, contractId: j.contractId })}` : '';
     const prompt = `${file} is not in the agreed format: ${parsed.errors.slice(0, 8).join('; ')}. Rewrite only REPORT.md, exactly in the ${fresh ? 'format below' : 'format given at the start'} (keep every section heading, even when empty). Do not change any other file.${format}`;
     await new Promise((resolve) => {
       let child;
-      try { child = childSpawn(bin, argv, { cwd: j.worktree || j.respawn.cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); } catch { resolve(); return; }
+      try { child = spawnOf(adapter)(bin, argv, { cwd: j.worktree || j.respawn.cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); } catch { resolve(); return; }
       const timer = setTimeout(() => { try { child.kill(); } catch { /* đã thoát */ } }, REPORT_REPAIR_MS);
       const done = () => { clearTimeout(timer); resolve(); };
       child.stdout?.on?.('data', () => undefined);
@@ -656,6 +662,11 @@ export function createAgentRunner({
 
   async function finishContractJob(j) {
     if (j.isolate && !j.fixedWorktree) j.worktree = await findJobWorktree(j).catch(() => null);
+    // Agent dừng để hỏi người dùng (LightCode v2): giữ nguyên worktree + session để nói tiếp sau khi có câu trả lời — không sửa báo cáo, không commit dở, không chạy verify vô ích.
+    if (j.result?.stop_reason === 'needs_clarification') {
+      persist(j);
+      return;
+    }
     // Sau khi biết worktree: phiên của agent nằm ở đó, nói tiếp phải đúng thư mục ấy.
     await repairReport(j).catch(() => undefined);
     // Đầu ra `git_branch`: commit thay đổi của worktree lên nhánh của job TRƯỚC khi đo — bằng chứng gắn đúng một commit.
@@ -678,6 +689,112 @@ export function createAgentRunner({
       if (evidence.contract_tampered) j.error = 'contract_tampered: CONTRACT.md changed during the job';
     } catch (e) {
       j.error = `Measuring failed: ${e.message}`;
+    }
+  }
+
+  /** Gắn luồng sự kiện + giới hạn thời gian + kết thúc đo hợp đồng cho tiến trình của một job (mới chạy hoặc vừa nối lại sau restart). */
+  function attachChild(j, adapter, child, { wallMs = 0, onOutput } = {}) {
+    j.child = child;
+    const wall = wallMs ? setTimeout(() => {
+      if (j.status !== 'running') return;
+      j.error = `Stopped at the contract time limit (${Math.round(wallMs / 60_000)} min)`;
+      try { j.child?.kill(); } catch { /* đã thoát */ }
+    }, wallMs) : null;
+    wall?.unref?.();
+    let buf = '';
+    let stderr = '';
+    let lastPersistedAt = now();
+    child.stdout.on('data', (d) => {
+      buf += d.toString();
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (!msg || typeof msg !== 'object') continue;
+        const hadSession = !!j.session_id;
+        const prevSeq = j.last_seq;
+        const shown = adapter.parse(j, msg);
+        if ((!hadSession && j.session_id) || (j.last_seq !== prevSeq && now() - lastPersistedAt >= 2000)) {
+          lastPersistedAt = now();
+          persist(j);
+        }
+        if (j.texts.length > MAX_TEXTS) j.texts.splice(0, j.texts.length - MAX_TEXTS);
+        const safeShown = shown && j._authSecrets?.length ? redactAuthText(shown, j._authSecrets) : shown;
+        if (safeShown && typeof onOutput === 'function') { try { onOutput(`${safeShown}\n`); } catch { /* chỉ là tiến trình */ } }
+      }
+    });
+    child.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-2000); });
+    child.stdin?.on?.('error', () => undefined);
+    const finish = async (code) => {
+      if (j.status !== 'running') return;
+      clearTimeout(wall);
+      const agentOk = !!j.result?.ok;
+      if (!j.result && !j.error) {
+        const rawErr = (stderr.trim().split(/\r?\n/).slice(-3).join(' ') || `${adapter.id} exited with code ${code}`).slice(0, 500);
+        j.error = j._authSecrets?.length ? redactAuthText(rawErr, j._authSecrets) : rawErr;
+      }
+      if (j.result && typeof j.result.answer === 'string' && j._authSecrets?.length) {
+        j.result = { ...j.result, answer: redactAuthText(j.result.answer, j._authSecrets) };
+      }
+      if (j.contractId) {
+        j.status = 'measuring';
+        persist(j);
+        await finishContractJob(j);
+        if (j.status !== 'measuring') return; // bị dừng giữa lúc đo
+      }
+      j.status = agentOk && !j.error?.startsWith('contract_tampered') ? 'done' : 'failed';
+      j.endedAt = now();
+      remember(j);
+      persist(j);
+      wake(j);
+    };
+    child.on('error', (e) => { j.error = e.message; void finish(-1); });
+    child.on('close', (code) => { void finish(code); });
+  }
+
+  /** Lần đầu dựng runner: nạp job cũ còn hồ sơ; job tách khỏi kết nối (LightCode v2) tự nối lại, còn lại → `interrupted`. Dọn hồ sơ quá hạn. */
+  function restore() {
+    let names;
+    try { names = fs.readdirSync(jobsDir); } catch { return; }
+    for (const name of names) {
+      if (!JOB_ID_RE.test(name)) continue;
+      let rec;
+      try { rec = JSON.parse(fs.readFileSync(path.join(dirOf(name), 'job.json'), 'utf8')); } catch { continue; }
+      if (rec.id !== name) continue;
+      if (now() - (rec.endedAt || rec.startedAt || 0) > KEEP_JOB_DIR_MS) {
+        try { fs.rmSync(dirOf(name), { recursive: true, force: true }); } catch { /* lần sau */ }
+        continue;
+      }
+      const j = { ...rec, prompt: rec.prompt || '', texts: [], tools: [], waiters: new Set(), child: null, restored: true };
+      if (RUNNING.has(j.status)) {
+        const adapter = adapters.find((a) => a.id === j.agent);
+        const reattached = j.status === 'running' && !runAs && adapter && typeof adapter.reattach === 'function' && j.session_id
+          ? adapter.reattach(j) : null;
+        if (reattached) {
+          j.abort = new AbortController();
+          if (j.contractId) {
+            try {
+              const cParsed = parseContract(fs.readFileSync(path.join(dirOf(j.id), 'CONTRACT.md'), 'utf8'));
+              if (cParsed.ok) j.contract = cParsed.contract;
+            } catch { /* thiếu CONTRACT.md */ }
+            try {
+              const tc = fs.readFileSync(path.join(dirOf(j.id), 'TEST_CHECK.md'), 'utf8');
+              if (tc) { j.hasTestCheck = true; j.testCheckText = tc; }
+            } catch { /* không có TEST_CHECK.md */ }
+          }
+          const remWall = j.wallMs ? Math.max(5_000, j.wallMs - Math.max(0, now() - (j.startedAt || now()))) : 0;
+          attachChild(j, adapter, reattached, { wallMs: remWall });
+        } else {
+          j.status = 'interrupted';
+          j.error = 'The Aivin agent on this device restarted while this job was running — continue it with session set to its session_id';
+          j.endedAt = now();
+          persist(j);
+        }
+      }
+      jobs.set(j.id, j);
     }
   }
 
@@ -716,6 +833,12 @@ export function createAgentRunner({
       agentOpts = {
         mode: String(args.mode || AgentMode.MANUAL), budgetUsd: args.max_budget_usd ?? undefined, effort: args.effort ? String(args.effort) : undefined,
         projectConfig: args.project_config !== false,
+        clarify: args.clarify === true, provider: args.inner_agent ? String(args.inner_agent) : undefined,
+        clientJobId: jobId,
+        ...(args.goal_id ? { goalId: String(args.goal_id) } : {}),
+        ...(Array.isArray(args.depends_on) && args.depends_on.length ? { dependsOn: args.depends_on } : {}),
+        ...(Number.isInteger(Number(args.max_fix_rounds)) && Number(args.max_fix_rounds) > 0 ? { maxFixRounds: Number(args.max_fix_rounds) } : {}),
+        ...(Array.isArray(args.deliverables) && args.deliverables.length ? { deliverables: args.deliverables } : {}),
       };
     }
     const session = prev ? (adapter.resumable === false ? 'new' : prev.session_id) : String(args.session || 'new');
@@ -747,60 +870,25 @@ export function createAgentRunner({
     const j = {
       id: jobId, agent: adapter.id, status: 'running', prompt: prompt || `contract ${extra.contractId}`, cwd, cwdShown: args.cwd || cwd, mode: agentOpts.mode,
       session_id: resume, model: undefined, texts: [], tools: [], result: null, error: null, startedAt: now(), endedAt: 0, waiters: new Set(), child: null,
-      abort: new AbortController(), ...extra, ...(account ? { account } : {}),
+      abort: new AbortController(), ...(wallMs ? { wallMs } : {}), ...extra, ...(account ? { account } : {}),
     };
     // Hồ sơ tài khoản: thư mục cấu hình riêng qua biến môi trường chính thức của agent — phiên / đăng nhập / hạn mức của tài khoản đó.
-    const childEnv = accountDir ? { ...agentEnv(process.env), [adapter.profileEnv]: accountDir } : agentEnv(process.env);
-    const child = childSpawn(binaryOf(adapter).bin, argv, { cwd: spawnCwd || cwd, env: childEnv, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    j.child = child;
+    const { env: authExtra, secrets: authSecrets } = buildCommandAuthEnv(env.authEnv, 'git');
+    if (authSecrets.length) j._authSecrets = authSecrets;
+    const baseChildEnv = accountDir ? { ...agentEnv(process.env), [adapter.profileEnv]: accountDir } : agentEnv(process.env);
+    const childEnv = !runAs && Object.keys(authExtra).length ? { ...baseChildEnv, ...authExtra } : baseChildEnv;
+    const child = spawnOf(adapter)(binaryOf(adapter).bin, argv, {
+      cwd: spawnCwd || cwd,
+      env: childEnv,
+      ...(runAs && Object.keys(authExtra).length ? { authExtra } : {}),
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     // Gọi lại cùng phiên (nhắc ghi lại REPORT.md) cần đúng tệp chạy, cờ, môi trường của lần này.
     if (withContract) j.respawn = { adapter, bin: binaryOf(adapter).bin, opts: { ...agentOpts, model: args.model ? String(args.model) : undefined }, flags: await flagsOf(adapter), env: childEnv, cwd: spawnCwd || cwd };
     jobs.set(j.id, j);
     persist(j);
-    const wall = wallMs ? setTimeout(() => {
-      if (j.status !== 'running') return;
-      j.error = `Stopped at the contract time limit (${Math.round(wallMs / 60_000)} min)`;
-      try { j.child?.kill(); } catch { /* đã thoát */ }
-    }, wallMs) : null;
-    wall?.unref?.();
-    let buf = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => {
-      buf += d.toString();
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        let msg;
-        try { msg = JSON.parse(line); } catch { continue; }
-        if (!msg || typeof msg !== 'object') continue;
-        const shown = adapter.parse(j, msg);
-        if (j.texts.length > MAX_TEXTS) j.texts.splice(0, j.texts.length - MAX_TEXTS);
-        if (shown && typeof ctx.onOutput === 'function') { try { ctx.onOutput(`${shown}\n`); } catch { /* chỉ là tiến trình */ } }
-      }
-    });
-    child.stderr.on('data', (d) => { stderr = (stderr + d.toString()).slice(-2000); });
-    child.stdin.on?.('error', () => undefined);
-    const finish = async (code) => {
-      if (j.status !== 'running') return;
-      clearTimeout(wall);
-      const agentOk = !!j.result?.ok;
-      if (!j.result && !j.error) j.error = (stderr.trim().split(/\r?\n/).slice(-3).join(' ') || `${adapter.id} exited with code ${code}`).slice(0, 500);
-      if (j.contractId) {
-        j.status = 'measuring';
-        persist(j);
-        await finishContractJob(j);
-        if (j.status !== 'measuring') return; // bị dừng giữa lúc đo
-      }
-      j.status = agentOk && !j.error?.startsWith('contract_tampered') ? 'done' : 'failed';
-      j.endedAt = now();
-      remember(j);
-      persist(j);
-      wake(j);
-    };
-    child.on('error', (e) => { j.error = e.message; void finish(-1); });
-    child.on('close', (code) => { void finish(code); });
+    attachChild(j, adapter, child, { wallMs, onOutput: ctx.onOutput });
     child.stdin.end(fullPrompt);
 
     await waitDone(j, Math.min(Number(args.wait_ms) || DEFAULT_WAIT_MS, MAX_WAIT_MS), ctx.signal);
@@ -896,6 +984,8 @@ export function createAgentRunner({
     return { sessions: loadSessions().filter((s) => (!cwd || s.cwd === cwd) && (!args.agent || s.agent === args.agent)).slice(0, 20) };
   }
 
+  restore();
+
   return {
     run, status, stop, sessions, jobFile, cleanup, preview,
     profiles: () => ({ profiles: listAgentProfiles(installed(), { root: profilesRoot }) }),
@@ -922,6 +1012,12 @@ export function buildAgentTools(runner) {
         contract: str('CONTRACT.md text issued by Aivin'), contract_sha256: str('sha256 of that CONTRACT.md'), test_check: str('TEST_CHECK.md text, when the contract names test_check'),
         continue_job: str('fix round: an earlier contract job — continue its session in its worktree (send the contract again)'),
         account: str('run as this account profile of the agent (from agent.profiles) — its own sign-in, sessions and usage limits; default: the usual account of the agent'),
+        inner_agent: str('agent "lightcode" only: which agent inside LightCode does the work (claude | codex | gemini | opencode | antigravity; default: LightCode picks)'),
+        clarify: bool('agent "lightcode" only: when the agent has a question, stop and hand it back instead of guessing (default true with contract)'),
+        goal_id: str('agent "lightcode" only: strategy goal id from .lcagent/strategy.json (tracks budget and refuses closed/over-budget goals)'),
+        depends_on: { type: 'array', items: { type: 'string' }, description: 'agent "lightcode" only: session ids or client_job_ids that must finish well first' },
+        max_fix_rounds: num('agent "lightcode" only: internal quality-check fix rounds inside LightCode (0-3)'),
+        deliverables: { type: 'array', description: 'agent "lightcode" only: files the job must leave behind (path string or { path, min_bytes }), checked for existence and valid file format' },
         wait_ms: num(`wait for the answer up to this long (default ${DEFAULT_WAIT_MS}, max ${MAX_WAIT_MS})`),
       }) },
     { name: 'agent.status', group: ToolGroup.PROC, read_only: true, handler: (a, c) => runner.status(a, c),

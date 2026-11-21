@@ -5,6 +5,7 @@
 //
 // Antigravity không có ở chế độ này: chưa có cách đăng nhập không màn hình, và tệp cài đặt không tách được theo người.
 import fs from 'fs';
+import path from 'path';
 import { execFile } from 'child_process';
 import { accountEnv, withProcessCap } from './multiUser.mjs';
 import { agentEnv } from './sandbox.mjs';
@@ -15,10 +16,10 @@ import { agentEnv } from './sandbox.mjs';
  * / chown gì trong thư mục do thành viên điều khiển (liên kết tượng trưng).
  */
 export const MEMBER_LLM_DIR = '/var/lib/aivin-llm';
-export const MEMBER_LLM_AGENTS = Object.freeze(['claude', 'codex']);
+export const MEMBER_LLM_AGENTS = Object.freeze(['claude', 'codex', 'gemini']);
 
 /** Biến của agent mà tiến trình root có thể mang — không để lọt sang tài khoản thành viên (agent phải đọc đăng nhập trong HOME của họ). */
-const ROOT_ONLY_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY'];
+const ROOT_ONLY_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'];
 
 /** `env` của agent chạy cho thành viên: HOME / USER của họ, không tự cập nhật (bản cài thuộc root), không mở trình duyệt (máy không màn hình). */
 export function memberAgentEnv(account, base = process.env) {
@@ -53,6 +54,19 @@ export const SIGN_IN_PROBES = Object.freeze({
   },
   // "Not logged in", mã thoát 1 (đo 0.169.0).
   codex: { argv: ['login', 'status'], parse: (code) => code === 0 },
+  // Gemini CLI lưu phiên OAuth cá nhân trong ~/.gemini/oauth_creds.json (không cần gọi mạng để kiểm tra).
+  gemini: {
+    check: (account) => {
+      if (!account?.home) return false;
+      for (const file of ['oauth_creds.json', 'google_accounts.json']) {
+        try {
+          const raw = fs.readFileSync(path.join(account.home, '.gemini', file), 'utf8').trim();
+          if (raw && raw !== '{}' && raw !== '[]') return true;
+        } catch { /* chưa đăng nhập */ }
+      }
+      return false;
+    },
+  },
 });
 
 function runAs(account, bin, argv, { timeoutMs = 15_000, dir } = {}) {
@@ -81,8 +95,13 @@ export function createSignInChecker({ binOf, run = runAs, now = Date.now, okTtlM
     if (!fresh && hit && now() - hit.at < (hit.ok ? okTtlMs : noTtlMs)) return hit.ok;
     const bin = binOf(adapter)?.bin;
     if (!bin) return false;
-    const r = await run(account, bin, probe.argv, { dir });
-    const ok = !!probe.parse(r.code, r.out);
+    let ok = false;
+    if (typeof probe.check === 'function') {
+      ok = !!probe.check(account);
+    } else {
+      const r = await run(account, bin, probe.argv, { dir });
+      ok = !!probe.parse(r.code, r.out);
+    }
     if (cache.size > 2000) cache.clear();
     cache.set(key, { ok, at: now() });
     return ok;

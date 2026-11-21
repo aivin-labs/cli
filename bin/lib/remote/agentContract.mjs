@@ -219,6 +219,32 @@ export function parseContract(text, { expectedSha } = {}) {
   return { ok: !errors.length, errors, contract, body: split.body, sha256: digest };
 }
 
+/**
+ * Việc khoán cho agent tự đối chiếu (LightCode): câu chữ của từng tiêu chí + các quy tắc nghiệp vụ, lấy từ THÂN hợp đồng (Agentic ghi ở
+ * `## Tiêu chí đánh giá` — `- <khóa>: <câu>` — và `## Nghiệp vụ liên quan`). Tiêu chí do máy đo (`check`) và duyệt người (`human`) không đưa cho agent:
+ * máy đã đo, người sẽ duyệt — agent tự khai thêm chỉ là tiếng ồn. Trả `{ acceptance, constraints }` (chuỗi rỗng → danh sách rỗng).
+ */
+export function contractBrief(body, contract) {
+  const sections = new Map();
+  let current = null;
+  for (const line of String(body || '').replace(/\r\n?/g, '\n').split('\n')) {
+    const h = /^##\s+(.+?)\s*$/.exec(line);
+    if (h) { current = h[1]; sections.set(current, []); continue; }
+    if (/^#\s/.test(line)) { current = null; continue; }
+    const item = current && /^\s*[-*]\s+(.+?)\s*$/.exec(line);
+    if (item) sections.get(current).push(item[1]);
+  }
+  const text = new Map();
+  for (const entry of sections.get('Tiêu chí đánh giá') || []) {
+    const m = /^`?([A-Za-z0-9][A-Za-z0-9_.-]*)`?\s*:\s*(.+)$/.exec(entry);
+    if (m) text.set(m[1], m[2]);
+  }
+  const acceptance = (contract?.acceptance || [])
+    .filter((x) => x && !x.check && x.verifier !== 'human')
+    .map((x) => (text.get(x.key) ? `${x.key}: ${text.get(x.key)}` : x.key));
+  return { acceptance, constraints: (sections.get('Nghiệp vụ liên quan') || []).slice(0, 40) };
+}
+
 /** Các dòng H1..H4 của thân: [{ level, text, line }]. Bỏ qua phần trong khối ```. */
 function headings(lines) {
   const out = [];

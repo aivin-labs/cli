@@ -21,6 +21,46 @@ const START_WAIT_MS = 25_000;
 const CODE_WAIT_MS = 60_000;
 const MAX_OUTPUT = 16_000;
 const CODE_RE = /^[A-Za-z0-9_\-#.~=+/]{6,1024}$/;
+const CALLBACK_TIMEOUT_MS = 10_000;
+
+/**
+ * Đọc cổng callback cục bộ từ tham số `redirect_uri` trong đường dẫn OAuth (vd `http://localhost:8085/oauth2callback`).
+ * Trả `{ port, path }` nếu đường dẫn OAuth trỏ về loopback, ngược lại `null`.
+ */
+export function parseLocalCallbackTarget(authUrl) {
+  try {
+    const outer = new URL(String(authUrl || ''));
+    const rawRedirect = outer.searchParams.get('redirect_uri') || '';
+    if (!rawRedirect) return null;
+    const redir = new URL(rawRedirect);
+    if (redir.protocol !== 'http:') return null;
+    const host = redir.hostname.toLowerCase();
+    if (host !== 'localhost' && host !== '127.0.0.1') return null;
+    const port = Number(redir.port || 80);
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) return null;
+    return { port, path: redir.pathname || '/' };
+  } catch {
+    return null;
+  }
+}
+
+/** Kiểm tra đường dẫn callback người dùng dán vào có khớp chính xác cổng loopback của phiên đăng nhập này không (chống SSRF). */
+export function normalizeLocalCallbackUrl(rawInput, expectedPort) {
+  const text = String(rawInput || '').trim();
+  if (!/^https?:\/\//i.test(text) || /[\r\n\0]/.test(text)) return null;
+  try {
+    const u = new URL(text);
+    if (u.protocol !== 'http:') return null;
+    const host = u.hostname.toLowerCase();
+    if (host !== 'localhost' && host !== '127.0.0.1') return null;
+    const port = Number(u.port || 80);
+    if (!expectedPort || port !== expectedPort) return null;
+    if (!u.searchParams.get('code') && !u.searchParams.get('token') && !u.searchParams.get('state')) return null;
+    return `http://127.0.0.1:${port}${u.pathname}${u.search}`;
+  } catch {
+    return null;
+  }
+}
 
 export const LoginState = Object.freeze({ PENDING: 'pending', SUCCEEDED: 'succeeded', FAILED: 'failed', EXPIRED: 'expired' });
 
@@ -48,11 +88,23 @@ export const LOGIN_FLOWS = Object.freeze({
     },
     logout: ['logout'],
   },
+  gemini: {
+    argv: ['auth', 'login', '--no-browser'],
+    needsCode: true,
+    parse(text) {
+      const url = (text.match(URL_RE) || []).find((u) => /accounts\.google\.com|oauth2|\/authorize\?/.test(u));
+      if (!url) return null;
+      const cb = parseLocalCallbackTarget(url);
+      return { url, ...(cb ? { callbackPort: cb.port, inputKind: 'callback_url' } : {}) };
+    },
+    logout: ['auth', 'logout'],
+  },
 });
 
 /** Bản ghi một lần đăng nhập trả cho BE — không kèm chữ thô agent in ra (có thể dài / lạ), chỉ lỗi rút gọn. */
 const publicOf = (s) => ({
   login_id: s.id, agent: s.agent, state: s.state, url: s.url || null, user_code: s.user_code || null, needs_code: s.needsCode && s.state === LoginState.PENDING,
+  ...(s.inputKind ? { input_kind: s.inputKind } : {}),
   expires_at: s.expiresAt, ...(s.error ? { error: s.error } : {}),
 });
 
@@ -60,7 +112,7 @@ const publicOf = (s) => ({
  * `llm` = bộ mô hình trên máy ở chế độ máy tổ chức (localLlm.mjs, memberMode) — dùng chung danh sách agent đã cài + bộ nhớ "đã đăng nhập".
  * Mỗi (thành viên, agent) tối đa một lần đăng nhập đang chờ; bắt đầu lại thì huỷ lần cũ.
  */
-export function createLlmLogin({ llm, spawnImpl = spawn, now = Date.now, ttlMs = LOGIN_TTL_MS, startWaitMs = START_WAIT_MS, codeWaitMs = CODE_WAIT_MS } = {}) {
+export function createLlmLogin({ llm, spawnImpl = spawn, fetchImpl = globalThis.fetch, now = Date.now, ttlMs = LOGIN_TTL_MS, startWaitMs = START_WAIT_MS, codeWaitMs = CODE_WAIT_MS } = {}) {
   const sessions = new Map();
 
   const accountOf = (ctx) => {
@@ -122,7 +174,10 @@ export function createLlmLogin({ llm, spawnImpl = spawn, now = Date.now, ttlMs =
       s.output = (s.output + String(d)).slice(-MAX_OUTPUT);
       if (!s.url) {
         const found = flow.parse(s.output.replace(ANSI_RE, ''));
-        if (found) Object.assign(s, found);
+        if (found) {
+          const cb = !found.callbackPort && found.url ? parseLocalCallbackTarget(found.url) : null;
+          Object.assign(s, found, cb ? { callbackPort: cb.port, inputKind: found.inputKind || 'callback_url' } : {});
+        }
       }
       for (const fn of [...s.waiters]) fn();
     };
@@ -141,17 +196,36 @@ export function createLlmLogin({ llm, spawnImpl = spawn, now = Date.now, ttlMs =
     return publicOf(s);
   }
 
-  /** Claude Code: mã trang đăng nhập hiện ra → ghi vào stdin, chờ agent đổi mã lấy phiên đăng nhập (thoát 0). */
+  /**
+   * Claude Code / Gemini / công cụ OAuth cục bộ:
+   *  - Nếu phiên dùng cổng callback cục bộ (`callbackPort`) và người dùng dán đường dẫn `http://localhost:<port>/...?code=...`:
+   *    CLI chuyển tiếp thẳng yêu cầu đó tới `127.0.0.1:<callbackPort>` bên trong container để tiến trình đăng nhập tự hoàn tất.
+   *  - Ngược lại ghi mã vào stdin của tiến trình đang chờ (Claude Code).
+   */
   async function submitCode(args = {}, ctx = {}) {
     const account = accountOf(ctx);
     const s = own(args.login_id, account);
     const code = String(args.code || '').trim();
     if (!s.needsCode) throw invalid('This sign-in does not take a code — finish it in the browser');
-    if (!CODE_RE.test(code)) throw invalid('That does not look like a sign-in code — copy the whole code from the sign-in page');
+    const callbackUrl = s.callbackPort ? normalizeLocalCallbackUrl(code, s.callbackPort) : null;
+    if (!callbackUrl && !CODE_RE.test(code)) {
+      throw invalid(s.callbackPort
+        ? 'Paste the full localhost callback URL from your browser address bar (or the sign-in code)'
+        : 'That does not look like a sign-in code — copy the whole code from the sign-in page');
+    }
     if (s.state !== LoginState.PENDING) return publicOf(s);
     if (s.codeSent) throw invalid('A code was already sent for this sign-in — start again if it failed');
     s.codeSent = true;
-    try { s.child.stdin.write(`${code}\n`); } catch (e) { end(s, LoginState.FAILED, e.message); }
+    if (callbackUrl) {
+      try {
+        const signal = AbortSignal.timeout ? AbortSignal.timeout(CALLBACK_TIMEOUT_MS) : undefined;
+        await fetchImpl(callbackUrl, { method: 'GET', redirect: 'manual', signal });
+      } catch (e) {
+        end(s, LoginState.FAILED, `Local OAuth callback delivery failed: ${e?.message || e}`);
+      }
+    } else {
+      try { s.child.stdin.write(`${code}\n`); } catch (e) { end(s, LoginState.FAILED, e.message); }
+    }
     await waitFor(s, () => false, codeWaitMs);
     return publicOf(s);
   }
@@ -205,15 +279,15 @@ export function buildLlmLoginTools(login) {
     { ...base, name: 'llm.status', handler: call(login.status),
       description: 'BE-only: coding agents on this shared computer and whether this member is signed in to each.', input_schema: schema({}) },
     { ...base, name: 'llm.login_start', handler: call(login.start),
-      description: "BE-only: start signing this member in to an agent. Returns a link (and a one-time code for codex) to open on the member's own device.",
-      input_schema: schema({ agent: str('claude | codex') }, ['agent']) },
+      description: "BE-only: start signing this member in to an agent. Returns a link (and a one-time code for codex, or callback_url prompt for gemini) to open on the member's own device.",
+      input_schema: schema({ agent: str('claude | codex | gemini') }, ['agent']) },
     { ...base, name: 'llm.login_code', handler: call(login.submitCode),
-      description: 'BE-only: give the code shown after signing in (claude) to the running sign-in, wait for it to finish.',
-      input_schema: schema({ login_id: str('from llm.login_start'), code: str('code from the sign-in page') }, ['login_id', 'code']) },
+      description: 'BE-only: give the code shown after signing in (claude) or the localhost callback URL (gemini) to the running sign-in, wait for it to finish.',
+      input_schema: schema({ login_id: str('from llm.login_start'), code: str('code or localhost callback URL from the sign-in page') }, ['login_id', 'code']) },
     { ...base, name: 'llm.login_poll', handler: call(login.poll),
       description: 'BE-only: state of a running sign-in (pending | succeeded | failed | expired); wait_ms waits for it to finish.',
       input_schema: schema({ login_id: str('from llm.login_start'), wait_ms: { type: 'number', description: 'max 25000' } }, ['login_id']) },
     { ...base, name: 'llm.logout', handler: call(login.logout),
-      description: 'BE-only: sign this member out of an agent on this shared computer.', input_schema: schema({ agent: str('claude | codex') }, ['agent']) },
+      description: 'BE-only: sign this member out of an agent on this shared computer.', input_schema: schema({ agent: str('claude | codex | gemini') }, ['agent']) },
   ];
 }
