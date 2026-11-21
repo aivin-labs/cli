@@ -416,17 +416,22 @@ export async function startRemoteClient(options = {}) {
   const tools = buildTools(env);
   const byName = toolMap(tools);
   // Mô hình trên máy (`llm.complete`, công cụ BE-only nên BE biết qua cờ này) — BE dùng cho tier nặng khi phiên chat gắn với máy này.
-  if (byName.has('llm.complete')) {
+  // Tách thành hàm để gọi lại trong `announce()` mỗi khi LightCode được bật / tắt sau lúc daemon khởi động.
+  let lightcodeLlmSent = false;
+  const refreshLocalLlmProfile = () => {
+    if (!byName.has('llm.complete')) return;
     const agents = activeLocalLlm()?.info().agents || [];
-    // `accounts`: băm tài khoản từng agent — BE tính hạn mức theo tài khoản + nhóm model (localLlmAccounts.mjs).
     if (agents.length) {
       const ids = agents.map((a) => a.id);
-      // Máy tính tổ chức: mỗi thành viên một tài khoản agent riêng → không có vân tay chung của máy; `per_member` = BE tính đăng nhập +
-      // hạn mức theo từng thành viên.
       const accounts = multiUser ? undefined : localLlmAccounts(ids);
       profile.local_llm = { provider: ids[0], agents: ids, ...(accounts ? { accounts } : {}), ...(multiUser ? { per_member: true } : {}) };
+      lightcodeLlmSent = ids.includes('lightcode');
+    } else {
+      delete profile.local_llm;
+      lightcodeLlmSent = false;
     }
-  }
+  };
+  refreshLocalLlmProfile();
   // Công cụ chủ máy tắt (`aivin remote policy deny`) không vào danh mục — Planner không lập kế hoạch với nó (gọi tới vẫn bị chặn ở sàn luật).
   const deniedTools = new Set(policyGuard.read().deny_tools);
   if (deniedTools.has('gui.act')) deniedTools.add('gui.do');
@@ -825,9 +830,15 @@ export async function startRemoteClient(options = {}) {
   }
   const pauseWatch = setInterval(checkPauseNow, PAUSE_POLL_MS);
   pauseWatch.unref?.();
-  // Người dùng đăng nhập tài khoản AI (hoặc kích hoạt bản quyền) trong LightCode sau khi máy đã kết nối → chào lại ngay để BE giao việc cho nó, không đợi lần nối lại.
+  // Người dùng đăng nhập tài khoản AI (hoặc bật/tắt LightCode) sau khi máy đã kết nối → chào lại ngay để BE cập nhật agent và bộ chọn model, không đợi lần nối lại.
   const lightcodeWatch = setInterval(async () => {
-    if (stopped || multiUser || !socket.connected || !activeAgentRunner()?.installed().some((a) => a.id === 'lightcode')) return;
+    if (stopped || multiUser || !socket.connected) return;
+    const hasLightcodeLlmNow = !!(byName.has('llm.complete') && activeLocalLlm()?.info().agents?.some((a) => a.id === 'lightcode'));
+    if (hasLightcodeLlmNow !== lightcodeLlmSent) {
+      void announceProfile?.();
+      return;
+    }
+    if (!activeAgentRunner()?.installed().some((a) => a.id === 'lightcode')) return;
     const why = await lightcodeReadiness().catch(() => undefined);
     if (why === undefined || (why || null) === lightcodeIssueSent) return;
     void announceProfile?.();
@@ -992,6 +1003,7 @@ export async function startRemoteClient(options = {}) {
   const announce = async () => {
     try {
       if (!multiUser) profile.update = updateProfile({ enabled: autoUpdateEnabled });
+      refreshLocalLlmProfile();
       // Agent lập trình chạy được HỢP ĐỒNG trên máy (20/11/2026: gồm LightCode — cài / bật sau khi daemon chạy nên đọc lại mỗi lần chào).
       // Luôn gửi (kể cả rỗng): BE coi đây là danh sách đầy đủ, không còn đoán "có agent.run là có Claude".
       const runner = multiUser ? null : activeAgentRunner();

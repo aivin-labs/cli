@@ -5,6 +5,7 @@ import { execFile, spawn } from 'child_process';
 import { DeviceErrorCode, REMOTE_CONFIG_DIR, ToolGroup } from './constants.mjs';
 import { DeviceToolError, agentEnv } from './sandbox.mjs';
 import { CLAUDE_ADAPTER, findAgentBinary } from './codingAgents.mjs';
+import { readConnector } from './lightcodeAgent.mjs';
 import { MEMBER_LLM_AGENTS, MEMBER_LLM_DIR, createSignInChecker, memberSpawnArgs } from './localLlmMembers.mjs';
 
 /**
@@ -237,7 +238,18 @@ export const ANTIGRAVITY_LLM = Object.freeze({
   args: () => ['acp', '--disable-telemetry'],
 });
 
-export const DEFAULT_LLM_ADAPTERS = Object.freeze([CLAUDE_LLM, CODEX_LLM, ANTIGRAVITY_LLM]);
+export const LIGHTCODE_LLM = Object.freeze({
+  id: 'lightcode',
+  label: 'LightCode',
+  kind: 'http',
+  dynamic: true,
+  find() {
+    const conn = readConnector();
+    return conn ? { bin: `http://127.0.0.1:${conn.port}`, version: conn.app_version || null, connector: conn } : null;
+  },
+});
+
+export const DEFAULT_LLM_ADAPTERS = Object.freeze([CLAUDE_LLM, CODEX_LLM, ANTIGRAVITY_LLM, LIGHTCODE_LLM]);
 
 /** Câu báo hết hạn mức agy gửi như một đoạn trả lời bình thường. */
 const AGY_QUOTA_RE = /^\s*⚠?\s*(individual )?quota reached/i;
@@ -245,7 +257,7 @@ const AGY_QUOTA_RE = /^\s*⚠?\s*(individual )?quota reached/i;
 // ------------------------------------------------------------------------------------------------------------------------------------------
 
 export function createLocalLlm({
-  adapters = DEFAULT_LLM_ADAPTERS, spawnImpl = spawn, dir = LLM_DIR, now = Date.now, idleMs = WARM_IDLE_MS, version = versionOf,
+  adapters = DEFAULT_LLM_ADAPTERS, spawnImpl = spawn, fetchImpl = globalThis.fetch, dir = LLM_DIR, now = Date.now, idleMs = WARM_IDLE_MS, version = versionOf,
   warmPerKey = WARM_PER_KEY, maxWarmProcs = MAX_WARM_PROCS,
   // Máy tính tổ chức: lời gọi nào cũng phải mang tài khoản thành viên (`ctx.runAs`) — agent chạy dưới tài khoản đó, không bao giờ bằng root.
   memberMode = false, memberDir = MEMBER_LLM_DIR, signIn: signInOverride,
@@ -255,6 +267,17 @@ export function createLocalLlm({
   const probes = new Map();
   const versions = new Map();
   const binOf = (a) => {
+    if (a.dynamic) {
+      try {
+        const hit = a.find() || null;
+        found.set(a.id, hit);
+        if (hit?.version) versions.set(a.id, hit.version);
+        return hit;
+      } catch {
+        found.set(a.id, null);
+        return null;
+      }
+    }
     if (!found.has(a.id)) { try { found.set(a.id, a.find() || null); } catch { found.set(a.id, null); } }
     return found.get(a.id);
   };
@@ -423,8 +446,106 @@ export function createLocalLlm({
     return { adapter, model, effort };
   }
 
+  async function completeViaLightcodeHttp(adapter, args, ctx) {
+    const info = binOf(adapter);
+    const conn = info?.connector;
+    if (!conn?.port || !conn?.key) throw failed('LightCode is not running on this computer', DeviceErrorCode.NOT_FOUND);
+    const startedAt = now();
+    const timeoutMs = Math.min(Number(args.timeout_ms) || ctx.timeoutMs || DEFAULT_TIMEOUT_MS, 10 * 60_000);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const onOuterAbort = () => ctrl.abort();
+    ctx.signal?.addEventListener?.('abort', onOuterAbort, { once: true });
+    try {
+      const res = await fetchImpl(`http://127.0.0.1:${conn.port}/connector/v1/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${conn.key}` },
+        body: JSON.stringify({
+          ...(args.prompt ? { prompt: String(args.prompt) } : {}),
+          ...(args.system ? { system: String(args.system) } : {}),
+          ...(Array.isArray(args.messages) ? { messages: args.messages } : {}),
+          ...(args.json_schema ? { json_schema: args.json_schema } : {}),
+          ...(args.provider ? { provider: String(args.provider) } : {}),
+          ...(args.model && args.model !== 'auto' ? { model: String(args.model) } : {}),
+          ...(args.effort ? { effort: String(args.effort) } : {}),
+          timeout_ms: timeoutMs,
+          stream: true,
+        }),
+        signal: ctrl.signal,
+      });
+      if (res.status === 429) {
+        const errBody = await res.json().catch(() => ({}));
+        throw failed(errBody?.error || 'All LightCode accounts are out of quota', QUOTA_ERROR);
+      }
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        if (errBody?.code === 'quota_exceeded') throw failed(errBody?.error || 'All LightCode accounts are out of quota', QUOTA_ERROR);
+        throw failed(errBody?.error || `LightCode answered ${res.status}`);
+      }
+      const decoder = new TextDecoder();
+      let buf = '';
+      let accText = '';
+      let finalMsg = null;
+      let ttft = null;
+      const handleLine = (line) => {
+        const s = line.trim();
+        if (!s) return;
+        let msg;
+        try { msg = JSON.parse(s); } catch { return; }
+        if (msg?.type === 'delta' && typeof msg.text === 'string') {
+          if (ttft === null) ttft = now() - startedAt;
+          accText += msg.text;
+          if (typeof ctx.onOutput === 'function') { try { ctx.onOutput(msg.text); } catch { /* bỏ qua */ } }
+        } else if (msg?.type === 'result') {
+          finalMsg = msg;
+        }
+      };
+      if (res.body) {
+        for await (const chunk of res.body) {
+          if (ctrl.signal.aborted) break;
+          buf += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const line of lines) handleLine(line);
+        }
+        if (buf.trim()) handleLine(buf);
+      } else {
+        finalMsg = await res.json().catch(() => null);
+      }
+      if (finalMsg && !finalMsg.ok) {
+        if (finalMsg.code === 'quota_exceeded') {
+          const resetNote = finalMsg.reset_at ? ` (resets at ${finalMsg.reset_at})` : '';
+          throw failed(`${finalMsg.error || 'All LightCode accounts are out of quota'}${resetNote}`, QUOTA_ERROR);
+        }
+        throw failed(finalMsg.error || 'LightCode completion failed');
+      }
+      const text = typeof finalMsg?.text === 'string' ? finalMsg.text : accText;
+      if (!text && finalMsg?.json === undefined) throw failed('LightCode returned an empty answer');
+      return {
+        text,
+        ...(finalMsg?.json !== undefined ? { json: finalMsg.json } : {}),
+        agent: 'lightcode',
+        model: finalMsg?.model || args.model || 'auto',
+        ...(finalMsg?.provider ? { provider: finalMsg.provider } : {}),
+        ...(finalMsg?.account ? { account: finalMsg.account } : {}),
+        ...(finalMsg?.usage ? { usage: finalMsg.usage } : {}),
+        duration_ms: now() - startedAt,
+        ...(ttft !== null ? { ttft_ms: ttft } : {}),
+      };
+    } catch (e) {
+      if (e instanceof DeviceToolError) throw e;
+      if (ctx.signal?.aborted) throw failed('Cancelled', DeviceErrorCode.CANCELLED);
+      if (ctrl.signal.aborted) throw failed(`LightCode timed out after ${timeoutMs} ms`, DeviceErrorCode.TIMEOUT);
+      throw failed(`LightCode: ${e?.message || e}`);
+    } finally {
+      clearTimeout(timer);
+      ctx.signal?.removeEventListener?.('abort', onOuterAbort);
+    }
+  }
+
   async function complete(args = {}, ctx = {}) {
     const { adapter, model, effort } = validate(args);
+    if (adapter.kind === 'http') return completeViaLightcodeHttp(adapter, { ...args, model, effort }, ctx);
     const account = accountOf(ctx);
     await assertSignedIn(adapter, account);
     const content = renderRequest(args, { withBase: adapter.kind !== 'stream' });
@@ -542,6 +663,7 @@ export function createLocalLlm({
     /** BE báo trước agent / model sắp dùng (người dùng vừa chọn máy này) → khởi động sẵn. Máy tổ chức: chỉ khi thành viên đã đăng nhập. */
     prewarm: (args = {}, ctx = {}) => {
       const { adapter, model, effort } = validate(args);
+      if (adapter.kind === 'http') return Promise.resolve({ warm: [] });
       const account = accountOf(ctx);
       const warmNow = () => {
         keepWarm(adapter, { model, effort, account });

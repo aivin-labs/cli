@@ -9,6 +9,7 @@ import { buildCommandAuthEnv, redactAuthText, sanitizeAuthEnv } from '../bin/lib
 import { createLlmLogin, normalizeLocalCallbackUrl, parseLocalCallbackTarget } from '../bin/lib/remote/localLlmLogin.mjs';
 import { SIGN_IN_PROBES } from '../bin/lib/remote/localLlmMembers.mjs';
 import { memberSpawner } from '../bin/lib/remote/codingAgents.mjs';
+import { createLocalLlm } from '../bin/lib/remote/localLlm.mjs';
 
 test('ephemeralAuth: lọc đúng allowlist, tạo GIT_CONFIG extraheader và che sạch cả token lẫn base64', () => {
   const clean = sanitizeAuthEnv({
@@ -104,4 +105,38 @@ test('localLlmMembers: SIGN_IN_PROBES.gemini kiểm tra tệp oauth_creds.json t
   } finally {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   }
+});
+
+test('localLlm LIGHTCODE_LLM: gọi /connector/v1/complete cục bộ, stream delta và bắt LOCAL_LLM_QUOTA', async () => {
+  const fakeLc = {
+    id: 'lightcode',
+    label: 'LightCode',
+    kind: 'http',
+    dynamic: true,
+    find: () => ({ bin: 'http://127.0.0.1:4190', version: '2.4.0', connector: { port: 4190, key: 'k_local' } }),
+  };
+  const chunks = [];
+  const llm = createLocalLlm({
+    adapters: [fakeLc],
+    fetchImpl: async (url, init) => {
+      assert.equal(url, 'http://127.0.0.1:4190/connector/v1/complete');
+      assert.equal(init.headers.Authorization, 'Bearer k_local');
+      const ndjson = [
+        JSON.stringify({ type: 'delta', text: 'Chào ' }),
+        JSON.stringify({ type: 'delta', text: 'bạn' }),
+        JSON.stringify({ type: 'result', ok: true, text: 'Chào bạn', agent: 'lightcode', provider: 'claude', account: 'Acc #2', model: 'sonnet' }),
+      ].join('\n') + '\n';
+      return { ok: true, status: 200, body: (async function* () { yield ndjson; })() };
+    },
+  });
+  const out = await llm.complete({ agent: 'lightcode', prompt: 'Hi' }, { onOutput: (c) => chunks.push(c) });
+  assert.equal(out.text, 'Chào bạn');
+  assert.equal(out.account, 'Acc #2');
+  assert.deepEqual(chunks, ['Chào ', 'bạn']);
+
+  const llmQuota = createLocalLlm({
+    adapters: [fakeLc],
+    fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({ code: 'quota_exceeded', error: 'Out of quota' }) }),
+  });
+  await assert.rejects(llmQuota.complete({ agent: 'lightcode', prompt: 'Hi' }), (e) => e.code === 'LOCAL_LLM_QUOTA');
 });
