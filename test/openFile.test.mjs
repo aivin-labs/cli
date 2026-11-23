@@ -4,7 +4,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
-import { appWindowCommand, driveOpenUrl, fileSha256, indexKey, openText, readOpenIndex, writeOpenIndex, OpenFileError, OpenFileFailure } from '../bin/lib/openFile.mjs';
+import http from 'http';
+import { appWindowCommand, driveOpenUrl, fileSha256, indexKey, openText, readOpenIndex, suggestDestinations, writeOpenIndex, OpenFileError, OpenFileFailure } from '../bin/lib/openFile.mjs';
+import { handoffCreateDoc } from '../bin/lib/docHandoff.mjs';
 import { DEFAULT_APPS_URI, associationRegCommands, associationStamp, defaultAssociationsXml, ensureUninstallEntry, openCommand, shareCommand, uninstallEntryCommands, unregisterUninstallEntry, workHereCommand, unregisterFileAssociations, OPEN_WITH_PROGID } from '../bin/lib/remote/desktop/fileAssociation.mjs';
 import { launcherSource } from '../bin/lib/remote/desktop/index.mjs';
 
@@ -15,10 +17,113 @@ test('driveOpenUrl dùng deep-link open_file của FE, bỏ / thừa ở cuối 
   );
 });
 
-test('indexKey tách theo máy chủ + workspace + nội dung', () => {
+test('indexKey tách theo máy chủ + workspace + thư mục + nội dung', () => {
   const sha256 = fileSha256(Buffer.from('abc'));
   assert.notEqual(indexKey({ baseUrl: 'a', workspaceId: 'w', sha256 }), indexKey({ baseUrl: 'b', workspaceId: 'w', sha256 }));
   assert.notEqual(indexKey({ baseUrl: 'a', workspaceId: 'w', sha256 }), indexKey({ baseUrl: 'a', workspaceId: 'x', sha256 }));
+  assert.notEqual(indexKey({ baseUrl: 'a', workspaceId: 'w', folderId: 'f1', sha256 }), indexKey({ baseUrl: 'a', workspaceId: 'w', sha256 }));
+  assert.notEqual(indexKey({ baseUrl: 'a', workspaceId: 'w', folderId: 'f1', sha256 }), indexKey({ baseUrl: 'a', workspaceId: 'w', folderId: 'f2', sha256 }));
+});
+
+test('suggestDestinations gọi POST /fileshare/suggest-destination với metadata tệp và trả về danh sách gợi ý từ AIVIN', async () => {
+  let received = null;
+  const server = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/fileshare/suggest-destination') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        received = JSON.parse(body);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          suggestions: [
+            { label: 'Phòng kinh doanh / Kế hoạch 2027', workspaceId: 'ws_sales', folderId: 'fld_1', reason: 'Phù hợp tài liệu kinh doanh' },
+          ],
+        }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const port = server.address().port;
+    const result = await suggestDestinations('H:\\LCAgent\\docs\\Ke-Hoach-Kinh-Doanh.docx', {
+      topic: 'Kế hoạch kinh doanh toàn cầu',
+      projectName: 'LightCode',
+      serverUrl: `http://127.0.0.1:${port}`,
+      auth: { headers: { 'x-api-key': 'test-key' } },
+    });
+    assert.equal(received.file_name, 'Ke-Hoach-Kinh-Doanh.docx');
+    assert.equal(received.extension, 'docx');
+    assert.equal(received.topic, 'Kế hoạch kinh doanh toàn cầu');
+    assert.equal(received.project_name, 'LightCode');
+    assert.equal(result.suggestions.length, 1);
+    assert.equal(result.suggestions[0].folderId, 'fld_1');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('handoffCreateDoc gửi prompt + grounding + materials sang POST /fileshare/:ws/handoff-create và trả link Drive', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-handoff-'));
+  const groundingFile = path.join(dir, 'facts.md');
+  const matFile = path.join(dir, 'pricing.md');
+  fs.writeFileSync(groundingFile, 'LightCode gom 15+ AI agent trong 1 workspace.');
+  fs.writeFileSync(matFile, 'Gói cá nhân $2.99, gói nhóm $15/user/tháng.');
+
+  let received = null;
+  let reqUrl = '';
+  const server = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url.endsWith('/handoff-create')) {
+      reqUrl = req.url;
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        received = JSON.parse(body);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          file_id: 'file_handoff_99',
+          workspace_id: 'ws_sales',
+          folder_id: 'fld_plan',
+          name: 'Kế hoạch kinh doanh LightCode',
+          extension: 'docx',
+          status: 'generating',
+        }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const port = server.address().port;
+    const out = await handoffCreateDoc({
+      prompt: 'Soạn kế hoạch kinh doanh toàn cầu 3 năm cho LightCode',
+      name: 'Kế hoạch kinh doanh LightCode',
+      extension: 'docx',
+      workspace: 'ws_sales',
+      folder: 'fld_plan',
+      groundingFile,
+      materialFiles: [matFile],
+      lang: 'vi',
+      serverUrl: `http://127.0.0.1:${port}`,
+      webUrl: 'https://app.aivin.vn',
+      auth: { headers: { 'x-api-key': 'test-key' } },
+    });
+    assert.equal(reqUrl, '/fileshare/ws_sales/handoff-create');
+    assert.equal(received.folder_id, 'fld_plan');
+    assert.equal(received.extension, 'docx');
+    assert.match(received.grounding, /LightCode gom 15\+/);
+    assert.equal(received.materials.length, 1);
+    assert.equal(received.materials[0].name, 'pricing.md');
+    assert.equal(out.url, 'https://app.aivin.vn/drive?open_file=file_handoff_99&workspace_id=ws_sales');
+    assert.equal(out.status, 'generating');
+  } finally {
+    await new Promise((r) => server.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('chỉ mục: đọc tệp hỏng ra rỗng, ghi giữ 500 mục mới nhất', () => {

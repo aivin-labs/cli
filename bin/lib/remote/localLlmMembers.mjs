@@ -19,7 +19,7 @@ export const MEMBER_LLM_DIR = '/var/lib/aivin-llm';
 export const MEMBER_LLM_AGENTS = Object.freeze(['claude', 'codex', 'gemini']);
 
 /** Biến của agent mà tiến trình root có thể mang — không để lọt sang tài khoản thành viên (agent phải đọc đăng nhập trong HOME của họ). */
-const ROOT_ONLY_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'];
+const ROOT_ONLY_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'LCAGENT_LICENSE_FILE', 'AIVIN_LIGHTCODE_LICENSE_KEY', 'AIVIN_LIGHTCODE_MACHINE_ID'];
 
 /** `env` của agent chạy cho thành viên: HOME / USER của họ, không tự cập nhật (bản cài thuộc root), không mở trình duyệt (máy không màn hình). */
 export function memberAgentEnv(account, base = process.env) {

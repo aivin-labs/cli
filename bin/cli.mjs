@@ -68,7 +68,8 @@ import { MascotText, mascotLang, mascotText } from './lib/remote/mascot/strings.
 import { DESKTOP_WEBRTC_WORKER_ARG, runDesktopWebRtcWorker } from './lib/remote/desktop/webrtcWorker.mjs';
 import { DemoScope, UiResult, showMascotDemo, showMascotUi } from './lib/remote/mascot/ui.mjs';
 import { desktopAppStatus, installDesktopApp, uninstallDesktopApp } from './lib/remote/autoStart.mjs';
-import { OpenDisplay, openFile, openText } from './lib/openFile.mjs';
+import { OpenDisplay, openFile, openText, suggestDestinations } from './lib/openFile.mjs';
+import { handoffCreateDoc } from './lib/docHandoff.mjs';
 import { OPEN_WITH_EXTENSIONS, SAFE_DEFAULT_EXTENSIONS, defaultAssociationsXml, openDefaultAppsSettings } from './lib/remote/desktop/fileAssociation.mjs';
 import { showOSNotification } from './lib/remote/notify.mjs';
 import { createMeetingManager, requestMeeting } from './lib/remote/meeting/index.mjs';
@@ -1181,9 +1182,36 @@ program
   .command('open <files...>')
   .description('Open files from this computer in your Aivin Drive (uploads once; the same content reopens the same Drive file). Windows: `aivin desktop install` adds "Open with AIVIN Bot" to Explorer.')
   .option('-w, --workspace <id>', 'Workspace to upload into (default: your personal workspace)')
+  .option('-f, --folder <id>', 'Folder ID inside the workspace on Aivin Drive')
+  .option('--suggest', 'Ask Aivin for the best Drive destination suggestions without uploading')
+  .option('--topic <text>', 'Short document topic/summary (used with --suggest)')
+  .option('--project-name <name>', 'Source project name (used with --suggest)')
+  .option('--json', 'Output JSON (used with --suggest)')
   .option('--tab', 'Open in a normal browser tab instead of its own window')
   .option('--print', 'Print the Drive link instead of opening anything')
   .action(async (files, options) => {
+    if (options.suggest) {
+      try {
+        const res = await suggestDestinations(files[0], {
+          topic: options.topic,
+          projectName: options.projectName,
+          workspace: options.workspace,
+        });
+        if (options.json) {
+          console.log(JSON.stringify(res));
+        } else if (!res.suggestions.length) {
+          console.log(chalk.gray('No suggestions available.'));
+        } else {
+          res.suggestions.forEach((s, i) => {
+            console.log(`${i + 1}. ${chalk.cyan(s.label)} (${s.workspaceId}${s.folderId ? ` / ${s.folderId}` : ''})${s.reason ? ` — ${s.reason}` : ''}`);
+          });
+        }
+      } catch (error) {
+        console.error(chalk.red('❌'), error.message);
+        process.exitCode = 1;
+      }
+      return;
+    }
     // Gọi từ Explorer qua Aivin.exe --open (không có console) → báo bằng thông báo hệ điều hành.
     const toast = process.env.AIVIN_OPEN_UI === 'toast';
     for (const file of files) {
@@ -1207,13 +1235,57 @@ program
           }
         };
         const display = options.print ? OpenDisplay.NONE : options.tab ? OpenDisplay.TAB : OpenDisplay.WINDOW;
-        const res = await openFile(file, { workspace: options.workspace, display, onProgress });
+        const res = await openFile(file, { workspace: options.workspace, folder: options.folder, display, onProgress });
         console.log(options.print ? res.url : chalk.green(`✅ ${res.name} → ${res.url}${res.reused ? ' (Drive copy reused)' : ''}${res.viewOnly ? ' (view only, not signed in - closes with its window)' : ''}`));
       } catch (error) {
         console.error(chalk.red('❌'), error.message);
         if (toast) showOSNotification({ title: openText('failed_title'), body: error.message });
         process.exitCode = 1;
       }
+    }
+  });
+
+const docCommand = program
+  .command('doc')
+  .description('Hand off business document drafting (docx, xlsx, pptx, md) with source materials to AIVIN Drive');
+
+docCommand
+  .command('create')
+  .description('Create a document directly on AIVIN Drive using AIVIN AI authoring engine and return the online link immediately')
+  .requiredOption('-p, --prompt <text>', 'What document to draft')
+  .option('-n, --name <title>', 'Optional document title')
+  .option('-e, --ext <type>', 'Document format: docx | xlsx | pptx | md', 'docx')
+  .option('-w, --workspace <id>', 'Target workspace ID (default: personal workspace)')
+  .option('-f, --folder <id>', 'Target Drive folder ID inside the workspace')
+  .option('--grounding <text>', 'Inline verified project facts / summary handed off to AIVIN')
+  .option('--grounding-file <path>', 'UTF-8 file containing verified project facts handed off to AIVIN')
+  .option('--material <path>', 'Attach a source material file (repeatable)', (v, prev) => [...prev, v], [])
+  .option('--lang <lang>', 'Preferred document language (e.g. vi, en)')
+  .option('--json', 'Output result as JSON')
+  .option('--print', 'Print only the AIVIN Drive URL')
+  .action(async (options) => {
+    try {
+      const res = await handoffCreateDoc({
+        prompt: options.prompt,
+        name: options.name,
+        extension: options.ext,
+        workspace: options.workspace,
+        folder: options.folder,
+        grounding: options.grounding,
+        groundingFile: options.groundingFile,
+        materialFiles: options.material,
+        lang: options.lang,
+      });
+      if (options.json) {
+        console.log(JSON.stringify(res));
+      } else if (options.print) {
+        console.log(res.url);
+      } else {
+        console.log(chalk.green(`✅ Created on AIVIN Drive (${res.status}) → ${res.url}`));
+      }
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exitCode = 1;
     }
   });
 

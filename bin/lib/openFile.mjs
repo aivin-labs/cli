@@ -73,9 +73,9 @@ export function fileSha256(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
 }
 
-/** Khoá chỉ mục: cùng máy chủ + workspace + nội dung (đổi tài khoản / máy chủ không dùng nhầm tệp của nơi khác). */
-export function indexKey({ baseUrl, workspaceId, sha256 }) {
-  return `${baseUrl}|${workspaceId}|${sha256}`;
+/** Khoá chỉ mục: cùng máy chủ + workspace (+ thư mục nếu có) + nội dung (đổi nơi lưu không dùng nhầm tệp ở nơi khác). */
+export function indexKey({ baseUrl, workspaceId, folderId, sha256 }) {
+  return folderId ? `${baseUrl}|${workspaceId}|${folderId}|${sha256}` : `${baseUrl}|${workspaceId}|${sha256}`;
 }
 
 export function readOpenIndex(file = OPEN_INDEX_FILE) {
@@ -123,9 +123,10 @@ async function driveFileExists(serverUrl, auth, { workspaceId, fileId }) {
   }
 }
 
-async function uploadToDrive(serverUrl, auth, { workspaceId, name, buffer }, onProgress) {
+async function uploadToDrive(serverUrl, auth, { workspaceId, folderId, name, buffer }, onProgress) {
   const form = new FormData();
   form.append('file', new Blob([buffer]), name);
+  if (folderId) form.append('folder_id', String(folderId));
   try {
     const res = await axios.post(`${serverUrl}/fileshare/${encodeURIComponent(workspaceId)}/upload`, form, {
       ...auth, maxBodyLength: Infinity, maxContentLength: Infinity, timeout: 10 * 60_000,
@@ -204,29 +205,58 @@ async function resolveWebUrl(serverUrl) {
 }
 
 /**
- * Tải (hoặc dùng lại) rồi mở. Trả `{ url, fileId, workspaceId, reused }`; lỗi → OpenFileFailure.
+ * Hỏi AIVIN gợi ý 3–5 đích lưu phù hợp nhất trên Drive cho một tệp (không lộ cây thư mục ra ngoài).
+ * Trả `{ suggestions: [{ label, workspaceId, workspaceName, folderId?, folderPath?, reason }] }`.
+ */
+export async function suggestDestinations(filePath, { topic, projectName, workspace, limit, serverUrl: customServerUrl, auth: customAuth } = {}) {
+  if (!customAuth && !process.env.API_KEY) throw new OpenFileFailure(OpenFileError.NOT_LOGGED_IN);
+  const serverUrl = customServerUrl || missionServerUrl();
+  const auth = customAuth || missionAuthHeaders();
+  const fileName = filePath ? path.basename(String(filePath)) : 'document';
+  const ext = path.extname(fileName).replace(/^\./, '').toLowerCase() || undefined;
+  let workspaceId;
+  if (workspace) {
+    const ws = await resolveWorkspace(serverUrl, auth, workspace);
+    workspaceId = String(ws.id || ws._id);
+  }
+  const payload = {
+    file_name: fileName,
+    ...(ext ? { extension: ext } : {}),
+    ...(topic ? { topic: String(topic).slice(0, 500) } : {}),
+    ...(projectName ? { project_name: String(projectName).slice(0, 150) } : {}),
+    ...(workspaceId ? { workspace_id: workspaceId } : {}),
+    ...(Number.isInteger(limit) && limit >= 1 ? { limit: Math.min(limit, 8) } : {}),
+  };
+  const res = await axios.post(`${serverUrl}/fileshare/suggest-destination`, payload, { ...auth, timeout: 25_000 });
+  const suggestions = Array.isArray(res.data?.suggestions) ? res.data.suggestions : [];
+  return { suggestions };
+}
+
+/**
+ * Tải (hoặc dùng lại) rồi mở. Trả `{ url, fileId, workspaceId, folderId, reused }`; lỗi → OpenFileFailure.
  * `display`: OpenDisplay — cửa sổ riêng (mặc định), tab thường, hoặc chỉ trả đường dẫn (--print).
  */
-export async function openLocalFile(filePath, { workspace, display: displayMode = OpenDisplay.WINDOW, indexFile = OPEN_INDEX_FILE, onProgress } = {}) {
+export async function openLocalFile(filePath, { workspace, folder, display: displayMode = OpenDisplay.WINDOW, indexFile = OPEN_INDEX_FILE, onProgress } = {}) {
   if (!process.env.API_KEY) throw new OpenFileFailure(OpenFileError.NOT_LOGGED_IN);
   const local = readLocalFile(filePath);
   const serverUrl = missionServerUrl();
   const auth = missionAuthHeaders();
   const ws = await resolveWorkspace(serverUrl, auth, workspace);
   const workspaceId = String(ws.id || ws._id);
+  const folderId = folder ? String(folder).trim() : undefined;
   const sha256 = fileSha256(local.buffer);
-  const key = indexKey({ baseUrl: serverUrl, workspaceId, sha256 });
+  const key = indexKey({ baseUrl: serverUrl, workspaceId, folderId, sha256 });
 
   const index = readOpenIndex(indexFile);
   const reusedId = await findReusable(serverUrl, auth, { index, key });
-  const fileId = reusedId || await uploadToDrive(serverUrl, auth, { workspaceId, name: local.name, buffer: local.buffer }, onProgress);
+  const fileId = reusedId || await uploadToDrive(serverUrl, auth, { workspaceId, folderId, name: local.name, buffer: local.buffer }, onProgress);
 
-  index[key] = { file_id: fileId, workspace_id: workspaceId, name: local.name, path: local.abs, opened_at: new Date().toISOString() };
+  index[key] = { file_id: fileId, workspace_id: workspaceId, ...(folderId ? { folder_id: folderId } : {}), name: local.name, path: local.abs, opened_at: new Date().toISOString() };
   try { writeOpenIndex(index, indexFile); } catch { /* chỉ mất lần dùng lại sau */ }
 
   const url = driveOpenUrl(await resolveWebUrl(serverUrl), { fileId, workspaceId });
   showUrl(url, displayMode);
-  return { url, fileId, workspaceId, reused: !!reusedId, name: local.name };
+  return { url, fileId, workspaceId, ...(folderId ? { folderId } : {}), reused: !!reusedId, name: local.name };
 }
 
 const isAuthRejected = (error) => (error?.cause?.response?.status ?? error?.response?.status) === 401;

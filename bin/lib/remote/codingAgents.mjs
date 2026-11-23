@@ -167,7 +167,7 @@ export function agentProfileDir(adapter, name, { root = AGENT_PROFILES_DIR } = {
 }
 
 /** Biến chỉ tiến trình root được mang — không lọt sang tài khoản thành viên (agent đọc đăng nhập trong HOME của chính họ). */
-const ROOT_ONLY_AGENT_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY'];
+const ROOT_ONLY_AGENT_ENV = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'LCAGENT_LICENSE_FILE', 'AIVIN_LIGHTCODE_LICENSE_KEY', 'AIVIN_LIGHTCODE_MACHINE_ID'];
 
 /**
  * Máy tính tổ chức (17/11/2026): tiến trình con của job lập trình chạy dưới tài khoản Linux của thành viên — agent, mọi lệnh git (worktree,

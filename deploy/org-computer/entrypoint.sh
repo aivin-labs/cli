@@ -38,4 +38,18 @@ if [ "$mode" != "off" ]; then
   fi
 fi
 
+# Kích hoạt LightCode an toàn (22/11/2026): BE cấp vé Ed25519 ngắn hạn ràng chặt vào machine-id của riêng lần bật container này.
+# Vé chỉ ghi vào /var/lib/aivin (0700, root-only) với quyền 0600 rồi xóa sạch khỏi biến môi trường trước khi chạy tiến trình nào khác.
+if [ -n "${AIVIN_LIGHTCODE_MACHINE_ID:-}" ]; then
+  printf '%s\n' "$AIVIN_LIGHTCODE_MACHINE_ID" > /etc/machine-id 2>/dev/null && chmod 444 /etc/machine-id 2>/dev/null || true
+fi
+if [ -n "${AIVIN_LIGHTCODE_LICENSE_KEY:-}" ]; then
+  umask 077
+  printf '%s\n' "$AIVIN_LIGHTCODE_LICENSE_KEY" > /var/lib/aivin/lightcode-license.key
+  chmod 600 /var/lib/aivin/lightcode-license.key
+  umask 022
+  export LCAGENT_LICENSE_FILE=/var/lib/aivin/lightcode-license.key
+fi
+unset AIVIN_LIGHTCODE_LICENSE_KEY AIVIN_LIGHTCODE_MACHINE_ID
+
 exec node /opt/aivin-cli/bin/cli.mjs remote start --multi-user "$@"
