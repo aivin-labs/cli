@@ -24,6 +24,17 @@ import { DeviceToolError, resolveInRoots } from './sandbox.mjs';
  */
 
 export const LIGHTCODE_CONNECTOR_FILE = path.join(os.homedir(), '.lightcode', 'connector.json');
+/**
+ * Container Cloud Computer: LightCode chạy headless dưới tài khoản daemon `aivin-lc`; connector.json nằm ở thư mục nhà của daemon.
+ * entrypoint.sh đặt biến này; CLI đọc để nối vào cửa loopback mà không cần exe LightCode trên Windows.
+ */
+export const LIGHTCODE_HEADLESS_CONNECTOR_FILE = '/var/lib/aivin-lc/.lightcode/connector.json';
+/**
+ * Cờ bật LightCode làm agent chạy việc của THÀNH VIÊN trong Cloud Computer (mặc định TẮT). Daemon `aivin-lc` không đọc được thư mục nhà 0700
+ * của thành viên và LightCode chưa có runAs → khi cờ tắt: không khởi động daemon, không quảng bá agent, org dùng đường Claude Code / Codex.
+ */
+export const LIGHTCODE_ORG_JOBS_ENV = 'AIVIN_LIGHTCODE_ORG_JOBS';
+export const lightcodeOrgJobsEnabled = (env = process.env) => String(env?.[LIGHTCODE_ORG_JOBS_ENV] ?? '').trim() === '1';
 export const LIGHTCODE_RELEASES_URL = 'https://lightcode.live/releases';
 export const LIGHTCODE_SITE = 'https://lightcode.live';
 const DOWNLOAD_DIR = path.join(REMOTE_CONFIG_DIR, 'downloads');
@@ -73,6 +84,66 @@ export function readConnector({ file = LIGHTCODE_CONNECTOR_FILE, alive = pidAliv
     if (!alive(info.pid)) return null;
     return info;
   } catch { return null; }
+}
+
+/**
+ * Headless connector (Cloud Computer): LightCode daemon chạy dưới `aivin-lc`; connector.json ở /var/lib/aivin-lc/.lightcode/connector.json.
+ * Không kiểm pid (daemon chạy dưới uid khác, root không cần kill 0 — chỉ kiểm cổng mở là đủ).
+ * env.LIGHTCODE_HEADLESS_CONNECTOR_FILE cho phép test/deploy override đường dẫn.
+ */
+export function readHeadlessConnector({ file, env = process.env } = {}) {
+  const f = file || env.LIGHTCODE_HEADLESS_CONNECTOR_FILE || LIGHTCODE_HEADLESS_CONNECTOR_FILE;
+  try {
+    const info = JSON.parse(fs.readFileSync(f, 'utf8'));
+    if (info?.app !== 'LightCode' || !Number.isInteger(info.port) || typeof info.key !== 'string' || !info.key) return null;
+    return info;
+  } catch { return null; }
+}
+
+const GATEWAY_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/;
+
+/**
+ * `aiGateway` {baseUrl, apiKey, model, expiresAt} từ BE (quota model mặc định AIVIN) → dạng nội bộ, hoặc undefined khi không có / đã hết hạn.
+ * Sai dạng → ném lỗi (không nuốt im lặng). Không bao giờ log / ghi đĩa; khoá chỉ nằm trong bộ nhớ của job.
+ */
+export function normalizeAiGateway(gw, now = Date.now()) {
+  if (gw === undefined || gw === null) return undefined;
+  const bad = (m) => new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `aiGateway: ${m}`);
+  if (typeof gw !== 'object' || Array.isArray(gw)) throw bad('must be an object');
+  const baseUrl = typeof gw.baseUrl === 'string' ? gw.baseUrl.trim() : '';
+  const apiKey = typeof gw.apiKey === 'string' ? gw.apiKey.trim() : '';
+  const model = typeof gw.model === 'string' ? gw.model.trim() : '';
+  let url = null;
+  try { url = new URL(baseUrl); } catch { /* báo ở dưới */ }
+  if (!url || !/^https?:$/.test(url.protocol)) throw bad('baseUrl must be an http(s) URL');
+  if (!apiKey || apiKey.length > 512 || /\s/.test(apiKey)) throw bad('bad apiKey');
+  if (!GATEWAY_MODEL_RE.test(model)) throw bad('bad model');
+  const exp = typeof gw.expiresAt === 'number' ? gw.expiresAt : Date.parse(String(gw.expiresAt ?? ''));
+  if (!Number.isFinite(exp)) throw bad('bad expiresAt');
+  if (exp <= now) return undefined; // hết hạn → bỏ, không gửi khoá chết
+  return { baseUrl: url.toString().replace(/\/+$/, ''), apiKey, model, expiresAt: new Date(exp).toISOString() };
+}
+
+/**
+ * Tài khoản Linux của thành viên ({uid,gid,home}) mà LightCode chạy CLI của job dưới đó (`run_as`). Chỉ nhận dạng đúng: uid / gid là số nguyên > 0,
+ * home là đường dẫn tuyệt đối sạch (không "..", không "//", không dấu "/" cuối). LightCode còn kiểm lại dải uid, chủ sở hữu thư mục, daemon uid.
+ */
+export function normalizeRunAs(runAs) {
+  const bad = (m) => new DeviceToolError(DeviceErrorCode.INVALID_ARGS, `runAs: ${m}`);
+  if (!runAs || typeof runAs !== 'object' || Array.isArray(runAs)) throw bad('must be an object { uid, gid, home }');
+  for (const k of ['uid', 'gid']) if (!Number.isInteger(runAs[k]) || runAs[k] <= 0) throw bad(`${k} must be a positive integer`);
+  const home = runAs.home;
+  const clean = typeof home === 'string' && home.length > 1 && home.length <= 4096 && home.startsWith('/') && !home.endsWith('/') && !/[\u0000-\u0020]/.test(home)
+    && !home.includes('//') && !home.split('/').some((seg) => seg === '..' || seg === '.');
+  if (!clean) throw bad('home must be a clean absolute path');
+  return { uid: runAs.uid, gid: runAs.gid, home };
+}
+
+/** Cổng AI của job ở dạng LightCode nhận (snake_case); hết hạn giữa chừng (vd. nối lại sau lâu) hoặc hỏng → không có. */
+function gatewayFor(job) {
+  let gw;
+  try { gw = normalizeAiGateway(job?.aiGateway); } catch { return null; }
+  return gw ? { base_url: gw.baseUrl, api_key: gw.apiKey, model: gw.model, expires_at: gw.expiresAt } : null;
 }
 
 /** Tình trạng LightCode trên máy (không gọi mạng). */
@@ -356,6 +427,10 @@ export function spawnLightcodeTurn(argv, opts = {}, deps = {}) {
             ...(job.provider ? { provider: job.provider } : {}),
             ...(job.resume ? { resume: job.resume } : {}), add_dirs: job.addDirs || [], allowed_tools: job.allowedTools || [],
             deny_rules: job.deny || [], source, headless: true,
+            // Cổng AI tạm theo từng job (chỉ trong body loopback — không env / đĩa / log); kiểm hạn lại lúc gửi, hết hạn thì bỏ.
+            ...(gatewayFor(job) ? { ai_gateway: gatewayFor(job) } : {}),
+            // Tài khoản Linux của thành viên: LightCode chạy CLI của job dưới uid này (không rơi về daemon).
+            ...(job.runAs ? { run_as: job.runAs } : {}),
             ...(detach && job.acceptance?.length ? { acceptance: job.acceptance } : {}),
             ...(detach && job.constraints?.length ? { constraints: job.constraints } : {}),
             ...(detach && job.verify?.length ? { verify: job.verify } : {}),
@@ -426,11 +501,24 @@ export const LIGHTCODE_ADAPTER = Object.freeze({
   resumable: true,
   /** Không có tài khoản riêng theo hồ sơ — LightCode tự quản nhiều tài khoản + chuyển dự phòng. */
   profileEnv: null,
-  /** Máy tổ chức (nhiều thành viên) không dùng — LightCode là ứng dụng desktop của một người. */
-  multiUser: false,
+  /**
+   * Cloud Computer (nhiều thành viên): chỉ khi bật cờ AIVIN_LIGHTCODE_ORG_JOBS=1 (mặc định TẮT — xem LIGHTCODE_ORG_JOBS_ENV).
+   * Tắt → runAs lọc LightCode ra, org dùng đường Claude Code / Codex cũ.
+   * Bật → job LUÔN phải kèm runAs của thành viên (args() từ chối nếu thiếu) — không bao giờ chạy dưới tài khoản daemon.
+   */
+  get multiUser() { return lightcodeOrgJobsEnabled(); },
+  /** LightCode tự chạy CLI dưới tài khoản thành viên (`run_as`): runner theo thành viên dùng spawn của adapter, không bọc bằng memberSpawner. */
+  memberAware: true,
   candidates: () => [],
-  /** Có LightCode (đang chạy, hoặc đã cài — bật lên lúc giao việc) → coi như agent đã cài; cờ cố định của adapter. */
+  /**
+   * Có LightCode (đang chạy, hoặc đã cài — bật lên lúc giao việc) → coi như agent đã cài; cờ cố định của adapter.
+   * Headless container: kiểm connector của daemon trước; không cần exe LightCode và không giới hạn platform Windows.
+   */
   locate(opts = {}) {
+    // Headless daemon trong container: chỉ khi cờ bật (mặc định tắt) — kiểm connector của aivin-lc trước
+    const headless = lightcodeOrgJobsEnabled(opts.env || process.env) ? readHeadlessConnector(opts) : null;
+    if (headless) return { bin: 'lightcode', version: headless.app_version || '0.0.0', flags: [JOB_FLAG], headless: true };
+    // Desktop Windows (thành viên dùng LightCode cá nhân): giữ nguyên hành vi cũ
     if ((opts.platform || process.platform) !== 'win32' && !readConnector(opts)) return null;
     const st = lightcodeLocalStatus(opts);
     if (!st.installed) return null;
@@ -438,13 +526,19 @@ export const LIGHTCODE_ADAPTER = Object.freeze({
   },
   args({
     mode, resume, model, effort, addDirs = [], allowedTools = [], settings, budgetUsd, clarify, provider, acceptance, constraints,
-    verify, clientJobId, goalId, dependsOn, maxFixRounds, deliverables,
+    verify, clientJobId, goalId, dependsOn, maxFixRounds, deliverables, aiGateway, runAs,
   }) {
     const deny = settings?.permissions?.deny || [];
     // `provider` = agent bên trong LightCode (claude | codex | gemini…); LightCode tự kiểm — sai tên thì để LightCode chọn.
     const inner = provider && /^[a-z]{3,20}$/.test(String(provider)) ? String(provider) : undefined;
     const fixRounds = Number.isInteger(Number(maxFixRounds)) ? Math.min(3, Math.max(0, Number(maxFixRounds))) : 0;
     const normDeliverables = normalizeDeliverablesArg(deliverables);
+    const gateway = normalizeAiGateway(aiGateway);
+    // Cloud Computer (cờ bật): thiếu runAs → từ chối, không chạy dưới daemon. Ngoài chế độ đó runAs (nếu có) vẫn được chuyển đi.
+    if (lightcodeOrgJobsEnabled() && (runAs === undefined || runAs === null)) {
+      throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, "LightCode on an organisation computer needs the member's account (runAs) — refusing to run under the daemon account");
+    }
+    const member = runAs === undefined || runAs === null ? undefined : normalizeRunAs(runAs);
     const deps = Array.isArray(dependsOn) ? dependsOn.map((d) => String(d ?? '').trim()).filter(Boolean).slice(0, 20) : [];
     return [JOB_FLAG, JSON.stringify({
       mode, ...(resume ? { resume } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}), addDirs, allowedTools, deny,
@@ -458,9 +552,28 @@ export const LIGHTCODE_ADAPTER = Object.freeze({
       ...(deps.length ? { dependsOn: deps } : {}),
       ...(fixRounds > 0 ? { maxFixRounds: fixRounds } : {}),
       ...(normDeliverables.length ? { deliverables: normDeliverables } : {}),
+      ...(gateway ? { aiGateway: gateway } : {}),
+      ...(member ? { runAs: member } : {}),
     })];
   },
-  spawn: (bin, argv, opts) => spawnLightcodeTurn(argv, opts),
+  spawn: (bin, argv, opts) => {
+    // Headless container: dung readHeadlessConnector lam peek/ensure de khong can exe LightCode tren Linux.
+    if (lightcodeOrgJobsEnabled()) {
+      // Chặn lần cuối: argv không có runAs hợp lệ thì không chạm tới daemon (args() đã kiểm; đây là lưới an toàn cho đường gọi trực tiếp).
+      let job = {};
+      try { job = JSON.parse(argv[argv.indexOf(JOB_FLAG) + 1]); } catch { /* thiếu → từ chối ở dưới */ }
+      normalizeRunAs(job?.runAs);
+      return spawnLightcodeTurn(argv, opts, {
+        peek: () => readHeadlessConnector(),
+        ensure: () => {
+          const c = readHeadlessConnector();
+          if (c) return Promise.resolve(c);
+          return Promise.reject(new DeviceToolError(DeviceErrorCode.NOT_FOUND, 'LightCode headless daemon is not running in this container'));
+        },
+      });
+    }
+    return spawnLightcodeTurn(argv, opts);
+  },
   reattach: (job, deps) => reattachLightcodeTurn({ sessionId: job?.session_id, lastSeq: Number.isInteger(job?.last_seq) ? job.last_seq : -1 }, deps),
   /** Một dòng NDJSON của LightCode → cập nhật việc; trả đoạn chữ đáng đẩy lên Aivin. */
   parse(job, msg) {

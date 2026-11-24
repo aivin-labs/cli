@@ -32,7 +32,7 @@ import { showOSNotification } from './notify.mjs';
 import { createMeetingManager, watchMeetingRequests } from './meeting/index.mjs';
 import { createMediaHost, mediaSupported } from './meeting/recorder.mjs';
 import { createClipboard } from './clipboard.mjs';
-import { lightcodeReadiness, startLightcodeEventBridge } from './lightcodeAgent.mjs';
+import { lightcodeOrgJobsEnabled, lightcodeReadiness, readHeadlessConnector, startLightcodeEventBridge } from './lightcodeAgent.mjs';
 import { sanitizeAuthEnv } from './ephemeralAuth.mjs';
 import { activeAgentRunner, activeLlmLogin, activeLocalLlm, buildTools, toolMap } from './toolHandlers.mjs';
 import { createLocalLlm } from './localLlm.mjs';
@@ -48,6 +48,7 @@ import { createWatchManager } from './deviceWatches.mjs';
 import { createScheduleManager } from './schedule.mjs';
 import { remoteDebuggingPage } from './dailyBrowser.mjs';
 import { HOME_BASE, SHARED_DIR, createMultiUserHost, isMultiUserMode } from './multiUser.mjs';
+import { LICENSE_RENEW_EVENT, createLicenseRenewHandler } from './orgComputerLicense.mjs';
 import { createAutoUpdater } from './autoUpdate.mjs';
 import { castLeadInConfig, createDesktopCastManager } from './desktop/desktopCast.mjs';
 import { createDesktopWebRtcWorker } from './desktop/webrtcWorker.mjs';
@@ -1006,9 +1007,11 @@ export async function startRemoteClient(options = {}) {
       refreshLocalLlmProfile();
       // Agent lập trình chạy được HỢP ĐỒNG trên máy (20/11/2026: gồm LightCode — cài / bật sau khi daemon chạy nên đọc lại mỗi lần chào).
       // Luôn gửi (kể cả rỗng): BE coi đây là danh sách đầy đủ, không còn đoán "có agent.run là có Claude".
+      // Container: LightCode headless chỉ được quảng bá khi bật cờ AIVIN_LIGHTCODE_ORG_JOBS=1 (mặc định tắt → org dùng Claude Code / Codex).
       const runner = multiUser ? null : activeAgentRunner();
-      if (runner) {
-        profile.coding_agents = runner.installed().map((a) => a.id);
+      const headlessLc = multiUser && lightcodeOrgJobsEnabled() ? readHeadlessConnector() : null;
+      if (runner || headlessLc) {
+        profile.coding_agents = runner ? runner.installed().map((a) => a.id) : (headlessLc ? ['lightcode'] : []);
         // LightCode cài rồi mà chưa dùng được (chưa đăng nhập tài khoản AI nào / hết bản quyền) → BE không giao việc cho nó, thay vì thất bại ngay lượt đầu.
         delete profile.coding_agent_issues;
         lightcodeIssueSent = null;
@@ -1342,6 +1345,8 @@ export async function startRemoteClient(options = {}) {
     console.log(chalk.red('❌ Máy này đã bị thu hồi quyền điều khiển từ xa.'));
     stopForGood();
   }));
+  // Gia han ve LightCode: BE gui payload { token, expiresAt? } qua socket khi ve sap het han (< 6h). Handler ghi de tep ve nguyen tu, ack {ok}.
+  if (multiUser) socket.on(LICENSE_RENEW_EVENT, guarded(LICENSE_RENEW_EVENT, (payload, ack) => createLicenseRenewHandler({ log: (msg) => say(chalk.gray(msg)) })(payload, ack)));
   socket.on(DeviceEvent.CALLS, guarded(DeviceEvent.CALLS, (payload) => {
     // Chỉ nhận / ACK lời gọi đúng dạng — `{ calls: [null] }` từng làm sập daemon (null.call_id trong listener).
     const calls = (Array.isArray(payload?.calls) ? payload.calls : []).filter(isValidDeviceCall);

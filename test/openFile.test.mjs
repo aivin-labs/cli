@@ -48,18 +48,26 @@ test('suggestDestinations gọi POST /fileshare/suggest-destination với metada
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   try {
     const port = server.address().port;
-    const result = await suggestDestinations('H:\\LCAgent\\docs\\Ke-Hoach-Kinh-Doanh.docx', {
-      topic: 'Kế hoạch kinh doanh toàn cầu',
-      projectName: 'LightCode',
-      serverUrl: `http://127.0.0.1:${port}`,
-      auth: { headers: { 'x-api-key': 'test-key' } },
-    });
-    assert.equal(received.file_name, 'Ke-Hoach-Kinh-Doanh.docx');
-    assert.equal(received.extension, 'docx');
-    assert.equal(received.topic, 'Kế hoạch kinh doanh toàn cầu');
-    assert.equal(received.project_name, 'LightCode');
-    assert.equal(result.suggestions.length, 1);
-    assert.equal(result.suggestions[0].folderId, 'fld_1');
+    for (const filePath of [
+      'H:\\LCAgent\\docs\\Ke-Hoach-Kinh-Doanh.docx',
+      '/home/user/docs/Ke-Hoach-Kinh-Doanh.docx',
+      '\\\\server\\docs\\Ke-Hoach-Kinh-Doanh.docx',
+      'H:\\LCAgent/docs\\Ke-Hoach-Kinh-Doanh.docx',
+      'Ke-Hoach-Kinh-Doanh.docx',
+    ]) {
+      const result = await suggestDestinations(filePath, {
+        topic: 'Kế hoạch kinh doanh toàn cầu',
+        projectName: 'LightCode',
+        serverUrl: `http://127.0.0.1:${port}`,
+        auth: { headers: { 'x-api-key': 'test-key' } },
+      });
+      assert.equal(received.file_name, 'Ke-Hoach-Kinh-Doanh.docx');
+      assert.equal(received.extension, 'docx');
+      assert.equal(received.topic, 'Kế hoạch kinh doanh toàn cầu');
+      assert.equal(received.project_name, 'LightCode');
+      assert.equal(result.suggestions.length, 1);
+      assert.equal(result.suggestions[0].folderId, 'fld_1');
+    }
   } finally {
     await new Promise((r) => server.close(r));
   }

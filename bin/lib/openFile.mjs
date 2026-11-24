@@ -212,7 +212,8 @@ export async function suggestDestinations(filePath, { topic, projectName, worksp
   if (!customAuth && !process.env.API_KEY) throw new OpenFileFailure(OpenFileError.NOT_LOGGED_IN);
   const serverUrl = customServerUrl || missionServerUrl();
   const auth = customAuth || missionAuthHeaders();
-  const fileName = filePath ? path.basename(String(filePath)) : 'document';
+  // Metadata may contain Windows paths even when this process runs on Linux/macOS.
+  const fileName = filePath ? path.win32.basename(String(filePath)) : 'document';
   const ext = path.extname(fileName).replace(/^\./, '').toLowerCase() || undefined;
   let workspaceId;
   if (workspace) {

@@ -127,6 +127,15 @@ const bool = (description) => ({ type: 'boolean', description });
 const schema = (properties, required = []) => ({ type: 'object', properties, required });
 const invalid = (msg) => new DeviceToolError(DeviceErrorCode.INVALID_ARGS, msg);
 
+/**
+ * Cổng AI tạm BE cấp (quota mặc định AIVIN) — `ai_gateway` (patch của BE) hoặc `aiGateway` (bước kế hoạch). CHỈ agent LightCode nhận; claude / codex bỏ qua.
+ * Nằm trong bộ nhớ của job (không argv, không env, không job.json); sai dạng / hết hạn do adapter xử lý.
+ */
+export function gatewayOpt(args, adapter) {
+  const gw = args?.aiGateway ?? args?.ai_gateway;
+  return adapter?.id === 'lightcode' && gw ? { aiGateway: gw } : {};
+}
+
 /** `<dir>/<exe>` của mọi thư mục trong PATH. */
 function onPath(exe, env) {
   return String(env.PATH || env.Path || '').split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, exe));
@@ -455,7 +464,9 @@ export function createAgentRunner({
     return found.get(adapter.id);
   };
   /** Adapter tự dựng "tiến trình" (LightCode nối qua cửa cục bộ) dùng spawn riêng; còn lại qua childSpawn (máy tổ chức: dưới tài khoản thành viên). */
-  const spawnOf = (adapter) => (adapter?.spawn && !runAs ? adapter.spawn : childSpawn);
+  const spawnOf = (adapter) => (adapter?.spawn && (!runAs || adapter.memberAware) ? adapter.spawn : childSpawn);
+  /** Adapter tự chạy CLI dưới tài khoản thành viên (LightCode `run_as`) → chuyển tài khoản của runner này cho nó; adapter khác đã bọc bằng memberSpawner. */
+  const memberOpt = (adapter) => (runAs && adapter?.memberAware ? { runAs: { uid: runAs.uid, gid: runAs.gid, home: runAs.home } } : {});
   const flagsOf = async (adapter) => {
     const b = binaryOf(adapter);
     if (b?.flags) return new Set(b.flags);
@@ -607,6 +618,7 @@ export function createAgentRunner({
         ...(Array.isArray(args.depends_on) && args.depends_on.length ? { dependsOn: args.depends_on } : {}),
         ...(Number.isInteger(Number(args.max_fix_rounds)) && Number(args.max_fix_rounds) > 0 ? { maxFixRounds: Number(args.max_fix_rounds) } : {}),
         ...(Array.isArray(args.deliverables) && args.deliverables.length ? { deliverables: args.deliverables } : {}),
+        ...gatewayOpt(args, adapter),
         // Khoán việc: tiêu chí nghiệm thu (khóa) đi theo để LightCode tự đối chiếu và báo `verdict`.
         ...contractBrief(parsed.body, contract),
       },
@@ -839,6 +851,7 @@ export function createAgentRunner({
         ...(Array.isArray(args.depends_on) && args.depends_on.length ? { dependsOn: args.depends_on } : {}),
         ...(Number.isInteger(Number(args.max_fix_rounds)) && Number(args.max_fix_rounds) > 0 ? { maxFixRounds: Number(args.max_fix_rounds) } : {}),
         ...(Array.isArray(args.deliverables) && args.deliverables.length ? { deliverables: args.deliverables } : {}),
+        ...gatewayOpt(args, adapter),
       };
     }
     const session = prev ? (adapter.resumable === false ? 'new' : prev.session_id) : String(args.session || 'new');
@@ -853,7 +866,7 @@ export function createAgentRunner({
       const flags = await flagsOf(adapter);
       // Job có hợp đồng mà không đọc được cờ của bản đã cài → không chắc giới hạn (ngân sách, worktree…) được áp — từ chối.
       if (withContract && !flags) throw new DeviceToolError(DeviceErrorCode.NOT_FOUND, `Cannot read the options of ${adapter.label} on this computer — contract jobs need them`);
-      argv = agentArgs(adapter, { ...agentOpts, resume, model: args.model ? String(args.model) : undefined }, flags);
+      argv = agentArgs(adapter, { ...agentOpts, ...memberOpt(adapter), resume, model: args.model ? String(args.model) : undefined }, flags);
     } catch (e) {
       if (withContract) fs.rmSync(dirOf(jobId), { recursive: true, force: true });
       // Worktree daemon vừa dựng cho job này (chưa giao agent) → gỡ luôn worktree + nhánh, không để rác trong repo của người dùng.
@@ -874,7 +887,9 @@ export function createAgentRunner({
     };
     // Hồ sơ tài khoản: thư mục cấu hình riêng qua biến môi trường chính thức của agent — phiên / đăng nhập / hạn mức của tài khoản đó.
     const { env: authExtra, secrets: authSecrets } = buildCommandAuthEnv(env.authEnv, 'git');
-    if (authSecrets.length) j._authSecrets = authSecrets;
+    // Khoá cổng AI tạm cũng bị che nếu agent lỡ nhắc lại trong câu trả lời / lỗi.
+    const gatewayKey = typeof agentOpts.aiGateway?.apiKey === 'string' ? agentOpts.aiGateway.apiKey : '';
+    if (authSecrets.length || gatewayKey) j._authSecrets = [...authSecrets, ...(gatewayKey ? [gatewayKey] : [])];
     const baseChildEnv = accountDir ? { ...agentEnv(process.env), [adapter.profileEnv]: accountDir } : agentEnv(process.env);
     const childEnv = !runAs && Object.keys(authExtra).length ? { ...baseChildEnv, ...authExtra } : baseChildEnv;
     const child = spawnOf(adapter)(binaryOf(adapter).bin, argv, {
@@ -885,7 +900,7 @@ export function createAgentRunner({
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     // Gọi lại cùng phiên (nhắc ghi lại REPORT.md) cần đúng tệp chạy, cờ, môi trường của lần này.
-    if (withContract) j.respawn = { adapter, bin: binaryOf(adapter).bin, opts: { ...agentOpts, model: args.model ? String(args.model) : undefined }, flags: await flagsOf(adapter), env: childEnv, cwd: spawnCwd || cwd };
+    if (withContract) j.respawn = { adapter, bin: binaryOf(adapter).bin, opts: { ...agentOpts, ...memberOpt(adapter), model: args.model ? String(args.model) : undefined }, flags: await flagsOf(adapter), env: childEnv, cwd: spawnCwd || cwd };
     jobs.set(j.id, j);
     persist(j);
     attachChild(j, adapter, child, { wallMs, onOutput: ctx.onOutput });
@@ -1018,6 +1033,7 @@ export function buildAgentTools(runner) {
         depends_on: { type: 'array', items: { type: 'string' }, description: 'agent "lightcode" only: session ids or client_job_ids that must finish well first' },
         max_fix_rounds: num('agent "lightcode" only: internal quality-check fix rounds inside LightCode (0-3)'),
         deliverables: { type: 'array', description: 'agent "lightcode" only: files the job must leave behind (path string or { path, min_bytes }), checked for existence and valid file format' },
+        ai_gateway: { type: 'object', description: 'BE-only, agent "lightcode" only: temporary AI gateway { baseUrl, apiKey, model, expiresAt } for this job (default AIVIN quota); never logged, never passed to other agents' },
         wait_ms: num(`wait for the answer up to this long (default ${DEFAULT_WAIT_MS}, max ${MAX_WAIT_MS})`),
       }) },
     { name: 'agent.status', group: ToolGroup.PROC, read_only: true, handler: (a, c) => runner.status(a, c),

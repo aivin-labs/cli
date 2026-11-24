@@ -7,7 +7,7 @@ import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
-const { AgentMode, CLAUDE_ADAPTER, agentArgs, agentProfileDir, buildAgentTools, createAgentRunner, findAgentBinary } = await import('../bin/lib/remote/codingAgents.mjs');
+const { AgentMode, CLAUDE_ADAPTER, JOBS_DIR, agentArgs, agentProfileDir, buildAgentTools, createAgentRunner, findAgentBinary } = await import('../bin/lib/remote/codingAgents.mjs');
 const { buildTools } = await import('../bin/lib/remote/toolHandlers.mjs');
 
 const SID = '60554582-1111-4222-8333-944455556666';
@@ -394,4 +394,74 @@ test('REPORT.md sai khuôn → nhắc agent ghi lại MỘT lần trong cùng ph
   assert.equal(res.evidence.report.valid, true);
   assert.equal(res.evidence.checks.find((c) => c.check === 'outputs_complete').status, 'pass');
   assert.equal(calls.length, 2, 'chỉ nhắc một lần');
+});
+
+test('cổng AI tạm (ai_gateway): chỉ job LightCode nhận; không có thì không đổi; claude không nhận; khoá không vào argv / env / job.json / đầu ra', async () => {
+  const KEY = 'wes-ak-SECRET-0123456789';
+  const gw = { baseUrl: 'https://be.example/v1', apiKey: KEY, model: 'aivin-default', expiresAt: new Date(Date.now() + 3600_000).toISOString() };
+  const seen = [];
+  const lc = {
+    id: 'lightcode', label: 'LightCode', candidates: () => [],
+    args: (opts) => { seen.push(opts); return ['--job', '{}']; },
+    parse(job, msg) {
+      if (msg.sid) job.session_id = msg.sid;
+      if (msg.done) job.result = { ok: true, answer: msg.done };
+      return msg.say || '';
+    },
+  };
+  const { calls, spawnImpl } = fakeSpawn();
+  const runner = createAgentRunner({
+    adapters: [CLAUDE_ADAPTER, lc],
+    find: (a) => ({ bin: a.id, version: '2.1.312' }), spawnImpl, probeFlags: () => null,
+  });
+  const out = [];
+
+  // 1) LightCode + ai_gateway → tới adapter.args nguyên vẹn; khoá không trong argv của tiến trình / env của tiến trình.
+  const p1 = runner.run({ prompt: 'x', agent: 'lightcode', ai_gateway: gw, wait_ms: 5000 }, { onOutput: (s) => out.push(s) }, env);
+  await tick();
+  assert.deepEqual(seen[0].aiGateway, gw);
+  assert.ok(!JSON.stringify(calls[0].argv).includes(KEY), 'khoá không trong argv');
+  assert.ok(!JSON.stringify(calls[0].opts.env || {}).includes(KEY), 'khoá không trong env tiến trình con');
+  await calls[0].emitAll([{ sid: SID }, { say: `dùng ${KEY} để gọi` }, { done: `xong, khoá ${KEY}` }]);
+  const r1 = await p1;
+  assert.equal(r1.status, 'done');
+  assert.ok(!JSON.stringify(r1).includes(KEY), 'khoá bị che trong kết quả trả BE');
+  assert.ok(!out.join('').includes(KEY), 'khoá bị che trong luồng onOutput');
+  assert.match(r1.result.answer, /\[REDACTED\]/);
+  // Không ghi ra đĩa: quét mọi tệp hồ sơ job.
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
+  const files = fs.existsSync(JOBS_DIR) ? walk(JOBS_DIR) : [];
+  assert.ok(files.some((x) => x.endsWith('job.json')), 'hồ sơ job đã được ghi (kiểm không rỗng)');
+  for (const file of files) assert.ok(!fs.readFileSync(file, 'utf8').includes(KEY), `khoá lọt vào ${file}`);
+
+  // 2) Dạng camelCase của bước kế hoạch (aiGateway) cũng được nhận.
+  const p2 = runner.run({ prompt: 'x', agent: 'lightcode', aiGateway: gw, wait_ms: 5000 }, {}, env);
+  await tick();
+  assert.deepEqual(seen[1].aiGateway, gw);
+  await calls[1].emitAll([{ done: 'ok' }]);
+  await p2;
+
+  // 3) LightCode không có ai_gateway (thành viên đã đăng nhập) → không có khoá nào, hành vi như cũ.
+  const p3 = runner.run({ prompt: 'x', agent: 'lightcode', wait_ms: 5000 }, {}, env);
+  await tick();
+  assert.equal('aiGateway' in seen[2], false);
+  await calls[2].emitAll([{ done: 'ok' }]);
+  await p3;
+
+  // 4) Claude + ai_gateway → bị bỏ qua: không vào argv, env, stdin.
+  const p4 = runner.run({ prompt: 'x', agent: 'claude', ai_gateway: gw, wait_ms: 5000 }, {}, env);
+  await tick();
+  assert.equal(calls[3].bin, 'claude');
+  assert.ok(!JSON.stringify(calls[3].argv).includes(KEY));
+  assert.ok(!JSON.stringify(calls[3].opts.env || {}).includes(KEY));
+  assert.ok(!String(calls[3].stdin()).includes(KEY));
+  await calls[3].emitAll();
+  await p4;
+});
+
+test('agent.run: schema công cụ khai báo ai_gateway (BE-only)', () => {
+  const runner = claudeOnly(fakeSpawn().spawnImpl);
+  const tool = buildAgentTools(runner).find((t) => t.name === 'agent.run');
+  assert.equal(tool.input_schema.properties.ai_gateway.type, 'object');
+  assert.match(tool.input_schema.properties.ai_gateway.description, /never logged/);
 });

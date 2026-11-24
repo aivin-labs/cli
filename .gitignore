@@ -15,3 +15,7 @@ logs/
 # Tệp chạy đóng gói (scripts/build-binary.mjs) — phát hành qua GitHub Releases, không commit
 dist/
 deploy/get/site/
+
+# LightCode headless cho image org-computer: tarball + pin do pack-lightcode.mjs sinh ra, không commit
+deploy/org-computer/lightcode/*.tar.gz
+deploy/org-computer/lightcode/lightcode.pin.json

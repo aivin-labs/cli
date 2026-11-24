@@ -8,10 +8,10 @@ import { EventEmitter } from 'events';
 
 process.env.AIVIN_REMOTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-remote-home-'));
 const {
-  CLIENT_PROTOCOL, LIGHTCODE_ADAPTER, buildLightcodeTools, contractInfoFromPrompt, installLightcode, lightcodeAnswer, lightcodeAttention,
+  CLIENT_PROTOCOL, LIGHTCODE_ADAPTER, LIGHTCODE_HEADLESS_CONNECTOR_FILE, buildLightcodeTools, lightcodeOrgJobsEnabled, contractInfoFromPrompt, installLightcode, lightcodeAnswer, lightcodeAttention,
   lightcodeDeploy, lightcodeDeployHosts, lightcodeDeployInfo, lightcodeDeployReply, lightcodeDeploySetup, lightcodeEvents, lightcodeExeCandidates,
   lightcodeLocalStatus, lightcodeMetrics, lightcodePreview, lightcodeSetStrategy, lightcodeStatus, lightcodeStrategy, lightcodeWebhook,
-  lightcodeWorklog, parseLatestYml, readConnector, reattachLightcodeTurn, spawnLightcodeTurn, startLightcodeEventBridge, verifyInstallerSignature,
+  lightcodeWorklog, parseLatestYml, readConnector, readHeadlessConnector, reattachLightcodeTurn, spawnLightcodeTurn, startLightcodeEventBridge, verifyInstallerSignature,
 } = await import('../bin/lib/remote/lightcodeAgent.mjs');
 const { DEFAULT_AGENT_ADAPTERS, createAgentRunner } = await import('../bin/lib/remote/codingAgents.mjs');
 
@@ -43,9 +43,30 @@ const collect = (child) => new Promise((resolve) => {
 
 test('LightCode đứng cuối danh sách agent mặc định; một người dùng; tự định vị', () => {
   assert.equal(DEFAULT_AGENT_ADAPTERS.at(-1), LIGHTCODE_ADAPTER);
-  assert.equal(LIGHTCODE_ADAPTER.multiUser, false);
+  assert.equal(LIGHTCODE_ADAPTER.multiUser, false, 'mặc định TẮT (cờ AIVIN_LIGHTCODE_ORG_JOBS)');
   assert.equal(typeof LIGHTCODE_ADAPTER.locate, 'function');
   assert.equal(typeof LIGHTCODE_ADAPTER.spawn, 'function');
+});
+
+test('cờ AIVIN_LIGHTCODE_ORG_JOBS: chỉ "1" mới bật multiUser; locate headless chỉ khi bật', () => {
+  const prev = process.env.AIVIN_LIGHTCODE_ORG_JOBS;
+  try {
+    for (const v of [undefined, '', '0', 'true', 'yes']) {
+      if (v === undefined) delete process.env.AIVIN_LIGHTCODE_ORG_JOBS; else process.env.AIVIN_LIGHTCODE_ORG_JOBS = v;
+      assert.equal(LIGHTCODE_ADAPTER.multiUser, false, `giá trị ${v}`);
+    }
+    process.env.AIVIN_LIGHTCODE_ORG_JOBS = '1';
+    assert.equal(LIGHTCODE_ADAPTER.multiUser, true);
+  } finally {
+    if (prev === undefined) delete process.env.AIVIN_LIGHTCODE_ORG_JOBS; else process.env.AIVIN_LIGHTCODE_ORG_JOBS = prev;
+  }
+  assert.equal(lightcodeOrgJobsEnabled({}), false);
+  assert.equal(lightcodeOrgJobsEnabled({ AIVIN_LIGHTCODE_ORG_JOBS: '1' }), true);
+  const f = connectorFile(INFO);
+  const base = { file: f, platform: 'linux', exists: () => false, alive: () => false };
+  assert.equal(LIGHTCODE_ADAPTER.locate({ ...base, env: {} }), null, 'cờ tắt → không quảng bá');
+  const on = LIGHTCODE_ADAPTER.locate({ ...base, env: { AIVIN_LIGHTCODE_ORG_JOBS: '1' } });
+  assert.equal(on?.headless, true);
 });
 
 test('cửa cục bộ: chỉ nhận connector.json đúng app, có khoá, tiến trình còn sống', () => {
@@ -54,6 +75,31 @@ test('cửa cục bộ: chỉ nhận connector.json đúng app, có khoá, tiế
   assert.equal(readConnector({ file: connectorFile({ ...INFO, app: 'Other' }), alive: () => true }), null);
   assert.equal(readConnector({ file: connectorFile({ ...INFO, key: '' }), alive: () => true }), null);
   assert.equal(readConnector({ file: path.join(os.tmpdir(), 'nope', 'connector.json') }), null);
+});
+test('headless connector: đọc đúng cổng + khoá; bỏ qua khi thiếu trường bắt buộc; không tệp → null', () => {
+  const f = connectorFile(INFO);
+  assert.deepEqual(readHeadlessConnector({ file: f }), INFO);
+  // app sai
+  assert.equal(readHeadlessConnector({ file: connectorFile({ ...INFO, app: 'Other' }) }), null);
+  // không có key
+  assert.equal(readHeadlessConnector({ file: connectorFile({ ...INFO, key: '' }) }), null);
+  // port không phải số nguyên
+  assert.equal(readHeadlessConnector({ file: connectorFile({ ...INFO, port: '4555' }) }), null);
+  // tệp không tồn tại
+  assert.equal(readHeadlessConnector({ file: path.join(os.tmpdir(), 'nope', 'connector.json') }), null);
+  // không có pid → vẫn ổn (headless không kiểm pid)
+  const noPid = { ...INFO }; delete noPid.pid;
+  assert.ok(readHeadlessConnector({ file: connectorFile(noPid) }), 'headless không yêu cầu pid');
+});
+
+test('headless connector: LIGHTCODE_HEADLESS_CONNECTOR_FILE env override đường dẫn', () => {
+  const f = connectorFile(INFO);
+  const result = readHeadlessConnector({ env: { LIGHTCODE_HEADLESS_CONNECTOR_FILE: f } });
+  assert.deepEqual(result, INFO);
+  // env trỏ tệp không tồn tại
+  assert.equal(readHeadlessConnector({ env: { LIGHTCODE_HEADLESS_CONNECTOR_FILE: '/no/such/file.json' } }), null);
+  // không có env → đường dẫn mặc định (không tồn tại trên máy dev → null, không lỗi)
+  assert.equal(readHeadlessConnector({ env: {} }), null);
 });
 
 test('định vị: đang chạy → có; đã cài (exe) → có; không có gì → null', () => {
@@ -66,6 +112,38 @@ test('định vị: đang chạy → có; đã cài (exe) → có; không có g�
   assert.equal(running.version, '1.9.0');
   assert.deepEqual(lightcodeLocalStatus({ ...none, file: connectorFile(INFO), alive: () => true }), { supported: true, installed: true, running: true, version: '1.9.0' });
   assert.equal(LIGHTCODE_ADAPTER.locate({ ...none, platform: 'linux' }), null, 'chưa có bản Linux');
+});
+
+const GW = () => ({ baseUrl: 'https://be.example/ai/v1/', apiKey: 'wes-ak-secret', model: 'aivin-default', expiresAt: new Date(Date.now() + 3600_000).toISOString() });
+
+test('aiGateway: hợp lệ → vào tham số job; hết hạn → bỏ; sai dạng → lỗi; không có → không có trường', () => {
+  const parsed = (gw) => JSON.parse(LIGHTCODE_ADAPTER.args({ aiGateway: gw })[1]);
+  assert.equal(parsed(undefined).aiGateway, undefined);
+  const ok = parsed(GW());
+  assert.deepEqual(Object.keys(ok.aiGateway).sort(), ['apiKey', 'baseUrl', 'expiresAt', 'model']);
+  assert.equal(ok.aiGateway.baseUrl, 'https://be.example/ai/v1');
+  assert.equal(parsed({ ...GW(), expiresAt: new Date(Date.now() - 1000).toISOString() }).aiGateway, undefined, 'hết hạn → bỏ');
+  for (const bad of [{ ...GW(), baseUrl: 'ftp://x' }, { ...GW(), apiKey: '' }, { ...GW(), apiKey: 'a b' }, { ...GW(), model: '' }, { ...GW(), expiresAt: 'xx' }, 'str']) {
+    assert.throws(() => LIGHTCODE_ADAPTER.args({ aiGateway: bad }), /aiGateway/);
+  }
+});
+
+test('aiGateway: gửi theo từng job (ai_gateway, snake_case); hết hạn lúc gửi → không gửi; khoá không lọt ra log / dòng lỗi', async () => {
+  const bodies = [];
+  const fetchImpl = async (url, init) => { bodies.push(JSON.parse(init.body)); return ndjsonResponse([{ type: 'result', ok: true, answer: 'x' }]); };
+  const run = (argv) => { const child = spawnLightcodeTurn(argv, {}, { fetchImpl, ensure: async () => INFO }); const done = collect(child); child.stdin.end('x'); return done; };
+  const withGw = await run(LIGHTCODE_ADAPTER.args({ aiGateway: GW() }));
+  assert.equal(bodies[0].ai_gateway.api_key, 'wes-ak-secret');
+  assert.deepEqual(Object.keys(bodies[0].ai_gateway).sort(), ['api_key', 'base_url', 'expires_at', 'model']);
+  assert.ok(!JSON.stringify(withGw.lines).includes('wes-ak-secret'), 'khoá không lọt ra luồng kết quả');
+  const none = await run(LIGHTCODE_ADAPTER.args({}));
+  assert.equal(bodies[1].ai_gateway, undefined);
+  assert.equal(none.code, 0);
+  // Argv còn hạn lúc dựng nhưng hết hạn lúc gửi (job nối lại sau lâu) → không gửi khoá chết.
+  const stale = LIGHTCODE_ADAPTER.args({ aiGateway: { ...GW(), expiresAt: new Date(Date.now() + 50).toISOString() } });
+  await new Promise((r) => setTimeout(r, 80));
+  await run(stale);
+  assert.equal(bodies[2].ai_gateway, undefined);
 });
 
 test('tham số: một JSON duy nhất, mang luật cấm của hợp đồng tới LightCode', () => {
@@ -815,4 +893,62 @@ test('startLightcodeEventBridge: nhận sự kiện đẩy (bỏ ping), chuyển
   bridge.stop();
   assert.deepEqual(got.map((e) => e.seq), [7, 8]);
   assert.deepEqual(acked, [7, 8]);
+});
+
+// ── Vòng 4 (24/11/2026): runAs của thành viên ───────────────────────────────────────────────────────────────────────────────────────
+const MEMBER = { uid: 10001, gid: 10000, home: '/home/u0123456789ab' };
+const withOrgJobs = async (value, fn) => {
+  const prev = process.env.AIVIN_LIGHTCODE_ORG_JOBS;
+  if (value === undefined) delete process.env.AIVIN_LIGHTCODE_ORG_JOBS; else process.env.AIVIN_LIGHTCODE_ORG_JOBS = value;
+  try { return await fn(); } finally { if (prev === undefined) delete process.env.AIVIN_LIGHTCODE_ORG_JOBS; else process.env.AIVIN_LIGHTCODE_ORG_JOBS = prev; }
+};
+
+test('runAs: hợp lệ → vào tham số job (chỉ uid/gid/home); sai dạng → INVALID_ARGS', () => {
+  const parsed = JSON.parse(LIGHTCODE_ADAPTER.args({ runAs: { ...MEMBER, name: 'u0123456789ab', extra: 1 } })[1]);
+  assert.deepEqual(parsed.runAs, MEMBER, 'không mang name / trường lạ sang LightCode');
+  assert.equal(JSON.parse(LIGHTCODE_ADAPTER.args({})[1]).runAs, undefined, 'cờ tắt + không runAs → không có trường');
+  const bads = [{ ...MEMBER, uid: 0 }, { ...MEMBER, gid: 0 }, { ...MEMBER, uid: '1001' }, { ...MEMBER, gid: 1.5 }, { ...MEMBER, home: 'home/x' },
+    { ...MEMBER, home: '/home/../root' }, { ...MEMBER, home: '/home//x' }, { ...MEMBER, home: '/home/x/' }, { ...MEMBER, home: '/home/a b' }, { uid: 1, gid: 1 }, 'str', []];
+  for (const bad of bads) assert.throws(() => LIGHTCODE_ADAPTER.args({ runAs: bad }), (e) => e.code === 'INVALID_ARGS' && /runAs/.test(e.message), JSON.stringify(bad));
+  assert.equal(LIGHTCODE_ADAPTER.memberAware, true);
+});
+
+test('runAs: tới LightCode dưới dạng run_as {uid,gid,home} trong thân yêu cầu loopback', async () => {
+  const bodies = [];
+  const fetchImpl = async (url, init) => { bodies.push(JSON.parse(init.body)); return ndjsonResponse([{ type: 'result', ok: true, answer: 'x' }]); };
+  const child = spawnLightcodeTurn(LIGHTCODE_ADAPTER.args({ runAs: MEMBER }), {}, { fetchImpl, ensure: async () => INFO });
+  const done = collect(child); child.stdin.end('x');
+  assert.equal((await done).code, 0);
+  assert.deepEqual(bodies[0].run_as, MEMBER);
+  assert.equal(bodies[0].runAs, undefined, 'chỉ một tên trường');
+});
+
+test('cờ bật (Cloud Computer): thiếu runAs → args() từ chối, spawn() cũng từ chối — không bao giờ chạy dưới tài khoản daemon', async () => {
+  await withOrgJobs('1', async () => {
+    assert.equal(LIGHTCODE_ADAPTER.multiUser, true);
+    for (const missing of [{}, { runAs: null }]) {
+      assert.throws(() => LIGHTCODE_ADAPTER.args(missing), (e) => e.code === 'INVALID_ARGS' && /runAs/.test(e.message));
+    }
+    assert.throws(() => LIGHTCODE_ADAPTER.args({ runAs: { uid: 0, gid: 0, home: '/root' } }), /runAs/);
+    const ok = LIGHTCODE_ADAPTER.args({ runAs: MEMBER });
+    assert.deepEqual(JSON.parse(ok[1]).runAs, MEMBER);
+    // Lưới an toàn: argv dựng tay không có runAs (hoặc JSON hỏng) không chạm tới daemon.
+    const noRunAs = ['--lightcode-job', JSON.stringify({ mode: 'plan' })];
+    assert.throws(() => LIGHTCODE_ADAPTER.spawn('lightcode', noRunAs, {}), (e) => e.code === 'INVALID_ARGS' && /runAs/.test(e.message));
+    assert.throws(() => LIGHTCODE_ADAPTER.spawn('lightcode', ['--lightcode-job', '{hỏng'], {}), /runAs/);
+  });
+});
+
+test('cờ tắt: LightCode không được quảng bá ở Cloud Computer — runner của thành viên bỏ qua; cờ bật + có connector headless thì mới có', async () => {
+  const { createAgentRunner: mk } = await import('../bin/lib/remote/codingAgents.mjs');
+  const f = connectorFile(INFO);
+  const find = (a) => a.locate({ env: process.env, file: f, platform: 'linux' });
+  await withOrgJobs(undefined, () => {
+    const runner = mk({ adapters: [LIGHTCODE_ADAPTER], find, runAs: { name: 'an', ...MEMBER }, probeFlags: () => null });
+    assert.deepEqual(runner.installed().map((a) => a.id), [], 'tắt → org không thấy LightCode');
+  });
+  await withOrgJobs('1', () => {
+    const runner = mk({ adapters: [LIGHTCODE_ADAPTER], find, runAs: { name: 'an', ...MEMBER }, probeFlags: () => null });
+    assert.deepEqual(runner.installed().map((a) => a.id), ['lightcode']);
+  });
 });
