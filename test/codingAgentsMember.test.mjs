@@ -63,5 +63,6 @@ test('máy tổ chức: adapter memberAware tự dựng tiến trình và nhận
   assert.equal(r2.status, 'done');
   assert.equal(memberCalls.length, 1, 'adapter thường chạy qua memberSpawner');
   assert.equal(memberCalls[0].opts.uid, 10001);
-  assert.deepEqual(memberCalls[0].argv, ['--runas', 'undefined'], 'adapter không memberAware không nhận runAs');
+  // Linux có prlimit → argv bị bọc `--nproc=N:N -- plain …`; chỉ so phần tham số của adapter ở cuối.
+  assert.deepEqual(memberCalls[0].argv.slice(-2), ['--runas', 'undefined'], 'adapter không memberAware không nhận runAs');
 });
