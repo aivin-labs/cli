@@ -68,6 +68,22 @@ function ensureTaggedRelease() {
   }
 }
 
+/**
+ * npmjs.org khong cho publish de len mot version da tung staged va bi huy (409 "Cannot publish over previously staged version").
+ * Khi gap loi nay, tang patch sang version moi, commit + tag + day len origin de chay lai tu dau cho ban moi.
+ */
+function bumpPatchAfterStagedConflict() {
+  assertCanRelease();
+  const previous = version;
+  execSync('npm version patch --no-git-tag-version', { stdio: 'ignore' });
+  pkg = readPkg();
+  version = `v${pkg.version}`;
+  console.log(`\nPhien ban ${previous.slice(1)} bi ket staged tren npm (E409) - tu dong tang len ${version}, tao tag va day len...`);
+  git('commit', '-m', pkg.version, '--', 'package.json', 'package-lock.json');
+  git('tag', '-a', version, '-m', version);
+  git('push', 'origin', RELEASE_BRANCH, version);
+}
+
 const read = (file) => { try { return fs.readFileSync(file, 'utf8').trim(); } catch { return ''; } };
 
 /** Đăng nhập npm trước khi đụng tới deploy; nếu chưa có phiên thì mở luồng login tương tác. */
@@ -91,16 +107,8 @@ console.log('========================================================');
 console.log('        AIVIN CLI - PHAT HANH PHIEN BAN MOI');
 console.log('========================================================\n');
 
-try {
-  // Buoc 0: npm publish lay code tu thu muc lam viec -> cac tep vao goi npm phai sach va trung tag (trung voi ban CI build)
-  console.log('[0/4] Kiem tra ma nguon khop tag...');
-  ensureTaggedRelease();
-  console.log(`Ma nguon sach, trung tag ${version}.`);
-
-  // Đăng nhập trước khi deploy để không cập nhật site rồi mới phát hiện npm chưa đăng nhập.
-  console.log('\n[0.5/4] Kiem tra dang nhap npm...');
-  ensureNpmLogin();
-
+/** Chay buoc 1 -> 4 cho version hien tai (tai CI build -> ky -> publish get.aivin.vn -> publish npm). */
+async function publishCurrentVersion({ allowStagedRetry = true } = {}) {
   // Buoc 1: ban build trong dist phai dung la cua tag nay (dist/ cua ban cu khong bao gio duoc ky thanh ban moi)
   console.log(`\n[1/4] Kiem tra ban build cho ${version}...`);
   if (read(path.join(dist, 'RELEASE_TAG')) !== version || !fs.existsSync(path.join(dist, 'SHA256SUMS'))) {
@@ -138,12 +146,32 @@ try {
     console.log(`${pkg.name}@${pkg.version} da co tren npm - bo qua.`);
   } else {
     try {
-      execSync('npm publish', { stdio: 'inherit' });
-    } catch {
+      const out = execSync('npm publish 2>&1', { encoding: 'utf8', stdio: ['inherit', 'pipe', 'pipe'] });
+      if (out) process.stdout.write(out);
+    } catch (e) {
+      const errOut = `${e?.stdout || ''}\n${e?.stderr || ''}\n${e?.message || ''}`;
+      if (errOut) process.stderr.write(errOut);
+      if (allowStagedRetry && /previously staged version|E409/i.test(errOut)) {
+        bumpPatchAfterStagedConflict();
+        return publishCurrentVersion({ allowStagedRetry: false });
+      }
       throw new Error('Xuat ban npm chua thanh cong (get.aivin.vn da len ban moi). Neu chua dang nhap / het phien: `npm login`, roi chay lai publish.bat - cac buoc da xong se duoc bo qua.');
     }
     console.log(`\n Da xuat ban ${pkg.name}@${pkg.version} len npm thanh cong!`);
   }
+}
+
+try {
+  // Buoc 0: npm publish lay code tu thu muc lam viec -> cac tep vao goi npm phai sach va trung tag (trung voi ban CI build)
+  console.log('[0/4] Kiem tra ma nguon khop tag...');
+  ensureTaggedRelease();
+  console.log(`Ma nguon sach, trung tag ${version}.`);
+
+  // Đăng nhập trước khi deploy để không cập nhật site rồi mới phát hiện npm chưa đăng nhập.
+  console.log('\n[0.5/4] Kiem tra dang nhap npm...');
+  ensureNpmLogin();
+
+  await publishCurrentVersion();
 
   console.log('\n========================================================');
   console.log(`  HOAN TAT PHAT HANH PHIEN BAN ${version}!`);

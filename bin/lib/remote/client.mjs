@@ -520,10 +520,27 @@ export async function startRemoteClient(options = {}) {
   const castGate = createCastInputGate({ isPaused: isRemotePaused, isAiBusy: () => aiGuiBusy > 0 });
   let castBlockedNoticeAt = 0;
   const emitCastStatus = (payload) => { if (socket?.connected) socket.emit(DeviceEvent.DESKTOP_CAST_STATUS, payload); };
+  /**
+   * Người xem chủ máy đã cho vào phiên đang chạy. Máy chủ đánh dấu mã người xem kèm mỗi thao tác đi qua nó (`viewer_id`): người đang chờ
+   * "Cho phép" không được bấm / gõ lên máy dù phiên đang quay cho người khác (26/11/2026). Kênh WebRTC chỉ dựng sau khi đã cho nên không cần xét.
+   */
+  const castApprovedViewers = new Set();
+  /** Báo máy chủ đã cho người này vào rồi chờ nó ghi nhận (tối đa 1,5 s): máy chủ chỉ chuyển ảnh / thao tác cho người đã được cho. */
+  const announceCastConsent = async (sessionId, viewerId) => {
+    if (!socket?.connected) return;
+    const payload = { session_id: sessionId, viewer_id: viewerId, state: CastState.CONSENT_GRANTED };
+    try {
+      await socket.timeout(1500).emitWithAck(DeviceEvent.DESKTOP_CAST_STATUS, payload);
+    } catch {
+      // Máy chủ chậm / đời cũ không ack: vẫn phát, máy chủ mở đường khi nhận được trạng thái.
+    }
+  };
   /** Thao tác từ xa (qua máy chủ hoặc kênh WebRTC) — qua cổng chặn rồi mới xuống tiến trình điều khiển. */
   const applyRemoteInput = (raw, viewerId) => {
     const sessionId = desktopCast.sessionId();
     if (!sessionId || (raw?.session_id && raw.session_id !== sessionId)) return;
+    // Qua máy chủ: chỉ nhận của người đã được cho vào. Máy chủ đời cũ không gửi `viewer_id` thì giữ như trước.
+    if (!viewerId && typeof raw?.viewer_id === 'string' && !castApprovedViewers.has(raw.viewer_id)) return;
     const viewer = viewerId || (typeof raw?.viewer_id === 'string' ? raw.viewer_id : '');
     const res = castGate.accept(raw, viewer);
     if (res.ok) return desktopCast.sendInput(res.cmd);
@@ -629,6 +646,7 @@ export async function startRemoteClient(options = {}) {
     clearTimeout(castReconfirmTimer);
     castReconfirmTimer = null;
     castTouchViewers.clear();
+    castApprovedViewers.clear();
     desktopWebRtc.closeAll();
     void castFileDrop.closeAll();
     castGate.takeHeldInput(); // Tiến trình điều khiển tự nhả khi dừng.
@@ -1257,7 +1275,8 @@ export async function startRemoteClient(options = {}) {
       // `ran` (scheduler: công cụ đã bắt đầu chưa) chỉ dùng trên máy (idempotency.mjs) — mã lỗi NOT_STARTED / INTERRUPTED đã nói cho BE.
       const { ran: _ran, ...sent } = outcome;
       const payload = { call_id: call.call_id, ...sent };
-      ledger.finish(call.call_id, payload, { persistNow: !socket.connected });
+      // Công cụ `sensitive` (kết quả mang đăng nhập AI): không bao giờ ghi hộp gửi xuống đĩa.
+      ledger.finish(call.call_id, payload, { persistNow: !socket.connected, volatile: tool?.sensitive === true });
       sendResult(payload);
       // GUI: thao tác đi đường nào (chạy nền hay chuột / phím thật) và trên loại cửa sổ nào — để biết còn bao nhiêu việc phải mượn chuột.
       logActivity({ type: 'tool_call', tool: call.tool, id: call.call_id, success: outcome.ok, error: outcome.error, ms: outcome.duration_ms, ...guiActivity(call, outcome) });
@@ -1444,6 +1463,14 @@ export async function startRemoteClient(options = {}) {
       monitor: payload?.monitor ?? -1,
     };
     if (desktopCast.isActive() && desktopCast.sessionId() !== sessionId) stopDesktopCast('replaced', false);
+    castApprovedViewers.add(String(viewerId));
+    // Trước khi phát: máy chủ mở đường ảnh / thao tác cho người này (người chờ duyệt không nhận được ảnh của phiên đang quay cho người khác).
+    await announceCastConsent(sessionId, viewerId);
+    if (isRemotePaused()) {
+      castApprovedViewers.delete(String(viewerId));
+      emitCastStatus({ session_id: sessionId, viewer_id: viewerId, state: CastState.REFUSED, reason: 'paused' });
+      return;
+    }
     castTouchViewers.add(viewerId, viewerType);
     if (desktopCast.sessionId() === sessionId) {
       clearTimeout(castReconfirmTimer);
@@ -1483,6 +1510,7 @@ export async function startRemoteClient(options = {}) {
     castReconfirmTimer = null;
     if (payload?.viewer_id) {
       castTouchViewers.remove(payload.viewer_id);
+      castApprovedViewers.delete(String(payload.viewer_id));
       desktopWebRtc.close(payload.viewer_id);
       void castFileDrop.close(payload.viewer_id);
       releaseViewerInput(payload.viewer_id);

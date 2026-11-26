@@ -22,6 +22,7 @@ import { measurePath } from './undoStore.mjs';
 import { buildProcessTools, shellCommand } from './processes.mjs';
 import { buildAgentTools, createAgentRunner } from './codingAgents.mjs';
 import { buildLightcodeTools } from './lightcodeAgent.mjs';
+import { buildAccountSyncTools } from './lightcodeAccountSync.mjs';
 import { buildLocalLlmTools, createLocalLlm } from './localLlm.mjs';
 import { buildLlmLoginTools, createLlmLogin } from './localLlmLogin.mjs';
 import { buildCommandAuthEnv, redactAuthText } from './ephemeralAuth.mjs';
@@ -868,7 +869,7 @@ export function buildTools(env) {
     // cài LightCode giữa chừng vẫn nhận được hợp đồng ngay (agent.run tự định vị lại LightCode lúc giao).
     const lightcode = process.platform === 'win32' && !env.noLightcode;
     if (sharedAgents.installed().length || lightcode) tools.push(...buildAgentTools(sharedAgents));
-    if (lightcode) tools.push(...buildLightcodeTools({ onInstalled: env.announceProfile, roots: env.roots }));
+    if (lightcode) tools.push(...buildLightcodeTools({ onInstalled: env.announceProfile, roots: env.roots }), ...buildAccountSyncTools());
   } else if (env.processes && env.runAs && env.localLlm?.memberMode) {
     // Máy tính tổ chức (17/11/2026): thành viên giao việc lập trình chạy bằng agent họ đã đăng nhập (Claude Code / Codex cài sẵn trong image),
     // dưới tài khoản Linux của họ, trong thư mục của họ.
@@ -889,6 +890,8 @@ export function buildTools(env) {
       }
     }
   }
+  // Cloud Computer: đồng bộ đăng nhập AI của thành viên với LightCode headless (chạy dưới `run_as` của vùng, xem lightcodeAccountSync.mjs).
+  if (env.processes && !env.runAs && env.localLlm?.memberMode) tools.push(...buildAccountSyncTools());
   // Lịch chạy định kỳ (Task Scheduler / crontab) — máy cá nhân; máy tính tổ chức không đặt lịch cho thành viên.
   if (env.schedules) tools.push(...buildScheduleTools(env.schedules));
   // Tệp lớn hơn trần socket: HTTP thẳng với vé của BE (chỉ BE gọi).

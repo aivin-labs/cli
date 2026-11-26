@@ -31,7 +31,8 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
   let writeChain = Promise.resolve();
 
   function buildUnsentRows() {
-    const unsent = [...calls.entries()].filter(([, e]) => e.state === CallState.DONE && !e.sent);
+    // `volatile` (kết quả mang đăng nhập AI): chỉ giữ trong bộ nhớ, không bao giờ ghi xuống đĩa.
+    const unsent = [...calls.entries()].filter(([, e]) => e.state === CallState.DONE && !e.sent && !e.volatile);
     return unsent.map(([id, e]) => {
       const payload = payloadBytes(e.payload) <= PERSIST_RESULT_BYTES ? e.payload
         : { call_id: id, ok: false, error: 'Result was too large to keep while offline — run the step again', error_code: 'OUTPUT_TOO_LARGE', duration_ms: e.payload.duration_ms };
@@ -80,7 +81,7 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
   }
 
   function schedulePersist() {
-    const hasUnsent = [...calls.values()].some((e) => e.state === CallState.DONE && !e.sent);
+    const hasUnsent = [...calls.values()].some((e) => e.state === CallState.DONE && !e.sent && !e.volatile);
     if (!hasUnsent) {
       clearPersistTimer();
       try { fs.rmSync(file, { force: true }); } catch { /* bỏ qua */ }
@@ -138,9 +139,9 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
       return null;
     },
     /** Lời gọi xong — kết quả chờ gửi. `persistNow`: ghi xuống đĩa ngay (đang mất kết nối). */
-    finish(callId, payload, { persistNow = false } = {}) {
-      calls.set(callId, { state: CallState.DONE, at: now(), payload, sent: false });
-      if (persistNow) {
+    finish(callId, payload, { persistNow = false, volatile = false } = {}) {
+      calls.set(callId, { state: CallState.DONE, at: now(), payload, sent: false, ...(volatile ? { volatile: true } : {}) });
+      if (persistNow && !volatile) {
         for (const e of calls.values()) if (e.state === CallState.DONE && !e.sent) e.onDisk = true;
         persistSync();
       }
@@ -150,7 +151,10 @@ export function createCallLedger({ file = REMOTE_OUTBOX_FILE, now = () => Date.n
       if (!e || e.state !== CallState.DONE || e.sent) return;
       const wasOnDisk = e.onDisk;
       e.sent = true;
-      e.payload = { call_id: callId, ...pick(e.payload) };
+      // Kết quả volatile đã giao thì bỏ nội dung (lời gọi trùng nhận lại ghi chú, không nhận lại đăng nhập).
+      e.payload = e.volatile
+        ? { call_id: callId, ok: e.payload.ok, duration_ms: e.payload.duration_ms, ...(e.payload.ok ? { result: { note: 'Result already delivered' } } : { error: e.payload.error, error_code: e.payload.error_code }) }
+        : { call_id: callId, ...pick(e.payload) };
       if (wasOnDisk) schedulePersist();
     },
     /** Lời gọi đã xong bị BE gửi lại: đánh dấu chưa gửi, trả kết quả để gửi lần nữa. */
