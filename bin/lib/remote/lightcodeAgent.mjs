@@ -23,6 +23,11 @@ import { DeviceToolError, resolveInRoots } from './sandbox.mjs';
  * không chờ ai bấm. Luật cấm còn được đưa thẳng cho Claude Code (`--settings`); agent khác của LightCode chỉ bị bắt ở bước đo (diff_in_scope).
  */
 
+/** Trần chờ LightCode cấp quyền mở giao diện. */
+const GRANT_TIMEOUT_MS = 15_000;
+/** Mã từ chối của `POST /connector/v1/remote/grant`. */
+const GRANT_REFUSALS = new Set(['not_synced', 'revoked', 'remote_off', 'license_required']);
+
 export const LIGHTCODE_CONNECTOR_FILE = path.join(os.homedir(), '.lightcode', 'connector.json');
 /**
  * Container Cloud Computer: LightCode chạy headless dưới tài khoản daemon `aivin-lc`; connector.json nằm ở thư mục nhà của daemon.
@@ -1508,6 +1513,37 @@ export async function lightcodePreview(args = {}, ctx = {}, deps = {}) {
 }
 
 /** Công cụ LightCode cho danh mục của Planner (máy Windows của một người). */
+/**
+ * Quyền mở giao diện LightCode cho AIVIN (26/11/2026). Người dùng bấm "Sync with AIVIN" trong LightCode là đã đồng ý, nên không hỏi thêm:
+ * LightCode (cửa cục bộ) cấp địa chỉ Truy cập từ xa + token của thiết bị "AIVIN" (gỡ được trong LightCode). LightCode tự kiểm máy đã đồng bộ.
+ * Không ném lỗi: BE cần mã lý do để báo người dùng đúng việc phải làm.
+ */
+export async function lightcodeRemoteGrant(deps = {}) {
+  const refused = (reason) => ({ ok: false, reason });
+  let info;
+  try { info = deps.connector || await (deps.ensure || ensureLightcodeRunning)(deps); } catch { return refused('not_running'); }
+  let res;
+  try {
+    res = await (deps.fetchImpl || globalThis.fetch)(`http://127.0.0.1:${info.port}/connector/v1/remote/grant`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${info.key}`, 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(GRANT_TIMEOUT_MS),
+    });
+  } catch { return refused('not_running'); }
+  // 404 = bản LightCode chưa có cửa cấp quyền.
+  if (res.status === 404) return refused('outdated');
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) return refused(GRANT_REFUSALS.has(body?.code) ? body.code : 'failed');
+  if (typeof body?.url !== 'string' || typeof body?.token !== 'string' || !body.token.startsWith('lcd_')) return refused('failed');
+  return {
+    ok: true, url: body.url, token: body.token,
+    ...(body.host_name ? { host_name: String(body.host_name) } : {}),
+    ...(body.platform ? { platform: String(body.platform) } : {}),
+    ...(body.device_id ? { device_id: String(body.device_id) } : {}),
+  };
+}
+
 export function buildLightcodeTools({ onInstalled, roots } = {}) {
   const install = async (a, c) => {
     const res = await installLightcode(a, c);
@@ -1516,6 +1552,9 @@ export function buildLightcodeTools({ onInstalled, roots } = {}) {
     return res;
   };
   return [
+    // `read_only`: gọi lại chỉ xoay token, và kết quả (có token) không được nhớ xuống đĩa để chống làm trùng.
+    { name: 'lightcode.remote_grant', group: ToolGroup.PROC, read_only: true, internal: true, handler: () => lightcodeRemoteGrant(),
+      description: 'BE-only: address and device token so the owner can open this LightCode inside AIVIN (allowed by "Sync with AIVIN").', input_schema: schema({}) },
     { name: 'lightcode.status', group: ToolGroup.PROC, read_only: true, handler: () => lightcodeStatus(),
       description: 'Is LightCode on this computer (installed / running / version, signed-in AI accounts, can it run jobs)? LightCode is the local execution app Aivin hands coding contracts to (agent "lightcode" of agent.run).',
       input_schema: schema({}) },
