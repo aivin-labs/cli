@@ -288,7 +288,7 @@ test('công cụ: đọc là read_only; lightcode.install & lightcode.deploy lu�
   const tools = buildLightcodeTools();
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
   assert.deepEqual(tools.map((t) => t.name), [
-    'lightcode.status', 'lightcode.install', 'lightcode.worklog', 'lightcode.deploy_hosts', 'lightcode.deploy_info',
+    'lightcode.remote_grant', 'lightcode.status', 'lightcode.install', 'lightcode.worklog', 'lightcode.deploy_hosts', 'lightcode.deploy_info',
     'lightcode.deploy_setup', 'lightcode.deploy', 'lightcode.deploy_reply', 'lightcode.attention', 'lightcode.strategy',
     'lightcode.set_strategy', 'lightcode.metrics', 'lightcode.events', 'lightcode.answer', 'lightcode.preview',
   ]);
