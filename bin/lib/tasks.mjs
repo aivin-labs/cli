@@ -119,19 +119,198 @@ export async function listMyTasks(options) {
   });
 }
 
-export async function getTaskById(id) {
+export function shapeTaskForJson(raw) {
+  const t = (raw?.data && typeof raw.data === 'object' && !Array.isArray(raw.data) ? raw.data : raw) ?? {};
+  const assignId = t.assign_id ? String(t.assign_id) : '';
+  const historyMatch = Array.isArray(t.handler_history)
+    ? [...t.handler_history].reverse().find((h) => h?.member_id && String(h.member_id) === assignId && h?.member_name)
+    : undefined;
+  const assigneeName = t.assignee_name || historyMatch?.member_name || undefined;
+  const assignee = t.assignee || assigneeName || assignId || null;
+  const dueAt = t.due_at ?? t.to_date ?? null;
+  const comments = Array.isArray(t.comments)
+    ? t.comments.map((c) => ({
+        ...c,
+        id: c?.id,
+        author: c?.author || c?.work_agent_name || c?.user_name || c?.user_id || 'Unknown',
+        body: c?.body ?? c?.content ?? '',
+        at: c?.at ?? c?.created_at ?? null,
+      }))
+    : [];
+  const attachments = Array.isArray(t.attachments)
+    ? t.attachments.map((a) => ({
+        ...a,
+        id: a?.id || a?.file_id,
+        name: a?.name,
+        size: a?.size,
+        mime: a?.mime || a?.mime_type,
+      }))
+    : [];
+  return {
+    ...t,
+    id: t.id || t._id,
+    title: t.title ?? '',
+    status: t.status ?? '',
+    priority: t.priority ?? null,
+    assignee,
+    ...(assigneeName ? { assignee_name: assigneeName } : {}),
+    due_at: dueAt,
+    parent_id: t.parent_id ?? null,
+    depends_on: Array.isArray(t.depends_on) ? t.depends_on : [],
+    workflow_step: t.workflow_step ?? t.step ?? null,
+    description: t.description ?? '',
+    comments,
+    attachments,
+  };
+}
+
+const BINARY_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico|avif|mp4|mov|avi|mkv|webm|mp3|wav|ogg|m4a|flac|zip|rar|7z|tar|gz|tgz|exe|dll|so|dylib|bin|iso|dmg|woff2?|ttf|otf)$/i;
+const BINARY_MIME_RE = /^(image|video|audio|font)\/|^application\/(octet-stream|zip|x-zip-compressed|x-rar-compressed|x-7z-compressed|gzip|x-tar|x-msdownload|wasm)$/i;
+
+function isBinaryAttachment(att) {
+  const type = String(att?.type || '').toLowerCase();
+  if (type === 'image' || type === 'video' || type === 'audio') return true;
+  const mime = String(att?.mime || att?.mime_type || '').trim().toLowerCase().split(';')[0];
+  if (mime && BINARY_MIME_RE.test(mime)) return true;
+  const ext = att?.extension ? `.${String(att.extension).replace(/^\./, '')}` : String(att?.name || '');
+  return BINARY_EXT_RE.test(ext);
+}
+
+function cutUtf8Bytes(text, maxBytes = 12_000) {
+  const s = String(text ?? '');
+  const limit = Number.isFinite(Number(maxBytes)) && Number(maxBytes) > 0
+    ? Math.min(200_000, Math.max(64, Math.floor(Number(maxBytes))))
+    : 12_000;
+  const buf = Buffer.from(s, 'utf8');
+  if (buf.length <= limit) return s;
+  let end = limit;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString('utf8');
+}
+
+function stripDocHtml(raw) {
+  const text = typeof raw === 'string' ? raw : raw == null ? '' : JSON.stringify(raw);
+  return text
+    .replace(/<\s*(br|\/p|\/div|\/li|\/tr|\/h[1-6])\s*\/?>/gi, '\n')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n+/g, '\n\n')
+    .trim();
+}
+
+export async function getTaskById(id, options = {}) {
   const serverUrl = missionServerUrl();
+  if (!process.env.API_KEY) {
+    throw new Error(`Not logged in to ${serverUrl} — run \`aivin login\` first.`);
+  }
   const authHeaders = missionAuthHeaders();
 
   let response;
   try {
-    response = await axios.get(`${serverUrl}/task/${id}`, authHeaders);
+    response = await axios.get(`${serverUrl}/task/${encodeURIComponent(id)}`, authHeaders);
   } catch (error) {
+    if (error.response?.status === 401) {
+      throw new Error(`Not logged in to ${serverUrl} (HTTP 401) — run \`aivin login\` first.`, { cause: error });
+    }
     const message = error.response?.data?.message || error.message || error.code || 'Unknown error';
     throw new Error(`Failed to get task: ${message}`, { cause: error });
   }
 
-  console.log(JSON.stringify(response.data ?? {}, null, 2));
+  const shaped = shapeTaskForJson(response.data ?? {});
+  if (options.json) {
+    console.log(JSON.stringify(shaped));
+    return shaped;
+  }
+  console.log(JSON.stringify(shaped, null, 2));
+  return shaped;
+}
+
+export async function getTaskAttachmentText(id, options = {}) {
+  const serverUrl = missionServerUrl();
+  if (!process.env.API_KEY) {
+    throw new Error(`Not logged in to ${serverUrl} — run \`aivin login\` first.`);
+  }
+  const needle = String(options.attachment ?? '').trim();
+  if (!needle) {
+    throw new Error('Usage: aivin task attachment <id> --attachment=<idOrName> [--max-bytes=<n>]');
+  }
+  const maxBytes = Number.isFinite(Number(options.maxBytes)) && Number(options.maxBytes) > 0
+    ? Math.min(200_000, Math.max(64, Math.floor(Number(options.maxBytes))))
+    : 12_000;
+  const authHeaders = missionAuthHeaders();
+
+  try {
+    const res = await axios.get(`${serverUrl}/task/${encodeURIComponent(id)}/attachment`, {
+      ...authHeaders,
+      params: { attachment: needle, max_bytes: maxBytes },
+    });
+    const body = res.data?.data ?? res.data ?? {};
+    if (options.json) {
+      console.log(JSON.stringify(body));
+      return body;
+    }
+    if (body.binary) {
+      const msg = body.message || `Tệp "${body.name || needle}" là tệp nhị phân (${body.mime || 'binary'}), không đọc được dạng chữ.`;
+      console.log(msg);
+      return body;
+    }
+    console.log(cutUtf8Bytes(body.text ?? '', maxBytes));
+    return body;
+  } catch (error) {
+    if (error.response?.status === 401) {
+      throw new Error(`Not logged in to ${serverUrl} (HTTP 401) — run \`aivin login\` first.`, { cause: error });
+    }
+    const i18n = String(error.response?.data?.i18n || '');
+    // Chỉ fallback qua GET /task/:id + GET /fileshare khi máy chủ cũ chưa có route /task/:id/attachment
+    if (error.response?.status !== 404 || i18n.startsWith('TASK.')) {
+      const message = error.response?.data?.message || error.message || error.code || 'Unknown error';
+      throw new Error(`Failed to read task attachment: ${message}`, { cause: error });
+    }
+  }
+
+  // Fallback tương thích máy chủ chưa cập nhật endpoint /task/:id/attachment
+  const taskRes = await axios.get(`${serverUrl}/task/${encodeURIComponent(id)}`, authHeaders);
+  const task = shapeTaskForJson(taskRes.data ?? {});
+  const fromComments = (task.comments || []).flatMap((c) => (Array.isArray(c?.attachments) ? c.attachments : []));
+  const all = [...(task.attachments || []), ...fromComments];
+  const lower = needle.toLowerCase();
+  const att = all.find((a) => String(a?.id ?? '') === needle || String(a?.file_id ?? '') === needle || String(a?.name ?? '') === needle)
+    || all.find((a) => String(a?.id ?? '').toLowerCase() === lower || String(a?.file_id ?? '').toLowerCase() === lower || String(a?.name ?? '').toLowerCase() === lower);
+  if (!att) {
+    throw new Error(`Attachment "${needle}" not found on task ${id}.`);
+  }
+  if (isBinaryAttachment(att)) {
+    const msg = `Tệp "${att.name || needle}" là tệp nhị phân (${att.mime || att.mime_type || att.extension || att.type || 'binary'}), không đọc được dạng chữ.`;
+    if (options.json) console.log(JSON.stringify({ id: att.id || att.file_id, name: att.name, binary: true, text: '', message: msg }));
+    else console.log(msg);
+    return { binary: true, message: msg };
+  }
+  const fileId = att.file_id || (typeof att.url === 'string' && att.url.startsWith('fileshare://') ? att.url.slice('fileshare://'.length) : '');
+  if (fileId && task.workspace_id) {
+    const fileRes = await axios.get(`${serverUrl}/fileshare/${encodeURIComponent(task.workspace_id)}/${encodeURIComponent(fileId)}`, authHeaders);
+    const doc = fileRes.data?.data ?? fileRes.data ?? {};
+    const ext = String(doc.extension || att.extension || '').toLowerCase();
+    const raw = (ext === 'docx' || ext === 'doc' || ext === 'html') ? stripDocHtml(doc.content ?? '') : String(doc.content ?? '');
+    const sliced = cutUtf8Bytes(raw, maxBytes);
+    if (options.json) console.log(JSON.stringify({ id: att.id || fileId, name: att.name || doc.name, binary: false, text: sliced }));
+    else console.log(sliced);
+    return { binary: false, text: sliced };
+  }
+  if (typeof att.text === 'string') {
+    const sliced = cutUtf8Bytes(att.text, maxBytes);
+    if (options.json) console.log(JSON.stringify({ id: att.id, name: att.name, binary: false, text: sliced }));
+    else console.log(sliced);
+    return { binary: false, text: sliced };
+  }
+  const msg = `Tệp "${att.name || needle}" là tệp nhị phân hoặc không có nội dung chữ trực tiếp, không đọc được dạng chữ.`;
+  if (options.json) console.log(JSON.stringify({ id: att.id, name: att.name, binary: true, text: '', message: msg }));
+  else console.log(msg);
+  return { binary: true, message: msg };
 }
 
 export async function updateTaskById(id, options) {

@@ -1157,6 +1157,7 @@ files, inspect projects and the system — only inside the folder you allow.
 aivin remote start --dir D:\code     # first run pairs this computer (device token), then listens for work
 aivin remote do "run the tests of the be project and summarize failures"
 aivin remote devices                  # your paired computers + online state
+aivin remote org-computer [--json]    # your organization's Cloud Computer status (read-only, never turns it on)
 aivin remote pause | resume           # local kill switch - refuses every remote call while paused
 aivin remote unpair [deviceId]        # revoke (token stops working immediately)
 aivin remote memory list|search|add|forget|clear   # on-device memory, plain YAML in ~/.aivin/memory/
@@ -1167,6 +1168,9 @@ aivin remote status | test | logs | reindex | enable | disable | reset-id
 
 - **Device token, not your API key**: pairing (`POST /plugins/device-agent/devices/pair`) gives this machine its own token
   (`~/.aivin/device-credentials.json`, the server only keeps a hash). Revoking a device never touches your API key.
+- **Cloud Computer status**: `org-computer --json` prints one JSON object on stdout — `state` (`unavailable`, `stopped`,
+  `starting`, `online`, `failed`), `online` (boolean) and the other fields the server returns. Exit code 0 even when the state
+  is `unavailable`; not signed in, network errors or a server without the endpoint exit non-zero with the reason on stderr.
 - **Tools per device**: discovered from what is installed (git, ripgrep, node, python, docker…) — `aivin remote status` lists them.
 - **Permissions come from the agent's own rules** (autonomous decisions / needs approval / must not): every step that changes
   something goes through the platform policy gate and may ask you to approve. This computer keeps a hard floor the server cannot
@@ -1493,7 +1497,8 @@ aivin task "Follow up with the customer about their refund request"
 Commands:
   list [options]          List tasks in a project
   mine [options]          List tasks assigned to you in a project
-  get [id]                Get a task by id
+  get [options] [id]      Get a task by id (--json prints one normalized JSON object)
+  attachment [options] [id]  Print the text content of a task attachment
   update [options] [id]   Update a task
   delete [id]             Delete a task
 ```
@@ -1502,10 +1507,22 @@ Commands:
 aivin task list --status todo                          # list open tasks in your first project
 aivin task list --project <id> --assignee <userId>      # filter by project/assignee
 aivin task mine                                          # tasks assigned to you
-aivin task get <id>                                      # full task details (JSON)
+aivin task get <id> --json                               # normalized single-line JSON (title, status, priority, assignee, due_at, comments[], attachments[])
+aivin task attachment <id> --attachment=<idOrName> --max-bytes=12000
 aivin task update <id> --status done                     # move a task to done
 aivin task update <id> --title "New title" --priority high
 aivin task delete <id>
+```
+
+## `aivin store`
+
+Read and save shared LightCode key-value notes in a project store (`GET/POST /datastore/store/*`, fixed source `"lightcode"`). Every key is normalized under the `lightcode/` prefix so LightCode notes never collide with other plugins/agents; there is intentionally no delete command.
+
+```bash
+aivin store get --project=<id> --key=decisions/auth --json
+aivin store set --project=<id> --key=decisions/auth --value="JWT + refresh token" --json
+aivin store list --project=<id> --prefix=lightcode/ --json
+aivin store search --project=<id> --query="JWT" --prefix=lightcode/ --json
 ```
 
 `list`/`mine` are scoped to a single project (the backend's real `/task/:projectId/list` route) -
@@ -1542,6 +1559,7 @@ Commands:
   search [options] [query]     Search the AI Staff marketplace for an agent
   install [options] [query]    Search the marketplace and install an agent into a workspace
   make [options]                Create a brand new AI Staff agent
+  ensure-lightcode [options]   Make sure you have your personal LightCode agent (idempotent)
   publish [options] [agentId]  Publish an agent you own to the marketplace
 ```
 
@@ -1551,11 +1569,16 @@ aivin agent install "customer support"                    # search + pick + inst
 aivin agent install --workspace <id>                      # no query - opens the same interactive picker `aivin do` uses
 aivin agent make --name "Ada" --nickname ada --email ada@example.com --bio "Support triage bot"
 aivin agent publish <agentId>                             # make an agent you own visible in the marketplace
+aivin agent ensure-lightcode --json                      # {"agent_id":"…","name":"…","created":true|false}
 ```
 
 - `install`/`make` default to your personal workspace when `--workspace` is omitted.
 - `make` calls `POST /ai-staff/create`; passing the target workspace at creation time auto-installs
   the new agent there too (no separate `install` call needed).
+- `ensure-lightcode` calls `POST /ai-staff/ensure-lightcode` and is what LightCode runs when you press "Sync with AIVIN".
+  It is non-interactive and idempotent: one personal agent per user (placed in your Personal workspace, private to it);
+  running it again returns the same agent with `created: false`. `--json` prints exactly one object on stdout. Not signed in,
+  network errors, a server without the endpoint (404) or with the feature off (503) exit non-zero with the reason on stderr.
 - `publish` is a two-step platform operation under the hood (`POST /ai-staff/update` with
   `is_published: true`, then `POST /ai-staff/push` to promote the workspace's local copy to the
   shared master) - both scoped to the workspace the agent actually lives/was authored in.

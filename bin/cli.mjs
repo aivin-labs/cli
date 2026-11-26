@@ -73,6 +73,14 @@ import { handoffCreateDoc } from './lib/docHandoff.mjs';
 import { OPEN_WITH_EXTENSIONS, SAFE_DEFAULT_EXTENSIONS, defaultAssociationsXml, openDefaultAppsSettings } from './lib/remote/desktop/fileAssociation.mjs';
 import { showOSNotification } from './lib/remote/notify.mjs';
 import { createMeetingManager, requestMeeting } from './lib/remote/meeting/index.mjs';
+import { fetchOrgComputerStatus } from './lib/remote/orgComputerStatus.mjs';
+import { ensureLightcodeAgent } from './lib/remote/ensureLightcodeAgent.mjs';
+import {
+  projectStoreGetCmd,
+  projectStoreListCmd,
+  projectStoreSearchCmd,
+  projectStoreSetCmd,
+} from './lib/projectStore.mjs';
 import { DEFAULT_CHAT_HOTKEYS, DEFAULT_HOTKEYS, hotkeyCandidates, parseHotkey, probeHotkey } from './lib/remote/mascot/hotkey.mjs';
 import { RESTART_EXIT_CODE, UPDATE_ROLLED_BACK, UpdateStatus, cleanupRetired, downloadRoot, installUpdate, isStandaloneBinary, saveUpdateSettings } from './lib/selfUpdate.mjs';
 import {
@@ -80,6 +88,7 @@ import {
   listTasks,
   listMyTasks,
   getTaskById,
+  getTaskAttachmentText,
   updateTaskById,
   deleteTaskById,
   createTask,
@@ -1501,6 +1510,21 @@ remoteCommand
   });
 
 remoteCommand
+  .command('org-computer')
+  .description("Show your organization's Cloud Computer status (read-only: never turns it on)")
+  .option('--json', 'Print one JSON object (state, online, …) for another program to read')
+  .action(async (options) => {
+    try {
+      const status = await fetchOrgComputerStatus({ serverUrl: missionServerUrl(), apiKey: process.env.API_KEY });
+      if (options.json) return console.log(JSON.stringify(status));
+      const dot = status.online ? chalk.green('● online') : chalk.gray('○ offline');
+      console.log(`${dot}  ${chalk.bold('Cloud Computer')}  ${chalk.gray(status.state)}`);
+    } catch (error) {
+      remoteFail(error);
+    }
+  });
+
+remoteCommand
   .command('unpair [deviceId]')
   .description('Revoke a paired computer (default: this one) - its token stops working immediately')
   .action(async (deviceId) => {
@@ -1952,10 +1976,30 @@ taskCommand
 taskCommand
   .command('get [id]')
   .description('Get a task by id')
-  .action(async (id) => {
+  .option('--json', 'Print one JSON object for another program to read')
+  .action(async (id, options) => {
     try {
-      id = await requireArg(id, { prompt: 'Task id:', usage: 'Usage: aivin task get <id>' });
-      await getTaskById(id);
+      id = await requireArg(id, { prompt: 'Task id:', usage: 'Usage: aivin task get <id> [--json]' });
+      await getTaskById(id, options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+taskCommand
+  .command('attachment [id]')
+  .description('Print the text content of a task attachment (reports clearly if the file is binary)')
+  .option('--attachment <idOrName>', 'Attachment id or file name')
+  .option('--max-bytes <n>', 'Maximum bytes to print (default: 12000)', (v) => parseInt(v, 10))
+  .option('--json', 'Print one JSON object instead of plain text')
+  .action(async (id, options) => {
+    try {
+      id = await requireArg(id, {
+        prompt: 'Task id:',
+        usage: 'Usage: aivin task attachment <id> --attachment=<idOrName> [--max-bytes=<n>]',
+      });
+      await getTaskAttachmentText(id, options);
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);
@@ -2001,6 +2045,78 @@ program
   .action(async (options) => {
     try {
       await pickWorkspaceAndProject(options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+const storeCommand = program
+  .command('store')
+  .description('Read and save shared LightCode key-value notes in a project store (keys always under lightcode/; no delete command)');
+
+storeCommand
+  .command('get')
+  .description('Read one shared note by key from a project store')
+  .option('--project <id>', 'Project id on AIVIN')
+  .option('--workspace <id>', 'Workspace id (optional — auto-resolved from --project)')
+  .option('--key <key>', 'Note key (automatically scoped under lightcode/)')
+  .option('--json', 'Print one JSON object for another program to read')
+  .action(async (options) => {
+    try {
+      await projectStoreGetCmd(options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+storeCommand
+  .command('set')
+  .description('Save or update one shared note by key in a project store')
+  .option('--project <id>', 'Project id on AIVIN')
+  .option('--workspace <id>', 'Workspace id (optional — auto-resolved from --project)')
+  .option('--key <key>', 'Note key (automatically scoped under lightcode/)')
+  .option('--value <value>', 'Note text (up to 8000 characters)')
+  .option('--json', 'Print one JSON object for another program to read')
+  .action(async (options) => {
+    try {
+      await projectStoreSetCmd(options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+storeCommand
+  .command('list')
+  .description('List shared notes under a key prefix in a project store')
+  .option('--project <id>', 'Project id on AIVIN')
+  .option('--workspace <id>', 'Workspace id (optional — auto-resolved from --project)')
+  .option('--prefix <prefix>', 'Key prefix under lightcode/ (default: lightcode/)')
+  .option('--limit <n>', 'Max notes to return (default: 50, max: 100)')
+  .option('--json', 'Print one JSON object for another program to read')
+  .action(async (options) => {
+    try {
+      await projectStoreListCmd(options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+storeCommand
+  .command('search')
+  .description('Search shared notes in a project store by keyword')
+  .option('--project <id>', 'Project id on AIVIN')
+  .option('--workspace <id>', 'Workspace id (optional — auto-resolved from --project)')
+  .option('--query <query>', 'Search words')
+  .option('--prefix <prefix>', 'Key prefix under lightcode/ (default: lightcode/)')
+  .option('--limit <n>', 'Max notes to return (default: 50, max: 100)')
+  .option('--json', 'Print one JSON object for another program to read')
+  .action(async (options) => {
+    try {
+      await projectStoreSearchCmd(options);
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);
@@ -2136,6 +2252,22 @@ agentCommand
       const agent = await createAgent(serverUrl, authHeaders, { ...answers, workspaceId: workspace.id || workspace._id });
       console.log(chalk.green(`✅ Created agent "${agent.nickname || agent.name}"!`));
       if (agent.id) console.log(chalk.gray(`   ID: ${agent.id}`));
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+agentCommand
+  .command('ensure-lightcode')
+  .description('Make sure you have your own personal "LightCode" agent (safe to repeat: never creates a second one)')
+  .option('--json', 'Print one JSON object {agent_id, name, created} for another program to read')
+  .action(async (options) => {
+    try {
+      const agent = await ensureLightcodeAgent({ serverUrl: missionServerUrl(), apiKey: process.env.API_KEY });
+      if (options.json) return console.log(JSON.stringify(agent));
+      console.log(chalk.green(agent.created ? `✅ Created your LightCode agent "${agent.name}"` : `✅ Your LightCode agent "${agent.name}" already exists`));
+      console.log(chalk.gray(`   ID: ${agent.agent_id}`));
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);

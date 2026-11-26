@@ -245,6 +245,31 @@ export function contractBrief(body, contract) {
   return { acceptance, constraints: (sections.get('Nghiệp vụ liên quan') || []).slice(0, 40) };
 }
 
+/** Chữ thay chỗ BE ghi vào `## Vì sao` khi hợp đồng không nêu lý do. */
+const NO_REASON = '(chưa ghi)';
+
+/** argv → một dòng lệnh (phần có khoảng trắng bọc ngoặc kép) — dạng LightCode nhận ở trường `verify`. */
+const commandLine = (argv) => (Array.isArray(argv) ? argv : []).map((part) => {
+  const s = String(part ?? '').trim();
+  return /\s/.test(s) && !/^["'].*["']$/.test(s) ? `"${s}"` : s;
+}).filter(Boolean).join(' ').slice(0, 300);
+
+/**
+ * Phần hợp đồng chỉ phiên Master của LightCode cần thêm (`orchestrate`): lệnh kiểm chứng để Master dựng thành tiêu chí, và lý do kinh doanh
+ * (mục `## Vì sao`). Trả `{ verify, rationale? }`.
+ */
+export function masterBrief(body, contract) {
+  const lines = String(body || '').replace(/\r\n?/g, '\n').split('\n');
+  const start = lines.findIndex((l) => /^##\s+Vì sao\s*$/.test(l.normalize('NFC')));
+  const rest = start < 0 ? [] : lines.slice(start + 1);
+  const end = rest.findIndex((l) => /^#{1,2}\s/.test(l));
+  const why = (end < 0 ? rest : rest.slice(0, end)).join('\n').trim();
+  return {
+    verify: (contract?.verify || []).map((v) => commandLine(v?.argv)).filter(Boolean).slice(0, 12),
+    ...(why && why !== NO_REASON ? { rationale: { insight: why.slice(0, 500) } } : {}),
+  };
+}
+
 /** Các dòng H1..H4 của thân: [{ level, text, line }]. Bỏ qua phần trong khối ```. */
 function headings(lines) {
   const out = [];

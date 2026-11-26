@@ -237,6 +237,17 @@ function slimGit(g) {
   return Object.keys(out).length ? out : undefined;
 }
 
+/** Lý do kinh doanh gửi phiên Master — đúng 4 trường LightCode nhận, cắt độ dài. */
+function normalizeRationale(r) {
+  if (!r || typeof r !== 'object') return undefined;
+  const out = {};
+  for (const [key, max] of [['insight', 500], ['hypothesis', 500], ['success_metric', 300], ['measure_by', 40]]) {
+    const v = typeof r[key] === 'string' ? r[key].trim().slice(0, max) : '';
+    if (v) out[key] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 function normalizeDeliverablesArg(list) {
   if (!Array.isArray(list)) return [];
   const out = [];
@@ -439,6 +450,8 @@ export function spawnLightcodeTurn(argv, opts = {}, deps = {}) {
             ...(detach && job.dependsOn?.length ? { depends_on: job.dependsOn } : {}),
             ...(detach && Number.isInteger(job.maxFixRounds) && job.maxFixRounds > 0 ? { max_fix_rounds: job.maxFixRounds } : {}),
             ...(detach && job.deliverables?.length ? { deliverables: job.deliverables } : {}),
+            ...(detach && job.orchestrate ? { orchestrate: true } : {}),
+            ...(detach && job.rationale ? { rationale: job.rationale } : {}),
             ...(detach ? {
               detach: true, orphan_ms: ORPHAN_MS, on_question: job.clarify ? 'stop' : 'assume',
               ...(job.maxCost > 0 ? { max_cost_usd: job.maxCost } : {}),
@@ -526,7 +539,7 @@ export const LIGHTCODE_ADAPTER = Object.freeze({
   },
   args({
     mode, resume, model, effort, addDirs = [], allowedTools = [], settings, budgetUsd, clarify, provider, acceptance, constraints,
-    verify, clientJobId, goalId, dependsOn, maxFixRounds, deliverables, aiGateway, runAs,
+    verify, clientJobId, goalId, dependsOn, maxFixRounds, deliverables, aiGateway, runAs, orchestrate, rationale,
   }) {
     const deny = settings?.permissions?.deny || [];
     // `provider` = agent bên trong LightCode (claude | codex | gemini…); LightCode tự kiểm — sai tên thì để LightCode chọn.
@@ -534,6 +547,7 @@ export const LIGHTCODE_ADAPTER = Object.freeze({
     const fixRounds = Number.isInteger(Number(maxFixRounds)) ? Math.min(3, Math.max(0, Number(maxFixRounds))) : 0;
     const normDeliverables = normalizeDeliverablesArg(deliverables);
     const gateway = normalizeAiGateway(aiGateway);
+    const why = orchestrate === true ? normalizeRationale(rationale) : undefined;
     // Cloud Computer (cờ bật): thiếu runAs → từ chối, không chạy dưới daemon. Ngoài chế độ đó runAs (nếu có) vẫn được chuyển đi.
     if (lightcodeOrgJobsEnabled() && (runAs === undefined || runAs === null)) {
       throw new DeviceToolError(DeviceErrorCode.INVALID_ARGS, "LightCode on an organisation computer needs the member's account (runAs) — refusing to run under the daemon account");
@@ -554,6 +568,9 @@ export const LIGHTCODE_ADAPTER = Object.freeze({
       ...(normDeliverables.length ? { deliverables: normDeliverables } : {}),
       ...(gateway ? { aiGateway: gateway } : {}),
       ...(member ? { runAs: member } : {}),
+      // Phiên Master: LightCode tự chia việc cho phiên con theo hợp đồng.
+      ...(orchestrate === true ? { orchestrate: true } : {}),
+      ...(why ? { rationale: why } : {}),
     })];
   },
   spawn: (bin, argv, opts) => {
@@ -812,7 +829,22 @@ export async function lightcodeStatus(deps = {}) {
  * Hết hạn mức tạm thời KHÔNG tính: LightCode tự đợi / chuyển tài khoản.
  */
 export async function lightcodeReadiness(deps = {}) {
+  return readinessOf(await lightcodeStatus(deps));
+}
+
+/**
+ * Phần LightCode của lời chào daemon, đọc một lần: `issue` (như `lightcodeReadiness`) + `features` LightCode đang chạy khai
+ * (`master_orchestrate`…, để Aivin biết giao việc kiểu nào). LightCode đang tắt / bản cũ → không có `features`.
+ */
+export async function lightcodeAnnounceState(deps = {}) {
   const st = await lightcodeStatus(deps);
+  const features = Array.isArray(st.features)
+    ? st.features.filter((f) => typeof f === 'string' && f && f.length <= 40).slice(0, 50)
+    : undefined;
+  return { issue: readinessOf(st), ...(features ? { features } : {}) };
+}
+
+function readinessOf(st) {
   if (!st.running || st.protocol === undefined) return null;
   if (st.protocol_ok === false) return 'protocol_mismatch';
   if (st.can_run === false) return 'license_expired';

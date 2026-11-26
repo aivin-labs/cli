@@ -6,7 +6,7 @@ import { execFile, execFileSync, spawn } from 'child_process';
 import { DeviceErrorCode, REMOTE_CONFIG_DIR, ToolGroup } from './constants.mjs';
 import { DeviceToolError, agentEnv, resolveInRoots } from './sandbox.mjs';
 import { accountEnv, withProcessCap } from './multiUser.mjs';
-import { contractBrief, parseContract, parseReport, parseTestCheck, reportTemplate, sha256 } from './agentContract.mjs';
+import { contractBrief, masterBrief, parseContract, parseReport, parseTestCheck, reportTemplate, sha256 } from './agentContract.mjs';
 
 /** Thời gian tối đa cho lượt nhắc agent ghi lại REPORT.md sai khuôn (cùng phiên). */
 const REPORT_REPAIR_MS = 5 * 60_000;
@@ -134,6 +134,16 @@ const invalid = (msg) => new DeviceToolError(DeviceErrorCode.INVALID_ARGS, msg);
 export function gatewayOpt(args, adapter) {
   const gw = args?.aiGateway ?? args?.ai_gateway;
   return adapter?.id === 'lightcode' && gw ? { aiGateway: gw } : {};
+}
+
+/**
+ * Phiên Master (tech lead tự chia việc cho phiên con) — chỉ LightCode, chỉ khi Aivin bật đúng `orchestrate: true`. Job có hợp đồng gửi thêm
+ * lệnh kiểm chứng + lý do (`brief` = masterBrief của hợp đồng); `rationale` Aivin truyền thẳng được ưu tiên.
+ */
+export function masterOpt(args, adapter, brief) {
+  if (adapter?.id !== 'lightcode' || args?.orchestrate !== true) return {};
+  const rationale = args.rationale && typeof args.rationale === 'object' ? args.rationale : brief?.rationale;
+  return { orchestrate: true, ...(brief?.verify?.length ? { verify: brief.verify } : {}), ...(rationale ? { rationale } : {}) };
 }
 
 /** `<dir>/<exe>` của mọi thư mục trong PATH. */
@@ -486,7 +496,7 @@ export function createAgentRunner({
 
   // --- Hồ sơ job trên đĩa: `<jobsDir>/<job>/job.json` (+ CONTRACT.md, TEST_CHECK.md, REPORT.md, evidence.json, logs/ của job có hợp đồng).
   const dirOf = (id) => path.join(jobsDir, id);
-  const RECORD_KEYS = ['id', 'agent', 'status', 'cwd', 'cwdShown', 'mode', 'model', 'session_id', 'last_seq', 'worktree', 'baseCommit', 'isolate', 'fixedWorktree', 'mainStateBefore', 'wallMs', 'contractId', 'contractSha', 'continuedFrom', 'delivery', 'worktreeRemoved', 'reportRepaired', 'progress', 'startedAt', 'endedAt', 'result', 'error'];
+  const RECORD_KEYS = ['id', 'agent', 'status', 'cwd', 'cwdShown', 'mode', 'model', 'session_id', 'last_seq', 'lightcode','worktree', 'baseCommit', 'isolate', 'fixedWorktree', 'mainStateBefore', 'wallMs', 'contractId', 'contractSha', 'continuedFrom', 'delivery', 'worktreeRemoved', 'reportRepaired', 'progress', 'startedAt', 'endedAt', 'result', 'error'];
   function persist(j) {
     try {
       fs.mkdirSync(dirOf(j.id), { recursive: true });
@@ -512,6 +522,8 @@ export function createAgentRunner({
       tools_used: j.tools.slice(sinceTool).slice(-40),
       ...(redactedResult ? { result: redactedResult } : {}),
       ...(j.progress ? { progress: j.progress } : {}),
+      // Mã phiên phía LightCode (phiên Master khi orchestrate) — Aivin dùng để gắn sự kiện `master.status` về đúng việc.
+      ...(j.lightcode?.thread_id ? { lightcode: j.lightcode } : {}),
       ...(j.questions?.length ? { questions: j.questions } : {}),
       ...(j.error ? { error: redact(j.error) } : {}),
       next_text: j.texts.length, next_tool: j.tools.length,
@@ -621,6 +633,7 @@ export function createAgentRunner({
         ...gatewayOpt(args, adapter),
         // Khoán việc: tiêu chí nghiệm thu (khóa) đi theo để LightCode tự đối chiếu và báo `verdict`.
         ...contractBrief(parsed.body, contract),
+        ...masterOpt(args, adapter, masterBrief(parsed.body, contract)),
       },
       wallMs: contract.limits.max_wall_ms,
     };
@@ -652,8 +665,9 @@ export function createAgentRunner({
     if (parsed.ok) return;
     const { adapter, opts, flags, env, bin } = j.respawn;
     let argv;
-    // Nhắc viết lại REPORT.md chỉ sửa tệp báo cáo: không kèm lại acceptance/constraints hay bật clarify thừa cho LightCode.
-    try { argv = agentArgs(adapter, { ...opts, worktree: undefined, resume: fresh ? undefined : j.session_id, acceptance: undefined, constraints: undefined, clarify: false }, flags); } catch { return; }
+    // Nhắc viết lại REPORT.md chỉ sửa tệp báo cáo: không kèm lại acceptance/constraints, phần Master hay bật clarify thừa cho LightCode.
+    const reportOnly = { worktree: undefined, acceptance: undefined, constraints: undefined, orchestrate: undefined, verify: undefined, rationale: undefined, clarify: false };
+    try { argv = agentArgs(adapter, { ...opts, ...reportOnly, resume: fresh ? undefined : j.session_id }, flags); } catch { return; }
     // Agent không nói tiếp phiên được (Codex): phiên mới không thấy khuôn lúc đầu → gửi kèm khuôn mẫu.
     const format = fresh ? `\n\nThe agreed format:\n${reportTemplate({ jobId: j.id, contractId: j.contractId })}` : '';
     const prompt = `${file} is not in the agreed format: ${parsed.errors.slice(0, 8).join('; ')}. Rewrite only REPORT.md, exactly in the ${fresh ? 'format below' : 'format given at the start'} (keep every section heading, even when empty). Do not change any other file.${format}`;
@@ -852,6 +866,7 @@ export function createAgentRunner({
         ...(Number.isInteger(Number(args.max_fix_rounds)) && Number(args.max_fix_rounds) > 0 ? { maxFixRounds: Number(args.max_fix_rounds) } : {}),
         ...(Array.isArray(args.deliverables) && args.deliverables.length ? { deliverables: args.deliverables } : {}),
         ...gatewayOpt(args, adapter),
+        ...masterOpt(args, adapter),
       };
     }
     const session = prev ? (adapter.resumable === false ? 'new' : prev.session_id) : String(args.session || 'new');
@@ -1034,6 +1049,8 @@ export function buildAgentTools(runner) {
         max_fix_rounds: num('agent "lightcode" only: internal quality-check fix rounds inside LightCode (0-3)'),
         deliverables: { type: 'array', description: 'agent "lightcode" only: files the job must leave behind (path string or { path, min_bytes }), checked for existence and valid file format' },
         ai_gateway: { type: 'object', description: 'BE-only, agent "lightcode" only: temporary AI gateway { baseUrl, apiKey, model, expiresAt } for this job (default AIVIN quota); never logged, never passed to other agents' },
+        orchestrate: bool('agent "lightcode" only: run the job as a Master session (tech lead) that splits the work between child sessions and returns one verdict'),
+        rationale: { type: 'object', description: 'agent "lightcode" only, with orchestrate: why this goal matters { insight, hypothesis, success_metric, measure_by } (default with contract: its "## Vì sao" section)' },
         wait_ms: num(`wait for the answer up to this long (default ${DEFAULT_WAIT_MS}, max ${MAX_WAIT_MS})`),
       }) },
     { name: 'agent.status', group: ToolGroup.PROC, read_only: true, handler: (a, c) => runner.status(a, c),

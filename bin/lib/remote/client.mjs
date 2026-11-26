@@ -32,7 +32,7 @@ import { showOSNotification } from './notify.mjs';
 import { createMeetingManager, watchMeetingRequests } from './meeting/index.mjs';
 import { createMediaHost, mediaSupported } from './meeting/recorder.mjs';
 import { createClipboard } from './clipboard.mjs';
-import { lightcodeOrgJobsEnabled, lightcodeReadiness, readHeadlessConnector, startLightcodeEventBridge } from './lightcodeAgent.mjs';
+import { lightcodeAnnounceState, lightcodeOrgJobsEnabled, readHeadlessConnector, startLightcodeEventBridge } from './lightcodeAgent.mjs';
 import { sanitizeAuthEnv } from './ephemeralAuth.mjs';
 import { activeAgentRunner, activeLlmLogin, activeLocalLlm, buildTools, toolMap } from './toolHandlers.mjs';
 import { createLocalLlm } from './localLlm.mjs';
@@ -445,6 +445,8 @@ export async function startRemoteClient(options = {}) {
   let announceProfile = null;
   /** Sự cố LightCode đã báo cho BE ở lần chào gần nhất (null = dùng được / chưa biết) — để chào lại đúng lúc nó đổi. */
   let lightcodeIssueSent = null;
+  /** Danh sách feature LightCode đã báo (chuỗi nối) — bật / nâng bản LightCode sau lần chào thì chào lại. */
+  let lightcodeFeaturesSent = '';
   const applyWorkDir = (dir) => { if (mascotChat) mascotChat.setWorkDir(dir); else earlyWorkDir = dir; };
   /** Chủ máy đồng ý mở thêm thư mục: có hiệu lực ngay (công cụ đọc env.roots lúc gọi), báo BE hồ sơ mới, lưu cho các lần chạy sau. */
   const grantRoot = (dir) => {
@@ -840,8 +842,9 @@ export async function startRemoteClient(options = {}) {
       return;
     }
     if (!activeAgentRunner()?.installed().some((a) => a.id === 'lightcode')) return;
-    const why = await lightcodeReadiness().catch(() => undefined);
-    if (why === undefined || (why || null) === lightcodeIssueSent) return;
+    const state = await lightcodeAnnounceState().catch(() => undefined);
+    if (!state) return;
+    if (state.issue === lightcodeIssueSent && (!state.features || state.features.join() === lightcodeFeaturesSent)) return;
     void announceProfile?.();
   }, LIGHTCODE_WATCH_MS);
   lightcodeWatch.unref?.();
@@ -1016,8 +1019,13 @@ export async function startRemoteClient(options = {}) {
         delete profile.coding_agent_issues;
         lightcodeIssueSent = null;
         if (profile.coding_agents.includes('lightcode')) {
-          const why = await lightcodeReadiness().catch(() => null);
-          if (why) { profile.coding_agent_issues = { lightcode: why }; lightcodeIssueSent = why; }
+          const state = await lightcodeAnnounceState().catch(() => null);
+          if (state?.issue) { profile.coding_agent_issues = { lightcode: state.issue }; lightcodeIssueSent = state.issue; }
+          // LightCode đang tắt → giữ danh sách đã biết (việc đến thì nó được bật lên, tính năng của bản cài không đổi).
+          if (state?.features) { profile.lightcode_features = state.features; lightcodeFeaturesSent = state.features.join(); }
+        } else {
+          delete profile.lightcode_features;
+          lightcodeFeaturesSent = '';
         }
       }
       const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash, inflight: ledger.heldIds() });
