@@ -92,6 +92,20 @@ const read = (file) => { try { return fs.readFileSync(file, 'utf8').trim(); } ca
 // Loi doc lai tu log rieng (--logs-dir) vi khong con bat stdout; cli-release.ps1 cung doc thu muc nay de nhan dien E409.
 const NPM_PUBLISH_LOGS = path.join(os.tmpdir(), 'aivin-cli-npm-publish');
 
+/**
+ * Lan publish truoc cua dung version nay da duoc npm nhan (PUT 202 "being processed") nhung chua hien tren `npm view`.
+ * npmjs.org co the xu ly toi ~1 gio (v1.0.80: ~55 phut). Publish lai luc nay -> E409 "previously staged version"
+ * -> bumpPatchAfterStagedConflict tang patch oan. Gap truong hop nay thi chi cho, khong publish lai.
+ */
+function npmPublishAccepted(ver) {
+  let files = [];
+  try { files = fs.readdirSync(NPM_PUBLISH_LOGS); } catch { return false; }
+  return files.some((f) => {
+    const log = read(path.join(NPM_PUBLISH_LOGS, f));
+    return log.includes(`notice version: ${ver}`) && /PUT 202 \S*registry\.npmjs\.org/.test(log) && /verbose exit 0/.test(log);
+  });
+}
+
 /** npm publish co tuong tac (OTP). Tra ve null khi thanh cong, nguoc lai la noi dung log loi. */
 function npmPublish() {
   fs.rmSync(NPM_PUBLISH_LOGS, { recursive: true, force: true });
@@ -163,6 +177,8 @@ async function publishCurrentVersion({ allowStagedRetry = true } = {}) {
   try { onNpm = execSync(`npm view ${pkg.name}@${pkg.version} version`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* chua co */ }
   if (onNpm === pkg.version) {
     console.log(`${pkg.name}@${pkg.version} da co tren npm - bo qua.`);
+  } else if (npmPublishAccepted(pkg.version)) {
+    console.log(`npm da nhan ${pkg.name}@${pkg.version} (202, dang xu ly - co the toi ~1 gio). Khong publish lai (se bi E409); cho roi kiem tra: npm view ${pkg.name}@${pkg.version} version`);
   } else {
     const errOut = npmPublish();
     if (errOut !== null) {
