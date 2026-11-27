@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
@@ -86,6 +87,24 @@ function bumpPatchAfterStagedConflict() {
 
 const read = (file) => { try { return fs.readFileSync(file, 'utf8').trim(); } catch { return ''; } };
 
+// Tai khoan npm bat 2FA auth-and-writes: npm publish phai hoi OTP / xac thuc web ngay trong cua so publish.bat.
+// npm chi hoi khi stdin/stdout la TTY -> chay voi stdio 'inherit' (truoc day pipe stdout -> khong hoi duoc, v1.0.81 loi).
+// Loi doc lai tu log rieng (--logs-dir) vi khong con bat stdout; cli-release.ps1 cung doc thu muc nay de nhan dien E409.
+const NPM_PUBLISH_LOGS = path.join(os.tmpdir(), 'aivin-cli-npm-publish');
+
+/** npm publish co tuong tac (OTP). Tra ve null khi thanh cong, nguoc lai la noi dung log loi. */
+function npmPublish() {
+  fs.rmSync(NPM_PUBLISH_LOGS, { recursive: true, force: true });
+  fs.mkdirSync(NPM_PUBLISH_LOGS, { recursive: true });
+  try {
+    execSync(`npm publish --logs-dir="${NPM_PUBLISH_LOGS}"`, { stdio: 'inherit' });
+    return null;
+  } catch (e) {
+    const logs = fs.readdirSync(NPM_PUBLISH_LOGS).map((f) => read(path.join(NPM_PUBLISH_LOGS, f))).join('\n');
+    return `${logs}\n${e?.message || ''}`;
+  }
+}
+
 /** Đăng nhập npm trước khi đụng tới deploy; nếu chưa có phiên thì mở luồng login tương tác. */
 function ensureNpmLogin() {
   const whoami = () => {
@@ -145,12 +164,8 @@ async function publishCurrentVersion({ allowStagedRetry = true } = {}) {
   if (onNpm === pkg.version) {
     console.log(`${pkg.name}@${pkg.version} da co tren npm - bo qua.`);
   } else {
-    try {
-      const out = execSync('npm publish 2>&1', { encoding: 'utf8', stdio: ['inherit', 'pipe', 'pipe'] });
-      if (out) process.stdout.write(out);
-    } catch (e) {
-      const errOut = `${e?.stdout || ''}\n${e?.stderr || ''}\n${e?.message || ''}`;
-      if (errOut) process.stderr.write(errOut);
+    const errOut = npmPublish();
+    if (errOut !== null) {
       if (allowStagedRetry && /previously staged version|E409/i.test(errOut)) {
         bumpPatchAfterStagedConflict();
         return publishCurrentVersion({ allowStagedRetry: false });
