@@ -86,5 +86,15 @@ export async function encryptKeyFile(file) {
   fs.writeFileSync(tmp, encryptedPem(key, passphrase), { mode: 0o600, flag: 'wx' });
   // Đọc lại được bằng đúng mật khẩu rồi mới thay tệp cũ.
   createPrivateKey({ key: fs.readFileSync(tmp, 'utf8'), format: 'pem', passphrase });
-  fs.renameSync(tmp, file);
+  await renameWithRetry(tmp, file);
+}
+
+/** Windows: tệp vừa ghi có thể đang bị trình quét virus/indexer giữ vài trăm ms → rename trả EPERM/EBUSY/EACCES; thử lại ngắn (như graceful-fs). */
+async function renameWithRetry(from, to, { attempts = 10, delayMs = 100 } = {}) {
+  for (let i = 1; ; i++) {
+    try { return fs.renameSync(from, to); } catch (e) {
+      if (i >= attempts || !['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) throw e;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
 }
