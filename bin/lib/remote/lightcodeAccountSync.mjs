@@ -12,13 +12,13 @@ import { ensureLightcodeRunning, normalizeRunAs, readHeadlessConnector } from '.
  */
 
 export const ACCOUNT_SYNC_TOOL = 'lightcode.account_sync';
-export const AccountSyncOp = Object.freeze({ LIST: 'list', KEY: 'key', EXPORT: 'export', IMPORT: 'import' });
+export const AccountSyncOp = Object.freeze({ LIST: 'list', KEY: 'key', EXPORT: 'export', IMPORT: 'import', REMOVE: 'remove' });
 const OPS = new Set(Object.values(AccountSyncOp));
 const CALL_TIMEOUT_MS = 30_000;
 /** Mã lỗi LightCode trả (`code`) — các mã khác gộp thành `failed`. */
 const KNOWN_CODES = new Set([
   'local_only', 'not_synced', 'run_as_required', 'not_shared', 'not_signed_in', 'unsupported_provider',
-  'invalid_key', 'key_expired', 'bad_payload', 'license_required', 'member_fs_failed',
+  'invalid_key', 'key_expired', 'bad_payload', 'license_required', 'member_fs_failed', 'not_found', 'not_supported',
 ]);
 
 /** Chỉ những trường hợp đồng cho phép đi tiếp (không chuyển nguyên args của BE). */
@@ -26,6 +26,7 @@ export function bodyFor(op, args = {}) {
   const pick = (...keys) => Object.fromEntries(keys.filter((k) => args[k] !== undefined).map((k) => [k, args[k]]));
   if (op === AccountSyncOp.EXPORT) return pick('account_id', 'provider', 'recipient_key');
   if (op === AccountSyncOp.IMPORT) return { sealed: args.sealed, ...(args.replace === true ? { replace: true } : {}) };
+  if (op === AccountSyncOp.REMOVE) return pick('account_id');
   return {};
 }
 
@@ -68,7 +69,7 @@ export function buildAccountSyncTools() {
   return [
     // `sensitive`: kết quả (khoá + đăng nhập niêm phong) chỉ ở bộ nhớ, không vào hộp gửi trên đĩa. BE không gửi `idem_key` cho công cụ này.
     { name: ACCOUNT_SYNC_TOOL, group: ToolGroup.PROC, internal: true, sensitive: true, handler: (a, _c, env) => lightcodeAccountSync(a, env),
-      description: 'BE-only: copy an AI account login (Claude, Codex, Gemini) between this LightCode and the owner\'s AIVIN Cloud Computer (list, key, export, import).',
+      description: 'BE-only: copy an AI account login (Claude, Codex, Gemini) between this LightCode and the owner\'s AIVIN Cloud Computer (list, key, export, import, remove).',
       input_schema: { type: 'object', properties: {
         op: { type: 'string', enum: [...OPS] },
         account_id: { type: 'string' }, provider: { type: 'string' }, recipient_key: { type: 'object' }, sealed: { type: 'object' }, replace: { type: 'boolean' },

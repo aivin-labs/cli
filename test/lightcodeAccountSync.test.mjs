@@ -53,6 +53,19 @@ test('bodyFor chỉ cho đi các trường đã định', () => {
   assert.deepEqual(bodyFor('import', { sealed: { v: 1 }, replace: true }), { sealed: { v: 1 }, replace: true });
 });
 
+test('remove: chỉ gửi account_id, 404 not_found khác 404 chưa có cửa', async () => {
+  assert.deepEqual(bodyFor('remove', { account_id: 'claude-1', provider: 'claude', evil: 1 }), { account_id: 'claude-1' });
+  const seen = [];
+  const ok = await lightcodeAccountSync({ op: 'remove', account_id: 'claude-1' }, {}, { connector, fetchImpl: answer(200, { ok: true }, seen) });
+  assert.equal(ok.ok, true);
+  assert.equal(seen[0].url, 'http://127.0.0.1:4611/connector/v1/aivin/accounts/remove');
+  assert.deepEqual(seen[0].body, { account_id: 'claude-1' });
+  const gone = await lightcodeAccountSync({ op: 'remove', account_id: 'zzz' }, {}, { connector, fetchImpl: answer(404, { code: 'not_found' }) });
+  assert.deepEqual(gone, { ok: false, reason: 'not_found', status: 404 });
+  assert.equal((await lightcodeAccountSync({ op: 'remove', account_id: 'x' }, {}, { connector, fetchImpl: answer(404, {}) })).reason, 'outdated');
+  assert.equal((await lightcodeAccountSync({ op: 'remove', account_id: 'x' }, memberEnv, { headless: () => connector, fetchImpl: answer(400, { code: 'not_supported' }) })).reason, 'not_supported');
+});
+
 test('công cụ nội bộ + sensitive (không vào danh mục, không ghi đĩa)', () => {
   const [tool] = buildAccountSyncTools();
   assert.equal(tool.name, ACCOUNT_SYNC_TOOL);
