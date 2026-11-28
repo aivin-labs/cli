@@ -118,3 +118,108 @@ export async function waitForCiBuild(tag, {
   }
   throw new Error(`Qua ${Math.round(timeoutMs / 60_000)} phut CI chua xong ${tag} - xem \`gh run list --repo ${repo}\`, roi chay lai publish.bat.`);
 }
+
+/** Job CI publish npm bằng trusted publishing (OIDC, không token, không OTP) - tên job trong `.github/workflows/release.yml`. */
+export const NPM_JOB = 'npm-publish';
+export const CI_JOB_TIMEOUT_MS = 10 * 60_000;
+const CI_JOB_MAX_GH_FAILURES = 6;
+
+/**
+ * Trạng thái 1 job trong lần chạy CI mới nhất của tag: `success` | `failed` (đỏ / bị bỏ qua / huỷ) | `pending` | `missing` (chưa có lần
+ * chạy, hoặc chạy xong mà không có job này - workflow cũ trước khi có job).
+ */
+export function ciJobState(tag, job, { repo, gh }) {
+  const [run] = JSON.parse(gh('run', 'list', '--repo', repo, '--branch', tag, '--limit', '1', '--json', 'databaseId,status'));
+  if (!run) return 'missing';
+  const { jobs = [] } = JSON.parse(gh('run', 'view', String(run.databaseId), '--repo', repo, '--json', 'jobs'));
+  const found = jobs.find((j) => j.name === job);
+  if (!found) return run.status === 'completed' ? 'missing' : 'pending';
+  if (found.status !== 'completed') return 'pending';
+  return found.conclusion === 'success' ? 'success' : 'failed';
+}
+
+/** Chờ job xong (tối đa `timeoutMs`). Hết hạn → `pending`; `gh` lỗi liên tục → `unknown` (nơi gọi tự quyết đường lui). */
+export async function waitForCiJob(tag, job, {
+  repo, gh, sleep, log = console.log, now = Date.now, timeoutMs = CI_JOB_TIMEOUT_MS, pollMs = CI_POLL_MS, maxGhFailures = CI_JOB_MAX_GH_FAILURES,
+}) {
+  const startedAt = now();
+  let ghFailures = 0;
+  let reported = false;
+  for (;;) {
+    let state;
+    try {
+      state = ciJobState(tag, job, { repo, gh });
+      ghFailures = 0;
+    } catch (e) {
+      if (++ghFailures >= maxGhFailures) {
+        log(`Khong hoi duoc job ${job} cua ${tag}: ${e?.message || e}`);
+        return 'unknown';
+      }
+      state = 'pending';
+    }
+    if (state !== 'pending') return state;
+    if (now() - startedAt >= timeoutMs) return 'pending';
+    if (!reported) { log(`Dang cho job ${job} cua ${tag}...`); reported = true; }
+    await sleep(pollMs);
+  }
+}
+
+/** Run + job id của job trong lần chạy CI mới nhất của tag (null nếu chưa có). */
+function ciJobRef(tag, job, { repo, gh }) {
+  const [run] = JSON.parse(gh('run', 'list', '--repo', repo, '--branch', tag, '--limit', '1', '--json', 'databaseId,status'));
+  if (!run) return null;
+  const { jobs = [] } = JSON.parse(gh('run', 'view', String(run.databaseId), '--repo', repo, '--json', 'jobs'));
+  const found = jobs.find((j) => j.name === job);
+  return found ? { runId: run.databaseId, jobId: found.databaseId, status: found.status } : null;
+}
+
+const RERUN_SETTLE_MS = 90_000;
+
+/**
+ * Chạy lại 1 job đã xong (đỏ) của lần chạy CI mới nhất của tag rồi chờ kết quả. Ngay sau `gh run rerun`, `gh run view` có thể vẫn trả
+ * job cũ (đã xong, đỏ) → chờ tới khi job mang id mới / chưa xong rồi mới đọc kết quả, tránh đọc nhầm kết quả lần trước.
+ */
+export async function rerunCiJob(tag, job, {
+  repo, gh, sleep, log = console.log, now = Date.now, pollMs = CI_POLL_MS, settleMs = RERUN_SETTLE_MS, timeoutMs = CI_JOB_TIMEOUT_MS,
+}) {
+  const before = ciJobRef(tag, job, { repo, gh });
+  if (!before) return 'missing';
+  gh('run', 'rerun', String(before.runId), '--repo', repo, '--job', String(before.jobId));
+  const startedAt = now();
+  for (;;) {
+    let cur = null;
+    try { cur = ciJobRef(tag, job, { repo, gh }); } catch { /* gh chập chờn: thử lại */ }
+    if (cur && (cur.jobId !== before.jobId || cur.status !== 'completed')) break;
+    if (now() - startedAt >= settleMs) return 'failed';
+    await sleep(pollMs);
+  }
+  return waitForCiJob(tag, job, { repo, gh, sleep, log, now, pollMs, timeoutMs });
+}
+
+export const NPM_SETUP_WAIT_MS = 20 * 60_000;
+export const NPM_SETUP_RETRY_MS = 2 * 60_000;
+
+/**
+ * Chế độ không người trực (Deploy của LightCode, không có terminal để hỏi OTP): job npm-publish đỏ thường do chưa khai Trusted publisher
+ * trên npmjs.com. Mở trình duyệt tới trang cài đặt gói để người dùng khai, rồi cứ `retryMs` chạy lại job tới khi xanh (tối đa `waitMs`).
+ * Trả về trạng thái cuối của job (`success` = npm đã nhận).
+ */
+export async function waitForNpmTrustedPublisher(tag, job, {
+  repo, gh, sleep, openUrl, settingsUrl, log = console.log, now = Date.now, waitMs = NPM_SETUP_WAIT_MS, retryMs = NPM_SETUP_RETRY_MS, rerunOpts = {},
+}) {
+  log(`Mo trinh duyet: ${settingsUrl}`);
+  log('  -> Dang nhap npm (tai khoan to chuc aivin-labs), Settings -> Trusted publishing -> GitHub Actions:');
+  log(`     owner/repo = ${repo}, workflow = release.yml, environment de trong, TICK "npm publish", bam Save.`);
+  log(`  Script tu chay lai job ${job} moi ${Math.round(retryMs / 60_000)} phut, toi da ${Math.round(waitMs / 60_000)} phut.`);
+  try { openUrl(settingsUrl); } catch (e) { log(`Khong mo duoc trinh duyet (${e?.message || e}) - tu mo link tren.`); }
+  const startedAt = now();
+  let state = 'failed';
+  for (let attempt = 1; ; attempt++) {
+    await sleep(retryMs);
+    log(`Chay lai job ${job} cua ${tag} (lan ${attempt})...`);
+    try { state = await rerunCiJob(tag, job, { repo, gh, sleep, log, now, ...rerunOpts }); } catch (e) { log(`Chay lai job loi: ${e?.message || e}`); state = 'unknown'; }
+    if (state === 'success') return state;
+    if (now() - startedAt >= waitMs) return state;
+    log(`Job ${job}: ${state} - cho them...`);
+  }
+}

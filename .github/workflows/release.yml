@@ -126,3 +126,34 @@ jobs:
           else
             gh release create "$TAG" release/* --title "$TAG" --generate-notes
           fi
+
+  # npm via trusted publishing (OIDC): no token, no OTP - npmjs.com trusts this repo + workflow file (package settings -> Trusted
+  # publishing: aivin-labs/cli, release.yml, "npm publish" allowed). Runs only after `release` (tests on 3 OS + builds green), so npm never
+  # gets a version the feed would not. continue-on-error keeps the run green while the trusted publisher is not configured yet:
+  # release-publish.mjs reads this job's result and falls back to an interactive `npm publish` (OTP) on the signing machine.
+  # The release signing key (get.aivin.vn feed) still never enters CI.
+  npm-publish:
+    needs: [release]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      # No `registry-url`: it writes an .npmrc that reads NODE_AUTH_TOKEN, which overrides the OIDC exchange.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Trusted publishing needs npm >= 11.5.1.
+      - run: npm install -g npm@^11.5.1
+      - name: Publish to npm (skip when this version is already there)
+        shell: bash
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VER="$(node -p "require('./package.json').version")"
+          [ "v$VER" = "$TAG" ] || { echo "Tag $TAG does not match package.json v$VER"; exit 1; }
+          if [ "$(npm view "$NAME@$VER" version 2>/dev/null)" = "$VER" ]; then echo "$NAME@$VER is already on npm - skip."; exit 0; fi
+          npm publish --access public

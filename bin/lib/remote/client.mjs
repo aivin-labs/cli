@@ -445,8 +445,10 @@ export async function startRemoteClient(options = {}) {
   let announceProfile = null;
   /** Sự cố LightCode đã báo cho BE ở lần chào gần nhất (null = dùng được / chưa biết) — để chào lại đúng lúc nó đổi. */
   let lightcodeIssueSent = null;
-  /** Danh sách feature LightCode đã báo (chuỗi nối) — bật / nâng bản LightCode sau lần chào thì chào lại. */
+  /** Danh sách feature / trạng thái complete / providers của LightCode đã báo — bật / đổi cấu hình thì chào lại. */
   let lightcodeFeaturesSent = '';
+  let lightcodeCompleteSent = '';
+  let lightcodeProvidersSent = '';
   const applyWorkDir = (dir) => { if (mascotChat) mascotChat.setWorkDir(dir); else earlyWorkDir = dir; };
   /** Chủ máy đồng ý mở thêm thư mục: có hiệu lực ngay (công cụ đọc env.roots lúc gọi), báo BE hồ sơ mới, lưu cho các lần chạy sau. */
   const grantRoot = (dir) => {
@@ -862,7 +864,14 @@ export async function startRemoteClient(options = {}) {
     if (!activeAgentRunner()?.installed().some((a) => a.id === 'lightcode')) return;
     const state = await lightcodeAnnounceState().catch(() => undefined);
     if (!state) return;
-    if (state.issue === lightcodeIssueSent && (!state.features || state.features.join() === lightcodeFeaturesSent)) return;
+    const nextComplete = state.complete ? JSON.stringify(state.complete) : '';
+    const nextProviders = state.providers ? state.providers.join() : '';
+    if (
+      state.issue === lightcodeIssueSent
+      && (!state.features || state.features.join() === lightcodeFeaturesSent)
+      && nextComplete === lightcodeCompleteSent
+      && nextProviders === lightcodeProvidersSent
+    ) return;
     void announceProfile?.();
   }, LIGHTCODE_WATCH_MS);
   lightcodeWatch.unref?.();
@@ -1036,14 +1045,22 @@ export async function startRemoteClient(options = {}) {
         // LightCode cài rồi mà chưa dùng được (chưa đăng nhập tài khoản AI nào / hết bản quyền) → BE không giao việc cho nó, thay vì thất bại ngay lượt đầu.
         delete profile.coding_agent_issues;
         lightcodeIssueSent = null;
-        if (profile.coding_agents.includes('lightcode')) {
+        if (profile.coding_agents.includes('lightcode') || lightcodeLlmSent) {
           const state = await lightcodeAnnounceState().catch(() => null);
           if (state?.issue) { profile.coding_agent_issues = { lightcode: state.issue }; lightcodeIssueSent = state.issue; }
           // LightCode đang tắt → giữ danh sách đã biết (việc đến thì nó được bật lên, tính năng của bản cài không đổi).
           if (state?.features) { profile.lightcode_features = state.features; lightcodeFeaturesSent = state.features.join(); }
+          if (state?.complete) { profile.lightcode_complete = state.complete; lightcodeCompleteSent = JSON.stringify(state.complete); }
+          else { delete profile.lightcode_complete; lightcodeCompleteSent = ''; }
+          if (state?.providers) { profile.lightcode_providers = state.providers; lightcodeProvidersSent = state.providers.join(); }
+          else { delete profile.lightcode_providers; lightcodeProvidersSent = ''; }
         } else {
           delete profile.lightcode_features;
+          delete profile.lightcode_complete;
+          delete profile.lightcode_providers;
           lightcodeFeaturesSent = '';
+          lightcodeCompleteSent = '';
+          lightcodeProvidersSent = '';
         }
       }
       const hello = await socket.timeout(ACK_TIMEOUT_MS).emitWithAck(DeviceEvent.HELLO, { protocol: PROTOCOL_VERSION, profile, catalog_hash: hash, inflight: ledger.heldIds() });

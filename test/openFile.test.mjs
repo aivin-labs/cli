@@ -5,8 +5,8 @@ import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import http from 'http';
-import { appWindowCommand, driveOpenUrl, fileSha256, indexKey, openText, readOpenIndex, suggestDestinations, writeOpenIndex, OpenFileError, OpenFileFailure } from '../bin/lib/openFile.mjs';
-import { handoffCreateDoc } from '../bin/lib/docHandoff.mjs';
+import { appWindowCommand, driveOpenUrl, fileSha256, indexKey, openLocalFile, OpenDisplay, openText, readOpenIndex, suggestDestinations, writeOpenIndex, OpenFileError, OpenFileFailure } from '../bin/lib/openFile.mjs';
+import { handoffCreateDoc, handoffEditDoc } from '../bin/lib/docHandoff.mjs';
 import { DEFAULT_APPS_URI, associationRegCommands, associationStamp, defaultAssociationsXml, ensureUninstallEntry, openCommand, shareCommand, uninstallEntryCommands, unregisterUninstallEntry, workHereCommand, unregisterFileAssociations, OPEN_WITH_PROGID } from '../bin/lib/remote/desktop/fileAssociation.mjs';
 import { launcherSource } from '../bin/lib/remote/desktop/index.mjs';
 
@@ -131,6 +131,102 @@ test('handoffCreateDoc gửi prompt + grounding + materials sang POST /fileshare
   } finally {
     await new Promise((r) => server.close(r));
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('handoffEditDoc gửi file_id + prompt + grounding + materials sang POST /fileshare/:ws/handoff-edit và trả link Drive', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-handoff-edit-'));
+  const groundingFile = path.join(dir, 'facts.md');
+  const matFile = path.join(dir, 'design-brief.md');
+  fs.writeFileSync(groundingFile, 'Dự án AIVIN Plan, nhấn mạnh kiến trúc đa nền tảng.');
+  fs.writeFileSync(matFile, 'A'.repeat(45_000));
+
+  let received = null;
+  let reqUrl = '';
+  const server = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url.endsWith('/handoff-edit')) {
+      reqUrl = req.url;
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        received = JSON.parse(body);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          file_id: 'file_existing_42',
+          workspace_id: 'ws_sales',
+          folder_id: 'fld_plan',
+          name: 'Deck sản phẩm AIVIN',
+          extension: 'pptx',
+          status: 'editing',
+        }));
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const port = server.address().port;
+    const out = await handoffEditDoc({
+      fileId: 'file_existing_42',
+      prompt: 'Thiết kế lại slide chuyên nghiệp hơn và bổ sung hình minh hoạ',
+      workspace: 'ws_sales',
+      groundingFile,
+      materialFiles: [matFile],
+      lang: 'vi',
+      serverUrl: `http://127.0.0.1:${port}`,
+      webUrl: 'https://app.aivin.vn',
+      auth: { headers: { 'x-api-key': 'test-key' } },
+    });
+    assert.equal(reqUrl, '/fileshare/ws_sales/handoff-edit');
+    assert.equal(received.file_id, 'file_existing_42');
+    assert.match(received.prompt, /Thiết kế lại slide/);
+    assert.match(received.grounding, /AIVIN Plan/);
+    assert.equal(received.materials.length, 1);
+    assert.equal(received.materials[0].name, 'design-brief.md');
+    assert.equal(received.materials[0].content.length, 40_000, 'cắt đúng trần 40.000 ký tự của BE DTO');
+    assert.equal(out.url, 'https://app.aivin.vn/drive?open_file=file_existing_42&workspace_id=ws_sales');
+    assert.equal(out.fileId, 'file_existing_42');
+    assert.equal(out.folderId, 'fld_plan');
+    assert.equal(out.name, 'Deck sản phẩm AIVIN');
+    assert.equal(out.extension, 'pptx');
+    assert.equal(out.status, 'editing');
+  } finally {
+    await new Promise((r) => server.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('handoffEditDoc báo lỗi rõ ràng khi thiếu tham số hoặc BE từ chối (403/409)', async () => {
+  await assert.rejects(
+    handoffEditDoc({ fileId: '', prompt: 'Sửa lại', auth: { headers: { 'x-api-key': 'k' } }, serverUrl: 'http://127.0.0.1:1', workspace: 'ws_1' }),
+    /File ID is required/,
+  );
+  await assert.rejects(
+    handoffEditDoc({ fileId: 'f1', prompt: '   ', auth: { headers: { 'x-api-key': 'k' } }, serverUrl: 'http://127.0.0.1:1', workspace: 'ws_1' }),
+    /Prompt is required/,
+  );
+
+  const server = http.createServer((req, res) => {
+    res.writeHead(403, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ message: 'Bạn không có quyền sửa tệp này.' }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const port = server.address().port;
+    await assert.rejects(
+      handoffEditDoc({
+        fileId: 'f_readonly',
+        prompt: 'Sửa lại',
+        workspace: 'ws_1',
+        serverUrl: `http://127.0.0.1:${port}`,
+        auth: { headers: { 'x-api-key': 'k' } },
+      }),
+      /AIVIN document edit handoff failed: Bạn không có quyền sửa tệp này\./,
+    );
+  } finally {
+    await new Promise((r) => server.close(r));
   }
 });
 
@@ -276,4 +372,105 @@ test('registry thật trên khoá thử: lệnh đọc ra đúng nguyên văn d�
   } finally {
     try { execFileSync('reg', ['delete', root, '/f'], { stdio: 'ignore', windowsHide: true }); } catch { /* đã xoá */ }
   }
+});
+
+/** Máy chủ Drive giả: ghi lại mọi lần tải lên (field multipart) và mô phỏng 404 khi tệp bị xoá. */
+async function withFakeDrive(run, { existing = ['file_1'], overwriteStatus = 200 } = {}) {
+  const uploads = [];
+  const server = http.createServer((req, res) => {
+    const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+    if (req.method === 'GET' && req.url === '/workspace/list') return json(200, [{ id: 'ws_1' }]);
+    const meta = req.url.match(/^\/fileshare\/ws_1\/([^/]+)$/);
+    if (req.method === 'GET' && meta) return existing.includes(meta[1]) ? json(200, { id: meta[1] }) : json(404, { message: 'not found' });
+    if (req.method === 'POST' && req.url === '/fileshare/ws_1/upload') {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks).toString('latin1');
+        const replaceId = body.match(/name="replace_file_id"\r\n\r\n([^\r]+)/)?.[1];
+        uploads.push({ replaceId, hasFolder: body.includes('name="folder_id"'), hasFile: body.includes('name="file"') });
+        if (replaceId && overwriteStatus !== 200) return json(overwriteStatus, { message: 'cannot overwrite' });
+        json(200, { id: replaceId || `file_new_${uploads.length}` });
+      });
+      return;
+    }
+    json(404, {});
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const saved = { API_KEY: process.env.API_KEY, AIVIN_BASE_URL: process.env.AIVIN_BASE_URL, AIVIN_WEB_URL: process.env.AIVIN_WEB_URL };
+  process.env.API_KEY = 'test-key';
+  process.env.AIVIN_BASE_URL = `http://127.0.0.1:${server.address().port}`;
+  process.env.AIVIN_WEB_URL = 'https://web.test';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aivin-replace-'));
+  try {
+    await run({ uploads, dir, indexFile: path.join(dir, 'idx.json'), docPath: path.join(dir, 'a.docx') });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    await new Promise((r) => server.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('--replace: tải lên với replace_file_id (không tạo tệp mới), URL giữ cùng fileId, 2 lần với nội dung đổi = 2 lần ghi đè', async () => {
+  await withFakeDrive(async ({ uploads, indexFile, docPath }) => {
+    const opts = { workspace: 'ws_1', replace: 'file_1', display: OpenDisplay.NONE, indexFile };
+    fs.writeFileSync(docPath, 'v1');
+    const a = await openLocalFile(docPath, opts);
+    fs.writeFileSync(docPath, 'v2');
+    const b = await openLocalFile(docPath, opts);
+    assert.equal(a.url, 'https://web.test/drive?open_file=file_1&workspace_id=ws_1');
+    assert.equal(b.url, a.url);
+    assert.deepEqual(uploads.map((u) => u.replaceId), ['file_1', 'file_1']);
+    assert.ok(uploads.every((u) => u.hasFile));
+  });
+});
+
+test('--replace: nội dung trùng bản đã ghi đè và tệp còn → bỏ qua tải lên, vẫn in cùng URL; chỉ mục chỉ còn hash mới', async () => {
+  await withFakeDrive(async ({ uploads, indexFile, docPath }) => {
+    const opts = { workspace: 'ws_1', replace: 'file_1', display: OpenDisplay.NONE, indexFile };
+    fs.writeFileSync(docPath, 'v1');
+    await openLocalFile(docPath, opts);
+    fs.writeFileSync(docPath, 'v2');
+    await openLocalFile(docPath, opts);
+    const again = await openLocalFile(docPath, opts);
+    assert.equal(uploads.length, 2, 'lần 3 cùng nội dung v2 không tải lại');
+    assert.equal(again.reused, true);
+    assert.equal(again.fileId, 'file_1');
+    const entries = Object.entries(readOpenIndex(indexFile));
+    assert.equal(entries.length, 1);
+    assert.ok(entries[0][0].endsWith(`|${fileSha256(Buffer.from('v2'))}`));
+    assert.equal(entries[0][1].file_id, 'file_1');
+  });
+});
+
+test('--replace bỏ qua --folder (không gửi folder_id)', async () => {
+  await withFakeDrive(async ({ uploads, indexFile, docPath }) => {
+    fs.writeFileSync(docPath, 'x');
+    await openLocalFile(docPath, { workspace: 'ws_1', replace: 'file_1', folder: 'fld', display: OpenDisplay.NONE, indexFile });
+    assert.equal(uploads[0].hasFolder, false);
+  });
+});
+
+test('--replace: BE từ chối (tệp đã xoá / khác họ định dạng) → UPLOAD_FAILED, không tự tạo tệp mới', async () => {
+  for (const status of [404, 403, 400]) {
+    await withFakeDrive(async ({ uploads, indexFile, docPath }) => {
+      fs.writeFileSync(docPath, 'x');
+      await assert.rejects(
+        openLocalFile(docPath, { workspace: 'ws_1', replace: 'file_gone', display: OpenDisplay.NONE, indexFile }),
+        (e) => e instanceof OpenFileFailure && e.code === OpenFileError.UPLOAD_FAILED && /cannot overwrite/.test(e.message),
+      );
+      assert.equal(uploads.length, 1);
+      assert.equal(uploads[0].replaceId, 'file_gone', 'chỉ thử ghi đè, không có lần tải mới nào');
+      assert.deepEqual(readOpenIndex(indexFile), {}, 'không ghi chỉ mục khi lỗi');
+    }, { existing: [], overwriteStatus: status });
+  }
+});
+
+test('không có --replace: hành vi cũ (tệp mới, không gửi replace_file_id)', async () => {
+  await withFakeDrive(async ({ uploads, indexFile, docPath }) => {
+    fs.writeFileSync(docPath, 'x');
+    const r = await openLocalFile(docPath, { workspace: 'ws_1', display: OpenDisplay.NONE, indexFile });
+    assert.equal(uploads[0].replaceId, undefined);
+    assert.equal(r.fileId, 'file_new_1');
+  });
 });

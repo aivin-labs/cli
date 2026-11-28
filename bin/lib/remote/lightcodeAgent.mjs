@@ -799,6 +799,19 @@ export async function installLightcode(args = {}, ctx = {}, deps = {}) {
   };
 }
 
+function cleanCompleteInfo(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out = { enabled: raw.enabled === true };
+  if (Array.isArray(raw.tiers)) {
+    const tiers = [...new Set(raw.tiers.map((t) => String(t || '').trim()).filter(Boolean))].slice(0, 12);
+    if (tiers.length) out.tiers = tiers;
+  }
+  if (Number.isFinite(Number(raw.reserve_percent)) && Number(raw.reserve_percent) >= 0) out.reserve_percent = Number(raw.reserve_percent);
+  if (Number.isInteger(Number(raw.max_concurrent)) && Number(raw.max_concurrent) > 0) out.max_concurrent = Number(raw.max_concurrent);
+  if (typeof raw.images === 'boolean') out.images = raw.images;
+  return out;
+}
+
 export async function lightcodeStatus(deps = {}) {
   const info = deps.connector || readConnector(deps);
   const st = deps.connector
@@ -816,12 +829,14 @@ export async function lightcodeStatus(deps = {}) {
     const body = res.ok ? await res.json() : null;
     const protocol = body?.protocol ?? info.protocol ?? 1;
     const minClient = body?.min_client_protocol ?? 1;
+    const complete = cleanCompleteInfo(body?.complete);
     return {
       ...st, site: LIGHTCODE_SITE, client_protocol: CLIENT_PROTOCOL, protocol, min_client_protocol: minClient,
       protocol_ok: CLIENT_PROTOCOL >= minClient,
       ...(body ? {
         can_run: body.can_run, providers: body.providers, accounts: body.accounts, license: body.license,
         ...(Array.isArray(body.features) ? { features: body.features } : {}),
+        ...(complete ? { complete } : {}),
         ...(body.capacity ? { capacity: body.capacity } : {}),
       } : {}),
     };
@@ -839,14 +854,22 @@ export async function lightcodeReadiness(deps = {}) {
 
 /**
  * Phần LightCode của lời chào daemon, đọc một lần: `issue` (như `lightcodeReadiness`) + `features` LightCode đang chạy khai
- * (`master_orchestrate`…, để Aivin biết giao việc kiểu nào). LightCode đang tắt / bản cũ → không có `features`.
+ * (`master_orchestrate`, `complete_tier`…), kèm `complete` + `providers` để Aivin biết định tuyến theo tier. LightCode đang tắt / bản cũ → không có `features`/`complete`.
  */
 export async function lightcodeAnnounceState(deps = {}) {
   const st = await lightcodeStatus(deps);
   const features = Array.isArray(st.features)
     ? st.features.filter((f) => typeof f === 'string' && f && f.length <= 40).slice(0, 50)
     : undefined;
-  return { issue: readinessOf(st), ...(features ? { features } : {}) };
+  const providers = Array.isArray(st.providers)
+    ? st.providers.map((p) => String(p || '').trim()).filter(Boolean).slice(0, 12)
+    : undefined;
+  return {
+    issue: readinessOf(st),
+    ...(features ? { features } : {}),
+    ...(st.complete ? { complete: st.complete } : {}),
+    ...(providers?.length ? { providers } : {}),
+  };
 }
 
 function readinessOf(st) {

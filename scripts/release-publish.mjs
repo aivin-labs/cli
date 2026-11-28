@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
 import { RELEASE_PUBLIC_KEYS } from '../bin/lib/releaseKeys.mjs';
 import { verifyReleaseSignature } from '../bin/lib/selfUpdate.mjs';
-import { runTool, waitForCiBuild } from './release-ci.mjs';
+import { NPM_JOB, runTool, waitForCiBuild, waitForCiJob, waitForNpmTrustedPublisher } from './release-ci.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(root);
@@ -25,6 +25,14 @@ const site = path.join(root, 'deploy', 'get', 'site');
 const git = (...args) => runTool('git', args);
 const gh = (...args) => runTool('gh', args);
 const sleep = (ms) => new Promise((r) => { setTimeout(r, ms); });
+// Deploy cua LightCode (cli-release.ps1) chay khong co terminal: khong the hoi OTP / mat khau. Ky dung mat khau DPAPI da luu tren may,
+// npm chi qua CI (OIDC); chua khai Trusted publisher thi mo trinh duyet npmjs.com va tu chay lai job CI thay vi publish tu may.
+const UNATTENDED = process.env.AIVIN_RELEASE_UNATTENDED === '1';
+const NPM_SETTINGS_URL = 'https://www.npmjs.com/package/@aivin-labs/cli/access';
+const openUrl = (url) => {
+  if (process.platform === 'win32') execSync(`start "" "${url}"`, { stdio: 'ignore', shell: 'cmd.exe' });
+  else execSync(`${process.platform === 'darwin' ? 'open' : 'xdg-open'} "${url}"`, { stdio: 'ignore' });
+};
 const hasTag = (tag) => { try { git('rev-parse', '--verify', `${tag}^{commit}`); return true; } catch { return false; } };
 
 /** Tu dong chi tren nhanh phat hanh, da theo kip origin: khong bao gio tao ban tu nhanh khac / code chua ai thay. */
@@ -87,6 +95,8 @@ function bumpPatchAfterStagedConflict() {
 
 const read = (file) => { try { return fs.readFileSync(file, 'utf8').trim(); } catch { return ''; } };
 
+// npm duoc publish tu CI (job npm-publish, trusted publishing OIDC - khong token, khong OTP). Chi khi CI chua publish duoc
+// (trusted publisher chua cau hinh tren npmjs.com, job do...) moi publish tu may nay - duong lui duoi day.
 // Tai khoan npm bat 2FA auth-and-writes: npm publish phai hoi OTP / xac thuc web ngay trong cua so publish.bat.
 // npm chi hoi khi stdin/stdout la TTY -> chay voi stdio 'inherit' (truoc day pipe stdout -> khong hoi duoc, v1.0.81 loi).
 // Loi doc lai tu log rieng (--logs-dir) vi khong con bat stdout; cli-release.ps1 cung doc thu muc nay de nhan dien E409.
@@ -119,7 +129,36 @@ function npmPublish() {
   }
 }
 
-/** Đăng nhập npm trước khi đụng tới deploy; nếu chưa có phiên thì mở luồng login tương tác. */
+const NPM_VISIBLE_TRIES = 20;
+const NPM_VISIBLE_POLL_MS = 15_000;
+const npmViewVersion = () => {
+  try { return execSync(`npm view ${pkg.name}@${pkg.version} version`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return ''; }
+};
+
+/**
+ * Job CI npm-publish da publish ban nay chua (cho job xong neu dang chay)? Xanh -> cho `npm view` thay ban moi (toi ~5 phut); van chua thay
+ * thi coi nhu npm dang xu ly, KHONG publish lai. Do / khong co job / khong hoi duoc -> false: publish tu may (can OTP).
+ */
+async function npmPublishedByCi() {
+  const state = await waitForCiJob(version, NPM_JOB, { repo: REPO, gh, sleep });
+  if (state !== 'success') {
+    console.log(`CI chua publish npm cho ${version} (job ${NPM_JOB}: ${state}) - publish tu may nay (can OTP 2FA).`);
+    console.log('  Kiem tra trusted publisher tren npmjs.com: @aivin-labs/cli -> Settings -> Trusted publishing (aivin-labs/cli, release.yml, cho phep npm publish).');
+    return false;
+  }
+  for (let i = 0; i < NPM_VISIBLE_TRIES; i++) {
+    if (npmViewVersion() === pkg.version) {
+      console.log(`CI da publish ${pkg.name}@${pkg.version} len npm (trusted publishing).`);
+      return true;
+    }
+    if (i === 0) console.log(`CI da publish ${pkg.name}@${pkg.version}, cho npm hien ban moi...`);
+    await sleep(NPM_VISIBLE_POLL_MS);
+  }
+  console.log(`CI da publish ${pkg.name}@${pkg.version} nhung npm chua hien (dang xu ly, co the toi ~1 gio). Khong publish lai; kiem tra sau: npm view ${pkg.name}@${pkg.version} version`);
+  return true;
+}
+
+/** Dang nhap npm - chi can khi publish tu may (duong lui khi CI chua publish duoc); chua co phien thi mo npm login tuong tac. */
 function ensureNpmLogin() {
   const whoami = () => {
     // Windows exposes npm as npm.cmd; execFileSync('npm', ...) cannot resolve it there.
@@ -173,13 +212,22 @@ async function publishCurrentVersion({ allowStagedRetry = true } = {}) {
 
   // Buoc 4: Publish len npm (bo qua neu phien ban da co tren npm; loi -> bao loi, khong bao thanh cong)
   console.log('\n[4/4] Xuat ban goi len npm...');
-  let onNpm = '';
-  try { onNpm = execSync(`npm view ${pkg.name}@${pkg.version} version`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* chua co */ }
-  if (onNpm === pkg.version) {
+  if (npmViewVersion() === pkg.version) {
     console.log(`${pkg.name}@${pkg.version} da co tren npm - bo qua.`);
   } else if (npmPublishAccepted(pkg.version)) {
     console.log(`npm da nhan ${pkg.name}@${pkg.version} (202, dang xu ly - co the toi ~1 gio). Khong publish lai (se bi E409); cho roi kiem tra: npm view ${pkg.name}@${pkg.version} version`);
+  } else if (await npmPublishedByCi()) {
+    // CI da publish (OIDC): khong publish lai tu may (se E409).
+  } else if (UNATTENDED) {
+    // Khong co terminal de hoi OTP: hoi nguoi dung qua trinh duyet (khai Trusted publisher), roi chay lai job CI.
+    console.log('::deploy-result summary=Cho ban khai Trusted publisher tren npmjs.com (da mo trinh duyet)');
+    const state = await waitForNpmTrustedPublisher(version, NPM_JOB, { repo: REPO, gh, sleep, openUrl, settingsUrl: NPM_SETTINGS_URL });
+    if (state !== 'success') {
+      throw new Error(`Job ${NPM_JOB} van chua publish duoc npm (${state}). Khai Trusted publisher tren ${NPM_SETTINGS_URL} roi bam Deploy lai - cac buoc da xong se duoc bo qua.`);
+    }
+    console.log(`CI da publish ${pkg.name}@${pkg.version} len npm (trusted publishing).`);
   } else {
+    ensureNpmLogin();
     const errOut = npmPublish();
     if (errOut !== null) {
       if (allowStagedRetry && /previously staged version|E409/i.test(errOut)) {
@@ -198,9 +246,6 @@ try {
   ensureTaggedRelease();
   console.log(`Ma nguon sach, trung tag ${version}.`);
 
-  // Đăng nhập trước khi deploy để không cập nhật site rồi mới phát hiện npm chưa đăng nhập.
-  console.log('\n[0.5/4] Kiem tra dang nhap npm...');
-  ensureNpmLogin();
 
   await publishCurrentVersion();
 

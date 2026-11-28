@@ -42,7 +42,7 @@ export function normalizeProjectStoreKey(raw, { allowPrefixRoot = false } = {}) 
   return full;
 }
 
-function requireProjectAndAuth(options, serverUrl) {
+export function requireProjectAndAuth(options, serverUrl) {
   if (!process.env.API_KEY) {
     throw new Error(`Not logged in to ${serverUrl} — run \`aivin login\` first.`);
   }
@@ -153,6 +153,10 @@ export async function projectStoreListCmd(options = {}) {
   const serverUrl = missionServerUrl();
   const projectId = requireProjectAndAuth(options, serverUrl);
   const prefix = normalizeProjectStoreKey(options.prefix || LIGHTCODE_STORE_PREFIX, { allowPrefixRoot: true });
+  const since = typeof options.since === 'string' ? options.since.trim() : '';
+  if (options.since !== undefined && Number.isNaN(Date.parse(since))) {
+    throw new Error('"--since" must be an ISO date, e.g. 2026-11-27T08:00:00.000Z.');
+  }
   const authHeaders = missionAuthHeaders();
 
   let res;
@@ -165,6 +169,7 @@ export async function projectStoreListCmd(options = {}) {
         prefix,
         ...(options.workspace ? { workspace_id: String(options.workspace).trim() } : {}),
         ...(options.limit ? { limit: Number(options.limit) } : {}),
+        ...(since ? { since } : {}),
       },
     });
   } catch (error) {
@@ -173,7 +178,12 @@ export async function projectStoreListCmd(options = {}) {
 
   const body = res.data?.data ?? res.data ?? {};
   const items = Array.isArray(body.items) ? body.items : [];
+  // Máy chủ cũ bỏ qua `since` (trả mới nhất trước, không có `has_more`): báo lỗi thay vì để client lật trang sai.
+  if (since && typeof body.has_more !== 'boolean') {
+    throw new Error(`${serverUrl} does not support "--since" yet — update the server, or list without it.`);
+  }
   const out = {
+    ...(since ? { has_more: body.has_more } : {}),
     prefix: body.prefix || prefix,
     items,
     count: typeof body.count === 'number' ? body.count : items.length,

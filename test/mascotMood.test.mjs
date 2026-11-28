@@ -92,6 +92,15 @@ test('ui --demo --moods: đi qua đủ 7 nét mặt bằng moodOf; buồn / ngư
   child.emit('close', 0);
 });
 
+test('bong bóng báo chủ động: xuống dòng / dòng trống gộp thành một dòng (không chỉ thấy lời chào), nét mặt vẫn đọc từ bản gốc', async () => {
+  const { m, child } = await readyMascot();
+  const from = child.sent.length;
+  m.alert({ kind: 'needs_you', text: 'Cần bạn: Chào Thắng,\n\nBạn muốn gửi báo cáo cho ai?\n🎉' });
+  const main = child.sent.slice(from).find((c) => c.t === HostCommand.MAIN);
+  assert.equal(main.text, 'Cần bạn: Chào Thắng, Bạn muốn gửi báo cáo cho ai? 🎉');
+  m.close();
+});
+
 test('câu trả lời xin lỗi 😔 → cử chỉ buồn, không nhảy mừng "xong" (về chờ việc); 🎉 → xong + mừng; báo lỗi không xét emoji', async () => {
   const { m, child } = await readyMascot();
   let from = child.sent.length;

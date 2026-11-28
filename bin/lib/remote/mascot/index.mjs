@@ -713,7 +713,10 @@ export function createMascot({
      * Emoji cảm xúc trong câu (mood.mjs) → thêm cử chỉ + nét mặt; buồn / ngượng thì không nhảy mừng "xong", về thẳng chờ việc. Báo lỗi
      * đã có nét mặt riêng (lắc đầu) nên không xét emoji.
      */
-    alert({ kind, text, url: rawUrl } = {}) {
+    alert({ kind, text: rawText, url: rawUrl } = {}) {
+      // Bong bóng chỉ cao 2 dòng: câu trả lời nhiều đoạn ("Chào Thắng,⏎⏎…") xuống dòng/dòng trống sớm → chỉ thấy lời chào. Gộp về một dòng để chữ tràn đủ 2 dòng rồi mới cắt "…".
+      const source = typeof rawText === 'string' ? rawText : '';
+      const text = source.replace(/\s+/g, ' ').trim();
       if (!text) return;
       // Cửa sổ mở link bằng Process.Start khi bấm bong bóng / dòng nhật ký: chỉ http(s).
       const url = safeWebUrl(rawUrl);
@@ -724,7 +727,7 @@ export function createMascot({
         return main(text, url);
       }
       const failed = kind === NotifyKind.FAILED;
-      const mood = failed ? null : moodOf(text);
+      const mood = failed ? null : moodOf(source);
       const react = () => { if (mood) send({ t: HostCommand.GESTURE, ...MOOD_GESTURE[mood] }); };
       if (away) away[failed ? 'failed' : kind === NotifyKind.NEEDS_YOU ? 'needs' : 'done']++;
       log({ status: failed ? LogStatus.FAIL : kind === NotifyKind.NEEDS_YOU ? LogStatus.WARN : LogStatus.OK, title: text, ...(url ? { url } : {}) });

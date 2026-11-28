@@ -107,7 +107,7 @@ test('localLlmMembers: SIGN_IN_PROBES.gemini kiểm tra tệp oauth_creds.json t
   }
 });
 
-test('localLlm LIGHTCODE_LLM: gọi /connector/v1/complete cục bộ, stream delta và bắt LOCAL_LLM_QUOTA', async () => {
+test('localLlm LIGHTCODE_LLM: gọi /connector/v1/complete cục bộ, chuyển tiếp images, bắt LOCAL_LLM_QUOTA và LOCAL_LLM_INVALID_JSON', async () => {
   const fakeLc = {
     id: 'lightcode',
     label: 'LightCode',
@@ -116,11 +116,13 @@ test('localLlm LIGHTCODE_LLM: gọi /connector/v1/complete cục bộ, stream de
     find: () => ({ bin: 'http://127.0.0.1:4190', version: '2.4.0', connector: { port: 4190, key: 'k_local' } }),
   };
   const chunks = [];
+  let sentBody = null;
   const llm = createLocalLlm({
     adapters: [fakeLc],
     fetchImpl: async (url, init) => {
       assert.equal(url, 'http://127.0.0.1:4190/connector/v1/complete');
       assert.equal(init.headers.Authorization, 'Bearer k_local');
+      sentBody = JSON.parse(init.body);
       const ndjson = [
         JSON.stringify({ type: 'delta', text: 'Chào ' }),
         JSON.stringify({ type: 'delta', text: 'bạn' }),
@@ -129,14 +131,23 @@ test('localLlm LIGHTCODE_LLM: gọi /connector/v1/complete cục bộ, stream de
       return { ok: true, status: 200, body: (async function* () { yield ndjson; })() };
     },
   });
-  const out = await llm.complete({ agent: 'lightcode', prompt: 'Hi' }, { onOutput: (c) => chunks.push(c) });
+  const out = await llm.complete({ agent: 'lightcode', prompt: 'Hi', images: ['C:/a.png', '/tmp/b.webp'] }, { onOutput: (_s, c) => chunks.push(c) });
   assert.equal(out.text, 'Chào bạn');
   assert.equal(out.account, 'Acc #2');
+  assert.deepEqual(sentBody.images, ['C:/a.png', '/tmp/b.webp']);
   assert.deepEqual(chunks, ['Chào ', 'bạn']);
+
+  await assert.rejects(llm.complete({ agent: 'lightcode', prompt: 'Hi', images: ['1.png', '2.png', '3.png', '4.png', '5.png'] }), { code: 'INVALID_ARGS' });
 
   const llmQuota = createLocalLlm({
     adapters: [fakeLc],
     fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({ code: 'quota_exceeded', error: 'Out of quota' }) }),
   });
   await assert.rejects(llmQuota.complete({ agent: 'lightcode', prompt: 'Hi' }), (e) => e.code === 'LOCAL_LLM_QUOTA');
+
+  const llmInvalidJson = createLocalLlm({
+    adapters: [fakeLc],
+    fetchImpl: async () => ({ ok: false, status: 502, json: async () => ({ ok: false, code: 'invalid_json', error: 'Invalid JSON output' }) }),
+  });
+  await assert.rejects(llmInvalidJson.complete({ agent: 'lightcode', prompt: 'Hi', json_schema: { type: 'object' } }), (e) => e.code === 'LOCAL_LLM_INVALID_JSON');
 });

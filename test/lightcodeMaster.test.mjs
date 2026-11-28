@@ -164,6 +164,11 @@ test('lightcodeAnnounceState: khai features của LightCode đang chạy; tắt 
     fetchImpl: async () => ({ ok: true, json: async () => ({ protocol: 2, min_client_protocol: 1, can_run: true, accounts: 1, ...body }) }), ...extra,
   });
   assert.deepEqual(await ask({ features: ['masters', 'master_orchestrate', 7, ''] }), { issue: null, features: ['masters', 'master_orchestrate'] });
+  assert.deepEqual(await ask({ features: ['complete_tier', 'complete_images'], complete: { enabled: true, tiers: ['hard'], images: true } }), {
+    issue: null,
+    features: ['complete_tier', 'complete_images'],
+    complete: { enabled: true, tiers: ['hard'], images: true },
+  });
   assert.deepEqual(await ask({ features: ['masters'], accounts: 0 }), { issue: 'no_account', features: ['masters'] });
   assert.deepEqual(await ask({}), { issue: null });
   assert.deepEqual(await ask({ features: ['masters'] }, { alive: () => false }), { issue: null });

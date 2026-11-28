@@ -1525,10 +1525,37 @@ aivin store list --project=<id> --prefix=lightcode/ --json
 aivin store search --project=<id> --query="JWT" --prefix=lightcode/ --json
 ```
 
+`list --since=<ISO>` returns only notes updated after that time, **oldest first** (at most 100), plus `has_more`. While `has_more` is `true`, call again with `--since` set to the last item's `updated_at`. Notes sharing one timestamp are never split across pages, so a page can exceed `--limit` only when more than `--limit` notes share a timestamp. For periodic pulls, step the cursor back a few seconds and de-duplicate by `key`. A server without this feature makes the command fail instead of returning unfiltered notes.
+
+`search` matches by meaning and by keyword across all LightCode notes of the project.
+
 `list`/`mine` are scoped to a single project (the backend's real `/task/:projectId/list` route) -
 `--project` defaults to the resolved workspace's first project, and throws if it has none (a
 Personal workspace typically has no projects; pass `--project <id>` explicitly, or run
 `aivin workspace` to find one).
+
+## `aivin file search`
+
+Find the passages in one project's files that answer a question.
+
+```bash
+aivin file search --project=<id> --query="refund rules" --limit=3 --max-chars=2000 --json
+```
+
+Prints `{query, project_id, items: [{file_id, file_name, chunk_index, text, score}], count}`. `--limit` is 1-20 (default 3). `--max-chars` caps the total passage text, 200-20000 (default 2000). Only files you can view that sit in the project's folder (or carry its project id) are searched.
+
+## `aivin doc`
+
+Hand off business document drafting or redesign/editing to AIVIN Drive's AI authoring engine (Doc, Sheet, Slide, Markdown, plain text) with verified project facts and source materials, and receive the Drive link immediately while AIVIN works in the background.
+
+```bash
+aivin doc create -p "Draft a 3-year business plan" -e docx -n "Business Plan" --grounding-file facts.md --material pricing.md --json
+aivin doc edit <fileId> -p "Redesign the slides with stronger visuals and layout" --workspace <wsId> --grounding-file facts.md --material brief.md --json
+```
+
+- `create` calls `POST /fileshare/:workspaceId/handoff-create` and returns `{url, fileId, workspaceId, folderId?, name, extension, status: "generating"}`.
+- `edit [fileId]` (or `--file <id>`) calls `POST /fileshare/:workspaceId/handoff-edit` and returns `{url, fileId, workspaceId, folderId?, name, extension, status: "editing"}`. Supported formats: `docx`, `doc`, `md`, `txt`, `xlsx`, `xls`, `pptx`, `ppt` (read-only/media formats like PDF/images/video are rejected, as are files currently processing or without edit permission).
+- Both accept `-w/--workspace <id>` (default: personal workspace), `--grounding <text>`, `--grounding-file <path>`, repeatable `--material <path>` (up to 12 UTF-8 files, each capped at 40,000 chars), `--lang <lang>`, `--json`, and `--print`.
 
 ## `aivin workspace`
 

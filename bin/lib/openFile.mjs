@@ -18,6 +18,9 @@ import { mascotLang } from './remote/mascot/strings.mjs';
  *
  * Drive là bản chính sau khi mở: cùng NỘI DUNG (sha256) đã tải trước đó → mở lại đúng tệp Drive cũ (giữ mọi chỉnh sửa trên Aivin);
  * tệp trên máy đã đổi → tải thành tệp Drive MỚI, không ghi đè bản Drive (có thể đã sửa trên Aivin).
+ *
+ * Ngoại lệ có chủ đích: `--replace <fileId>` (27/11/2026) — người gọi (vd agent LightCode sửa .docx rồi mở lại) chỉ định rõ tệp Drive cần ghi đè →
+ * tải lên với `replace_file_id` (BE giữ cùng file ID, thêm 1 phiên bản). Lỗi thì báo lỗi, KHÔNG tự tạo tệp mới.
  */
 
 export const OPEN_INDEX_FILE = path.join(os.homedir(), '.aivin', 'opened-files.json');
@@ -123,10 +126,11 @@ async function driveFileExists(serverUrl, auth, { workspaceId, fileId }) {
   }
 }
 
-async function uploadToDrive(serverUrl, auth, { workspaceId, folderId, name, buffer }, onProgress) {
+async function uploadToDrive(serverUrl, auth, { workspaceId, folderId, name, buffer, replaceFileId }, onProgress) {
   const form = new FormData();
   form.append('file', new Blob([buffer]), name);
-  if (folderId) form.append('folder_id', String(folderId));
+  if (replaceFileId) form.append('replace_file_id', String(replaceFileId));
+  else if (folderId) form.append('folder_id', String(folderId));
   try {
     const res = await axios.post(`${serverUrl}/fileshare/${encodeURIComponent(workspaceId)}/upload`, form, {
       ...auth, maxBodyLength: Infinity, maxContentLength: Infinity, timeout: 10 * 60_000,
@@ -140,6 +144,8 @@ async function uploadToDrive(serverUrl, auth, { workspaceId, folderId, name, buf
     if (onProgress) onProgress(100, 'processing');
     const id = res.data?.id || res.data?._id;
     if (!id) throw new Error('no file id in the upload response');
+    // Ghi đè: giữ nguyên fileId người gọi chỉ định (BE ghi đè cùng ID); nếu BE trả ID khác thì không thể coi là ghi đè.
+    if (replaceFileId && String(id) !== String(replaceFileId)) throw new Error(`overwrite returned a different file id (${id})`);
     return String(id);
   } catch (e) {
     const reason = e?.response?.data?.message || e?.message || e?.code || 'unknown error';
@@ -151,6 +157,23 @@ async function findReusable(serverUrl, auth, { index, key }) {
   const hit = index[key];
   if (!hit?.file_id) return null;
   return (await driveFileExists(serverUrl, auth, { workspaceId: hit.workspace_id, fileId: hit.file_id })) ? hit.file_id : null;
+}
+
+/**
+ * `--replace`: nội dung máy trùng bản đã tải lên chính tệp `fileId` này (chỉ mục) và tệp còn trên Drive → khỏi tải lại.
+ * Tệp không còn (404/403) → trả null để bước ghi đè báo lỗi rõ ràng thay vì lặng lẽ tạo tệp mới.
+ */
+async function findReplaceUnchanged(serverUrl, auth, { index, baseUrl, workspaceId, sha256, fileId }) {
+  const unchanged = Object.entries(index).some(([k, v]) => k.startsWith(`${baseUrl}|${workspaceId}|`) && k.endsWith(`|${sha256}`) && String(v?.file_id) === fileId);
+  if (!unchanged) return null;
+  return (await driveFileExists(serverUrl, auth, { workspaceId, fileId })) ? fileId : null;
+}
+
+/** Sau khi ghi đè, mọi mục chỉ mục cũ trỏ tới tệp này đều ứng với nội dung đã bị thay → bỏ, để mở lại nội dung cũ không nhầm sang bản mới. */
+function dropIndexEntriesOfFile(index, { baseUrl, workspaceId, fileId }) {
+  for (const [k, v] of Object.entries(index)) {
+    if (k.startsWith(`${baseUrl}|${workspaceId}|`) && String(v?.file_id) === fileId) delete index[k];
+  }
 }
 
 /**
@@ -237,20 +260,31 @@ export async function suggestDestinations(filePath, { topic, projectName, worksp
  * Tải (hoặc dùng lại) rồi mở. Trả `{ url, fileId, workspaceId, folderId, reused }`; lỗi → OpenFileFailure.
  * `display`: OpenDisplay — cửa sổ riêng (mặc định), tab thường, hoặc chỉ trả đường dẫn (--print).
  */
-export async function openLocalFile(filePath, { workspace, folder, display: displayMode = OpenDisplay.WINDOW, indexFile = OPEN_INDEX_FILE, onProgress } = {}) {
+export async function openLocalFile(filePath, { workspace, folder, replace, display: displayMode = OpenDisplay.WINDOW, indexFile = OPEN_INDEX_FILE, onProgress } = {}) {
   if (!process.env.API_KEY) throw new OpenFileFailure(OpenFileError.NOT_LOGGED_IN);
   const local = readLocalFile(filePath);
   const serverUrl = missionServerUrl();
   const auth = missionAuthHeaders();
   const ws = await resolveWorkspace(serverUrl, auth, workspace);
   const workspaceId = String(ws.id || ws._id);
-  const folderId = folder ? String(folder).trim() : undefined;
+  const replaceFileId = replace ? String(replace).trim() : undefined;
+  // Ghi đè tệp có sẵn: thư mục do tệp đó quyết định, bỏ qua --folder.
+  const folderId = !replaceFileId && folder ? String(folder).trim() : undefined;
   const sha256 = fileSha256(local.buffer);
   const key = indexKey({ baseUrl: serverUrl, workspaceId, folderId, sha256 });
 
   const index = readOpenIndex(indexFile);
-  const reusedId = await findReusable(serverUrl, auth, { index, key });
-  const fileId = reusedId || await uploadToDrive(serverUrl, auth, { workspaceId, folderId, name: local.name, buffer: local.buffer }, onProgress);
+  const upload = (extra) => uploadToDrive(serverUrl, auth, { workspaceId, folderId, name: local.name, buffer: local.buffer, ...extra }, onProgress);
+  let reusedId;
+  let fileId;
+  if (replaceFileId) {
+    reusedId = await findReplaceUnchanged(serverUrl, auth, { index, baseUrl: serverUrl, workspaceId, sha256, fileId: replaceFileId });
+    fileId = reusedId || await upload({ replaceFileId });
+    dropIndexEntriesOfFile(index, { baseUrl: serverUrl, workspaceId, fileId: replaceFileId });
+  } else {
+    reusedId = await findReusable(serverUrl, auth, { index, key });
+    fileId = reusedId || await upload({});
+  }
 
   index[key] = { file_id: fileId, workspace_id: workspaceId, ...(folderId ? { folder_id: folderId } : {}), name: local.name, path: local.abs, opened_at: new Date().toISOString() };
   try { writeOpenIndex(index, indexFile); } catch { /* chỉ mất lần dùng lại sau */ }

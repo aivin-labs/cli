@@ -45,6 +45,14 @@ const ACP_MAX_USES = 40;
 /** Mã lỗi riêng: agent định dùng công cụ — câu trả lời bị bỏ. */
 export const TOOL_USE_ERROR = 'LOCAL_LLM_TOOL_USE';
 export const QUOTA_ERROR = 'LOCAL_LLM_QUOTA';
+/** LightCode giữ phần hạn mức còn lại cho phiên code của chủ máy (`reason: "reserved"`) → chuyển cloud, không gọi thẳng agent khác trên cùng máy. */
+export const QUOTA_RESERVED_ERROR = 'LOCAL_LLM_QUOTA_RESERVED';
+/** Chủ máy đã tắt `complete` trong LightCode (`code: "disabled"` / HTTP 403) → bỏ qua lightcode, dùng đường cũ. */
+export const LIGHTCODE_DISABLED_ERROR = 'LOCAL_LLM_DISABLED';
+/** LightCode quá số lời gọi đồng thời (`code: "busy"` / HTTP 503) → thử dự phòng, không khoá hạn mức. */
+export const LIGHTCODE_BUSY_ERROR = 'LOCAL_LLM_BUSY';
+/** Model không tạo được JSON khớp `json_schema` kể cả sau lượt tự sửa (`code: "invalid_json"` / HTTP 502) → thử dự phòng/cloud, không khoá hạn mức. */
+export const INVALID_JSON_ERROR = 'LOCAL_LLM_INVALID_JSON';
 /** Agent chưa đăng nhập / phiên đăng nhập hết hạn (máy tính tổ chức: thành viên chưa đăng nhập agent của mình). BE chạy cloud. */
 export const NOT_SIGNED_IN_ERROR = 'LOCAL_LLM_NOT_SIGNED_IN';
 const AUTH_ERROR_RE = /please run \/login|not (?:logged|signed) in|invalid api key|oauth token (?:has )?expired|token (?:has )?(?:expired|been revoked)|authentication_error|401 unauthorized|refresh token/i;
@@ -437,13 +445,51 @@ export function createLocalLlm({
     return { proc, warmStart };
   }
 
+  function cleanLocalImages(raw) {
+    if (raw === undefined || raw === null) return undefined;
+    if (!Array.isArray(raw)) throw invalid('images must be an array of local file paths');
+    if (raw.length > 4) throw invalid('images supports at most 4 files');
+    const out = raw.map((item) => {
+      if (typeof item !== 'string') throw invalid('each image must be a local file path string');
+      const p = item.trim();
+      if (!p || p.length > 1000 || /^(https?:|data:|blob:)/i.test(p)) {
+        throw invalid('each image must be a non-empty local file path');
+      }
+      return p;
+    });
+    return out.length ? out : undefined;
+  }
+
   function validate(args) {
     const adapter = adapterFor(args.agent ? String(args.agent) : '');
     const model = args.model ? String(args.model) : '';
     if (model && !MODEL_RE.test(model)) throw invalid('Bad model name');
     const effort = args.effort ? String(args.effort) : '';
     if (effort && !EFFORTS.includes(effort)) throw invalid(`effort must be one of: ${EFFORTS.join(', ')}`);
-    return { adapter, model, effort };
+    const images = cleanLocalImages(args.images);
+    if (images?.length && adapter.kind !== 'http') {
+      throw invalid('images are only supported via LightCode');
+    }
+    return { adapter, model, effort, images };
+  }
+
+  function throwLightcodeError(body, status) {
+    const code = body?.code;
+    const resetNote = body?.reset_at ? ` (resets at ${body.reset_at})` : '';
+    if (code === 'disabled' || status === 403) {
+      throw failed(body?.error || 'LightCode completion is disabled', LIGHTCODE_DISABLED_ERROR);
+    }
+    if (code === 'busy' || status === 503) {
+      throw failed(body?.error || 'LightCode is busy', LIGHTCODE_BUSY_ERROR);
+    }
+    if (code === 'invalid_json') {
+      throw failed(body?.error || 'LightCode did not return valid JSON matching json_schema', INVALID_JSON_ERROR);
+    }
+    if (code === 'quota_exceeded' || status === 429) {
+      const errCode = body?.reason === 'reserved' ? QUOTA_RESERVED_ERROR : QUOTA_ERROR;
+      throw failed(`${body?.error || 'All LightCode accounts are out of quota'}${resetNote}`, errCode);
+    }
+    throw failed(body?.error || (status ? `LightCode answered ${status}` : 'LightCode completion failed'));
   }
 
   async function completeViaLightcodeHttp(adapter, args, ctx) {
@@ -465,22 +511,18 @@ export function createLocalLlm({
           ...(args.system ? { system: String(args.system) } : {}),
           ...(Array.isArray(args.messages) ? { messages: args.messages } : {}),
           ...(args.json_schema ? { json_schema: args.json_schema } : {}),
-          ...(args.provider ? { provider: String(args.provider) } : {}),
-          ...(args.model && args.model !== 'auto' ? { model: String(args.model) } : {}),
+          ...(Array.isArray(args.images) && args.images.length ? { images: args.images } : {}),
+          ...(args.tier ? { tier: String(args.tier) } : {}),
+          ...(args.provider && args.provider !== 'auto' ? { provider: String(args.provider) } : {}),
           ...(args.effort ? { effort: String(args.effort) } : {}),
           timeout_ms: timeoutMs,
           stream: true,
         }),
         signal: ctrl.signal,
       });
-      if (res.status === 429) {
-        const errBody = await res.json().catch(() => ({}));
-        throw failed(errBody?.error || 'All LightCode accounts are out of quota', QUOTA_ERROR);
-      }
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
-        if (errBody?.code === 'quota_exceeded') throw failed(errBody?.error || 'All LightCode accounts are out of quota', QUOTA_ERROR);
-        throw failed(errBody?.error || `LightCode answered ${res.status}`);
+        throwLightcodeError(errBody, res.status);
       }
       const decoder = new TextDecoder();
       let buf = '';
@@ -495,7 +537,7 @@ export function createLocalLlm({
         if (msg?.type === 'delta' && typeof msg.text === 'string') {
           if (ttft === null) ttft = now() - startedAt;
           accText += msg.text;
-          if (typeof ctx.onOutput === 'function') { try { ctx.onOutput(msg.text); } catch { /* bỏ qua */ } }
+          if (typeof ctx.onOutput === 'function') { try { ctx.onOutput('stdout', msg.text); } catch { /* bỏ qua */ } }
         } else if (msg?.type === 'result') {
           finalMsg = msg;
         }
@@ -512,22 +554,18 @@ export function createLocalLlm({
       } else {
         finalMsg = await res.json().catch(() => null);
       }
-      if (finalMsg && !finalMsg.ok) {
-        if (finalMsg.code === 'quota_exceeded') {
-          const resetNote = finalMsg.reset_at ? ` (resets at ${finalMsg.reset_at})` : '';
-          throw failed(`${finalMsg.error || 'All LightCode accounts are out of quota'}${resetNote}`, QUOTA_ERROR);
-        }
-        throw failed(finalMsg.error || 'LightCode completion failed');
-      }
+      if (finalMsg && !finalMsg.ok) throwLightcodeError(finalMsg);
       const text = typeof finalMsg?.text === 'string' ? finalMsg.text : accText;
       if (!text && finalMsg?.json === undefined) throw failed('LightCode returned an empty answer');
       return {
         text,
         ...(finalMsg?.json !== undefined ? { json: finalMsg.json } : {}),
         agent: 'lightcode',
-        model: finalMsg?.model || args.model || 'auto',
+        model: finalMsg?.model || 'auto',
         ...(finalMsg?.provider ? { provider: finalMsg.provider } : {}),
         ...(finalMsg?.account ? { account: finalMsg.account } : {}),
+        ...(finalMsg?.tier ? { tier: finalMsg.tier } : {}),
+        ...(finalMsg?.profile ? { profile: finalMsg.profile } : {}),
         ...(finalMsg?.usage ? { usage: finalMsg.usage } : {}),
         duration_ms: now() - startedAt,
         ...(ttft !== null ? { ttft_ms: ttft } : {}),
@@ -535,7 +573,7 @@ export function createLocalLlm({
     } catch (e) {
       if (e instanceof DeviceToolError) throw e;
       if (ctx.signal?.aborted) throw failed('Cancelled', DeviceErrorCode.CANCELLED);
-      if (ctrl.signal.aborted) throw failed(`LightCode timed out after ${timeoutMs} ms`, DeviceErrorCode.TIMEOUT);
+      if (ctrl.signal.aborted) throw failed(`LightCode timed out after ${timeoutMs} ms`, DeviceErrorCode.CALL_TIMEOUT);
       throw failed(`LightCode: ${e?.message || e}`);
     } finally {
       clearTimeout(timer);
@@ -544,8 +582,8 @@ export function createLocalLlm({
   }
 
   async function complete(args = {}, ctx = {}) {
-    const { adapter, model, effort } = validate(args);
-    if (adapter.kind === 'http') return completeViaLightcodeHttp(adapter, { ...args, model, effort }, ctx);
+    const { adapter, model, effort, images } = validate(args);
+    if (adapter.kind === 'http') return completeViaLightcodeHttp(adapter, { ...args, model, effort, ...(images?.length ? { images } : {}) }, ctx);
     const account = accountOf(ctx);
     await assertSignedIn(adapter, account);
     const content = renderRequest(args, { withBase: adapter.kind !== 'stream' });
@@ -737,7 +775,9 @@ export function buildLocalLlmTools(llm) {
         system: str('instructions (system prompt) for this request'), prompt: str('the request; or give messages'),
         messages: { type: 'array', description: 'history: [{role: user|assistant, content}] — the last user message is the request when prompt is empty' },
         json_schema: { type: 'object', description: 'JSON Schema the answer must match' },
+        images: { type: 'array', items: { type: 'string' }, description: 'optional local image file paths (max 4, .png/.jpg/.webp/.gif, <=10 MB each; LightCode only)' },
         model: str('model of that agent (claude: opus | sonnet | haiku…; codex: gpt-…; antigravity: gemini-…, effort picks the variant)'),
+        tier: str('nano | light | medium | code | hard | xhard (used when routing via LightCode)'),
         effort: str(EFFORTS.join(' | ')),
         timeout_ms: { type: 'number', description: 'default 180000, max 600000' },
       }) },

@@ -69,7 +69,7 @@ import { DESKTOP_WEBRTC_WORKER_ARG, runDesktopWebRtcWorker } from './lib/remote/
 import { DemoScope, UiResult, showMascotDemo, showMascotUi } from './lib/remote/mascot/ui.mjs';
 import { desktopAppStatus, installDesktopApp, uninstallDesktopApp } from './lib/remote/autoStart.mjs';
 import { OpenDisplay, openFile, openText, suggestDestinations } from './lib/openFile.mjs';
-import { handoffCreateDoc } from './lib/docHandoff.mjs';
+import { handoffCreateDoc, handoffEditDoc } from './lib/docHandoff.mjs';
 import { OPEN_WITH_EXTENSIONS, SAFE_DEFAULT_EXTENSIONS, defaultAssociationsXml, openDefaultAppsSettings } from './lib/remote/desktop/fileAssociation.mjs';
 import { showOSNotification } from './lib/remote/notify.mjs';
 import { createMeetingManager, requestMeeting } from './lib/remote/meeting/index.mjs';
@@ -81,6 +81,7 @@ import {
   projectStoreSearchCmd,
   projectStoreSetCmd,
 } from './lib/projectStore.mjs';
+import { projectFileSearchCmd } from './lib/projectFileSearch.mjs';
 import { DEFAULT_CHAT_HOTKEYS, DEFAULT_HOTKEYS, hotkeyCandidates, parseHotkey, probeHotkey } from './lib/remote/mascot/hotkey.mjs';
 import { RESTART_EXIT_CODE, UPDATE_ROLLED_BACK, UpdateStatus, cleanupRetired, downloadRoot, installUpdate, isStandaloneBinary, saveUpdateSettings } from './lib/selfUpdate.mjs';
 import {
@@ -1192,6 +1193,7 @@ program
   .description('Open files from this computer in your Aivin Drive (uploads once; the same content reopens the same Drive file). Windows: `aivin desktop install` adds "Open with AIVIN Bot" to Explorer.')
   .option('-w, --workspace <id>', 'Workspace to upload into (default: your personal workspace)')
   .option('-f, --folder <id>', 'Folder ID inside the workspace on Aivin Drive')
+  .option('--replace <fileId>', 'Overwrite this existing Drive file (same file ID, adds a version) instead of creating a new one; fails if it is gone or a different format family')
   .option('--suggest', 'Ask Aivin for the best Drive destination suggestions without uploading')
   .option('--topic <text>', 'Short document topic/summary (used with --suggest)')
   .option('--project-name <name>', 'Source project name (used with --suggest)')
@@ -1221,6 +1223,11 @@ program
       }
       return;
     }
+    if (options.replace && files.length !== 1) {
+      console.error(chalk.red('❌'), '--replace overwrites one Drive file, so it takes exactly one local file');
+      process.exitCode = 1;
+      return;
+    }
     // Gọi từ Explorer qua Aivin.exe --open (không có console) → báo bằng thông báo hệ điều hành.
     const toast = process.env.AIVIN_OPEN_UI === 'toast';
     for (const file of files) {
@@ -1244,7 +1251,7 @@ program
           }
         };
         const display = options.print ? OpenDisplay.NONE : options.tab ? OpenDisplay.TAB : OpenDisplay.WINDOW;
-        const res = await openFile(file, { workspace: options.workspace, folder: options.folder, display, onProgress });
+        const res = await openFile(file, { workspace: options.workspace, folder: options.folder, replace: options.replace, display, onProgress });
         console.log(options.print ? res.url : chalk.green(`✅ ${res.name} → ${res.url}${res.reused ? ' (Drive copy reused)' : ''}${res.viewOnly ? ' (view only, not signed in - closes with its window)' : ''}`));
       } catch (error) {
         console.error(chalk.red('❌'), error.message);
@@ -1256,7 +1263,7 @@ program
 
 const docCommand = program
   .command('doc')
-  .description('Hand off business document drafting (docx, xlsx, pptx, md) with source materials to AIVIN Drive');
+  .description('Hand off business document drafting and editing (docx, xlsx, pptx, md) with source materials to AIVIN Drive');
 
 docCommand
   .command('create')
@@ -1291,6 +1298,46 @@ docCommand
         console.log(res.url);
       } else {
         console.log(chalk.green(`✅ Created on AIVIN Drive (${res.status}) → ${res.url}`));
+      }
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exitCode = 1;
+    }
+  });
+
+docCommand
+  .command('edit [fileId]')
+  .description('Edit or redesign an existing document on AIVIN Drive using AIVIN AI authoring engine and return the online link immediately')
+  .requiredOption('-p, --prompt <text>', 'How to revise or redesign the document')
+  .option('--file <id>', 'Existing Drive file ID (alternative to positional <fileId>)')
+  .option('-w, --workspace <id>', 'Workspace ID containing the file (default: personal workspace)')
+  .option('--grounding <text>', 'Inline verified project facts / summary handed off to AIVIN')
+  .option('--grounding-file <path>', 'UTF-8 file containing verified project facts handed off to AIVIN')
+  .option('--material <path>', 'Attach a source material file (repeatable)', (v, prev) => [...prev, v], [])
+  .option('--lang <lang>', 'Preferred document language (e.g. vi, en)')
+  .option('--json', 'Output result as JSON')
+  .option('--print', 'Print only the AIVIN Drive URL')
+  .action(async (fileId, options) => {
+    try {
+      const targetFileId = String(fileId || options.file || '').trim();
+      if (!targetFileId) {
+        throw new Error('File ID is required (pass <fileId> or --file <id>).');
+      }
+      const res = await handoffEditDoc({
+        fileId: targetFileId,
+        prompt: options.prompt,
+        workspace: options.workspace,
+        grounding: options.grounding,
+        groundingFile: options.groundingFile,
+        materialFiles: options.material,
+        lang: options.lang,
+      });
+      if (options.json) {
+        console.log(JSON.stringify(res));
+      } else if (options.print) {
+        console.log(res.url);
+      } else {
+        console.log(chalk.green(`✅ Editing on AIVIN Drive (${res.status}) → ${res.url}`));
       }
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
@@ -2095,6 +2142,7 @@ storeCommand
   .option('--workspace <id>', 'Workspace id (optional — auto-resolved from --project)')
   .option('--prefix <prefix>', 'Key prefix under lightcode/ (default: lightcode/)')
   .option('--limit <n>', 'Max notes to return (default: 50, max: 100)')
+  .option('--since <ISO>', 'Only notes updated after this time, oldest first; the reply adds has_more')
   .option('--json', 'Print one JSON object for another program to read')
   .action(async (options) => {
     try {
@@ -2107,16 +2155,36 @@ storeCommand
 
 storeCommand
   .command('search')
-  .description('Search shared notes in a project store by keyword')
+  .description('Search shared notes in a project store by meaning and keyword')
   .option('--project <id>', 'Project id on AIVIN')
   .option('--workspace <id>', 'Workspace id (optional — auto-resolved from --project)')
-  .option('--query <query>', 'Search words')
+  .option('--query <query>', 'Search words or a question')
   .option('--prefix <prefix>', 'Key prefix under lightcode/ (default: lightcode/)')
   .option('--limit <n>', 'Max notes to return (default: 50, max: 100)')
   .option('--json', 'Print one JSON object for another program to read')
   .action(async (options) => {
     try {
       await projectStoreSearchCmd(options);
+    } catch (error) {
+      console.error(chalk.red('❌'), error.message);
+      process.exit(1);
+    }
+  });
+
+const fileCommand = program.command('file').description('Search the files of an AIVIN project');
+
+fileCommand
+  .command('search')
+  .description('Find the passages in a project\'s files that answer a question (search by meaning)')
+  .option('--project <id>', 'Project id on AIVIN')
+  .option('--workspace <id>', 'Workspace id (optional — auto-resolved from --project)')
+  .option('--query <query>', 'Question or search words')
+  .option('--limit <n>', 'Max passages to return (default: 3, max: 20)')
+  .option('--max-chars <n>', 'Max total characters of passage text (default: 2000, 200-20000)')
+  .option('--json', 'Print one JSON object for another program to read')
+  .action(async (options) => {
+    try {
+      await projectFileSearchCmd(options);
     } catch (error) {
       console.error(chalk.red('❌'), error.message);
       process.exit(1);
